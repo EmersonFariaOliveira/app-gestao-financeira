@@ -20,11 +20,11 @@
 
 **Purpose**: projeto Next.js inicializado com as fronteiras de camadas prontas
 
-- [ ] T001 [desenvolvedor-ui] Inicializar projeto Next.js 15 + TypeScript strict + Tailwind CSS 4 (App Router) na raiz do repo, preservando docs/, specs/, .specify/, .claude/ e o .gitignore existente (conferir que data/, backups/ e docs/samples/ seguem ignorados)
-- [ ] T002 [P] [arquiteto-dados] Instalar e configurar Prisma com provider sqlite: prisma/schema.prisma inicial vazio, .env com DATABASE_URL="file:./data/app.db", script "prisma" no package.json
-- [ ] T003 [P] [calculista-aporte] Configurar Vitest (vitest.config.ts com alias @/, cobertura v8) e scripts "test"/"test:watch" no package.json
-- [ ] T004 [P] [desenvolvedor-ui] Configurar regras ESLint no-restricted-imports do isolamento de camadas (research.md R7): src/core/** proíbe @prisma/*, next/*, fs, path, src/db, src/services, src/parser, src/app; src/parser/** proíbe @prisma/*, next/*, src/db, src/services; src/app/** proíbe src/db direto
-- [ ] T005 [desenvolvedor-ui] Criar esqueleto de pastas do plan.md: src/core/motor/, src/core/money/, src/parser/, src/services/, src/db/, src/app/actions/, src/components/, tests/motor/, tests/parser/, tests/services/
+- [X] T001 [desenvolvedor-ui] Inicializar projeto Next.js 15 + TypeScript strict + Tailwind CSS 4 (App Router) na raiz do repo, preservando docs/, specs/, .specify/, .claude/ e o .gitignore existente (conferir que data/, backups/ e docs/samples/ seguem ignorados)
+- [X] T002 [P] [arquiteto-dados] Instalar e configurar Prisma com provider sqlite: prisma/schema.prisma inicial vazio, .env com DATABASE_URL="file:./data/app.db", script "prisma" no package.json
+- [X] T003 [P] [calculista-aporte] Configurar Vitest (vitest.config.ts com alias @/, cobertura v8) e scripts "test"/"test:watch" no package.json
+- [X] T004 [P] [desenvolvedor-ui] Configurar regras ESLint no-restricted-imports do isolamento de camadas (research.md R7): src/core/** proíbe @prisma/*, next/*, fs, path, src/db, src/services, src/parser, src/app; src/parser/** proíbe @prisma/*, next/*, src/db, src/services; src/app/** proíbe src/db direto
+- [X] T005 [desenvolvedor-ui] Criar esqueleto de pastas do plan.md: src/core/motor/, src/core/money/, src/parser/, src/services/, src/db/, src/app/actions/, src/components/, tests/motor/, tests/parser/, tests/services/
 
 ---
 
@@ -34,14 +34,14 @@
 
 **⚠️ CRITICAL**: nenhuma user story começa antes desta fase terminar
 
-- [ ] T006 [arquiteto-dados] Escrever prisma/schema.prisma completo por data-model.md: alvo, ativo_mapeado, sessao_import, posicao, aporte, dividendo, config — sem enums, sem listas escalares, dinheiro em *_centavos Int, percentuais em *_bps Int, índice (mes_referencia, status)
-- [ ] T007 [arquiteto-dados] Gerar migration inicial (prisma migrate dev) e editar o SQL para adicionar CHECK (status IN ('VIGENTE','SUBSTITUIDO')) em sessao_import (research.md R12)
-- [ ] T008 [P] [arquiteto-dados] Criar singleton do Prisma Client em src/db/client.ts
-- [ ] T009 [P] [calculista-aporte] Implementar src/core/money/index.ts: parse string decimal→centavos sem float (aceitando ponto e vírgula decimal), format centavos→"R$ 1.234,56", helpers de bps (research.md R4/R5) — módulo puro
-- [ ] T010 [P] [calculista-aporte] Testes de src/core/money em tests/core/money.test.ts: "1234.56"→123456, "1.15"→115, vírgula brasileira, truncamento/pad de casas, formato inválido ⇒ erro, ida-e-volta exata
-- [ ] T011 [arquiteto-dados] Implementar src/services/config-service.ts: get/set chave-valor JSON com defaults (banda_tolerancia_bps=150, aporte_minimo_centavos=50000, retencao_backups=12)
-- [ ] T012 [P] [desenvolvedor-ui] Criar shell do app: src/app/layout.tsx com navegação para as 8 telas (Dashboard, Import, Vínculos, Alvos, Aporte, Dividendos, Histórico, Configurações) e componentes shadcn/ui base copiados para src/components/
-- [ ] T013 [arquiteto-dados] Criar prisma/seed.ts com dados sintéticos (alvos vigentes somando 10000 bps, sessão de import VIGENTE com posições consolidáveis, vínculos completos, 1 ativo fora-da-carteira) — habilita teste independente de US1 sem US2–US4 prontas
+- [X] T006 [arquiteto-dados] Escrever prisma/schema.prisma completo por data-model.md: alvo, ativo_mapeado, sessao_import, posicao, aporte, dividendo, config — sem enums, sem listas escalares, dinheiro em *_centavos Int, percentuais em *_bps Int, índice (mes_referencia, status)
+- [X] T007 [arquiteto-dados] Gerar migration inicial (prisma migrate dev) e editar o SQL para adicionar CHECK (status IN ('VIGENTE','SUBSTITUIDO')) em sessao_import (research.md R12)
+- [X] T008 [P] [arquiteto-dados] Criar singleton do Prisma Client em src/db/client.ts
+- [X] T009 [P] [calculista-aporte] Implementar src/core/money/index.ts: parse string decimal→centavos sem float (aceitando ponto e vírgula decimal), format centavos→"R$ 1.234,56", helpers de bps (research.md R4/R5) — módulo puro
+- [X] T010 [P] [calculista-aporte] Testes de src/core/money em tests/core/money.test.ts: "1234.56"→123456, "1.15"→115, vírgula brasileira, truncamento/pad de casas, formato inválido ⇒ erro, ida-e-volta exata
+- [X] T011 [arquiteto-dados] Implementar src/services/config-service.ts: get/set chave-valor JSON com defaults (banda_tolerancia_bps=150, aporte_minimo_centavos=50000, retencao_backups=12)
+- [X] T012 [P] [desenvolvedor-ui] Criar shell do app: src/app/layout.tsx com navegação para as 8 telas (Dashboard, Import, Vínculos, Alvos, Aporte, Dividendos, Histórico, Configurações) e componentes shadcn/ui base copiados para src/components/
+- [X] T013 [arquiteto-dados] Criar prisma/seed.ts com dados sintéticos (alvos vigentes somando 10000 bps, sessão de import VIGENTE com posições consolidáveis, vínculos completos, 1 ativo fora-da-carteira) — habilita teste independente de US1 sem US2–US4 prontas
 
 **Checkpoint**: `npx prisma migrate dev && npx prisma db seed` funciona; `npm test` roda money verde; app abre com navegação
 
@@ -55,25 +55,25 @@
 
 ### Tests for User Story 1 (escrever PRIMEIRO — devem FALHAR antes da implementação)
 
-- [ ] T014 [P] [US1] [calculista-aporte] Definir tipos do motor em src/core/motor/types.ts exatamente como contracts/motor.md (EntradaMotor, ResultadoMotor, ItemFila, LinhaDivisao, etc.)
-- [ ] T015 [P] [US1] [calculista-aporte] Testes regra 1+4 (déficit; exclusão fora-da-carteira da base) em tests/motor/deficit.test.ts — inclui déficit negativo ignorado e patrimonioBase sem fora-da-carteira
-- [ ] T016 [P] [US1] [calculista-aporte] Testes regra 2 (fila por déficit desc, desempate por bps desc e nome — determinismo) em tests/motor/fila.test.ts
-- [ ] T017 [P] [US1] [calculista-aporte] Testes regras 3+5 (cascata, transbordo proporcional com resto ao topo, mínimo por transação realocado, aporte < mínimo ⇒ tudo no topo, 100% transbordo quando sem déficits) em tests/motor/divisao.test.ts
-- [ ] T018 [P] [US1] [calculista-aporte] Testes regra 6 (veto: linha zerada, valor fixado parcial, redistribuição pelas mesmas regras, soma exata) em tests/motor/redistribuicao.test.ts
-- [ ] T019 [P] [US1] [calculista-aporte] Testes regra 7 (lote B3: cotas inteiras, troco para renda fixa com maior déficit, troco registrado sem renda fixa, EXTERIOR/renda fixa isentos) em tests/motor/arredondamento.test.ts
-- [ ] T020 [P] [US1] [calculista-aporte] Testes de invariantes (Σ divisão + troco = valor exato ao centavo em TODOS os cenários; nenhuma linha 0<v<mínimo; pureza/determinismo; simulação "depois" coerente) em tests/motor/invariantes.test.ts
+- [X] T014 [P] [US1] [calculista-aporte] Definir tipos do motor em src/core/motor/types.ts exatamente como contracts/motor.md (EntradaMotor, ResultadoMotor, ItemFila, LinhaDivisao, etc.)
+- [X] T015 [P] [US1] [calculista-aporte] Testes regra 1+4 (déficit; exclusão fora-da-carteira da base) em tests/motor/deficit.test.ts — inclui déficit negativo ignorado e patrimonioBase sem fora-da-carteira
+- [X] T016 [P] [US1] [calculista-aporte] Testes regra 2 (fila por déficit desc, desempate por bps desc e nome — determinismo) em tests/motor/fila.test.ts
+- [X] T017 [P] [US1] [calculista-aporte] Testes regras 3+5 (cascata, transbordo proporcional com resto ao topo, mínimo por transação realocado, aporte < mínimo ⇒ tudo no topo, 100% transbordo quando sem déficits) em tests/motor/divisao.test.ts
+- [X] T018 [P] [US1] [calculista-aporte] Testes regra 6 (veto: linha zerada, valor fixado parcial, redistribuição pelas mesmas regras, soma exata) em tests/motor/redistribuicao.test.ts
+- [X] T019 [P] [US1] [calculista-aporte] Testes regra 7 (lote B3: cotas inteiras, troco para renda fixa com maior déficit, troco registrado sem renda fixa, EXTERIOR/renda fixa isentos) em tests/motor/arredondamento.test.ts
+- [X] T020 [P] [US1] [calculista-aporte] Testes de invariantes (Σ divisão + troco = valor exato ao centavo em TODOS os cenários; nenhuma linha 0<v<mínimo; pureza/determinismo; simulação "depois" coerente) em tests/motor/invariantes.test.ts
 
 ### Implementation for User Story 1
 
-- [ ] T021 [US1] [calculista-aporte] Implementar src/core/motor/deficit.ts (regras 1 e 4: consolidação por alvo, patrimonioBase, déficit em aritmética inteira bps)
-- [ ] T022 [US1] [calculista-aporte] Implementar src/core/motor/fila.ts (regra 2 com desempate determinístico)
-- [ ] T023 [US1] [calculista-aporte] Implementar src/core/motor/divisao.ts (regras 3, 5 e 6: cascata, transbordo proporcional, mínimo, ajustesUsuario com redistribuição)
-- [ ] T024 [US1] [calculista-aporte] Implementar src/core/motor/arredondamento.ts (regra 7 com exceções) e src/core/motor/simulacao.ts (alocação antes/depois em bps)
-- [ ] T025 [US1] [calculista-aporte] Compor calcularAporte(input) em src/core/motor/index.ts e deixar TODOS os testes de tests/motor/ verdes
-- [ ] T026 [US1] [arquiteto-dados] Implementar src/services/aporte-service.ts: montar EntradaMotor da sessão VIGENTE (consolidar posições por chave, mapear vínculos, excluir fora-da-carteira, derivar rendaFixa e cotações B3 por tipo_grupo/quantidade — research.md R6), bloquear com pendências, ofertar dividendos disponíveis + troco anterior (R10); registrarAporte em transação (cria aporte + seta aporte_id nos dividendos incluídos; NUNCA escreve em posicao — regra 9)
-- [ ] T027 [US1] [arquiteto-dados] Testes de integração de aporte-service com SQLite temporário em tests/services/aporte-service.test.ts: bloqueio por pendência, amarração permanente à sessão do cálculo após substituição, posições inalteradas após registro, aporte_minimo lembrado na config
-- [ ] T028 [US1] [desenvolvedor-ui] Implementar server actions em src/app/actions/aporte.ts (prepararCalculadora, calcular, registrarAporte) conforme contracts/server-actions.md — sem lógica de negócio
-- [ ] T029 [US1] [desenvolvedor-ui] Implementar a tela /aporte em src/app/aporte/page.tsx + componentes: input do valor + mínimo lembrado, opção de incluir dividendos/troco, fila com déficits, linhas editáveis com redistribuição, cotas + destino do troco visíveis, simulação do "depois", botão "registrar como executado", estado bloqueado com link para /vinculos
+- [X] T021 [US1] [calculista-aporte] Implementar src/core/motor/deficit.ts (regras 1 e 4: consolidação por alvo, patrimonioBase, déficit em aritmética inteira bps)
+- [X] T022 [US1] [calculista-aporte] Implementar src/core/motor/fila.ts (regra 2 com desempate determinístico)
+- [X] T023 [US1] [calculista-aporte] Implementar src/core/motor/divisao.ts (regras 3, 5 e 6: cascata, transbordo proporcional, mínimo, ajustesUsuario com redistribuição)
+- [X] T024 [US1] [calculista-aporte] Implementar src/core/motor/arredondamento.ts (regra 7 com exceções) e src/core/motor/simulacao.ts (alocação antes/depois em bps)
+- [X] T025 [US1] [calculista-aporte] Compor calcularAporte(input) em src/core/motor/index.ts e deixar TODOS os testes de tests/motor/ verdes
+- [X] T026 [US1] [arquiteto-dados] Implementar src/services/aporte-service.ts: montar EntradaMotor da sessão VIGENTE (consolidar posições por chave, mapear vínculos, excluir fora-da-carteira, derivar rendaFixa e cotações B3 por tipo_grupo/quantidade — research.md R6), bloquear com pendências, ofertar dividendos disponíveis + troco anterior (R10); registrarAporte em transação (cria aporte + seta aporte_id nos dividendos incluídos; NUNCA escreve em posicao — regra 9)
+- [X] T027 [US1] [arquiteto-dados] Testes de integração de aporte-service com SQLite temporário em tests/services/aporte-service.test.ts: bloqueio por pendência, amarração permanente à sessão do cálculo após substituição, posições inalteradas após registro, aporte_minimo lembrado na config
+- [X] T028 [US1] [desenvolvedor-ui] Implementar server actions em src/app/actions/aporte.ts (prepararCalculadora, calcular, registrarAporte) conforme contracts/server-actions.md — sem lógica de negócio
+- [X] T029 [US1] [desenvolvedor-ui] Implementar a tela /aporte em src/app/aporte/page.tsx + componentes: input do valor + mínimo lembrado, opção de incluir dividendos/troco, fila com déficits, linhas editáveis com redistribuição, cotas + destino do troco visíveis, simulação do "depois", botão "registrar como executado", estado bloqueado com link para /vinculos
 
 **Checkpoint**: MVP — com seed, o ritual "digitar valor → ajustar → registrar" funciona de ponta a ponta; suíte do motor verde e independente de banco
 
@@ -87,19 +87,19 @@
 
 ### Tests for User Story 2 (escrever PRIMEIRO — devem FALHAR antes da implementação)
 
-- [ ] T030 [P] [US2] [especialista-csv] Definir tipos do parser em src/parser/types.ts exatamente como contracts/parser.md (ArquivoImport, ResultadoParse, PosicaoParseada, ErroParse com linha/coluna)
-- [ ] T031 [P] [US2] [especialista-csv] Testes sintéticos de erro em tests/parser/erros.test.ts: coluna-chave faltante (erro em linha 1 com nome da coluna), "Patrimônio Hoje" null/não-numérico/negativo, arquivo vazio, só cabeçalho, com e sem BOM, todos os erros coletados (nunca parcial)
-- [ ] T032 [P] [US2] [especialista-csv] Testes com fixtures reais em tests/parser/samples.test.ts: docs/samples/Itaú.csv, Nubank.csv, Avenue.csv com golden values (totais em centavos, contagem de ativos, EXTERIOR fracionado com tipoAtivoInternacional) — **skip com aviso se os arquivos não existirem** (são dados reais gitignored)
-- [ ] T033 [P] [US2] [especialista-csv] Testes de extrairInstituicao em tests/parser/instituicao.test.ts: "..._Itaú.csv"→"Itaú", "Nubank.csv"→"Nubank", nome vazio ⇒ erro
+- [X] T030 [P] [US2] [especialista-csv] Definir tipos do parser em src/parser/types.ts exatamente como contracts/parser.md (ArquivoImport, ResultadoParse, PosicaoParseada, ErroParse com linha/coluna)
+- [X] T031 [P] [US2] [especialista-csv] Testes sintéticos de erro em tests/parser/erros.test.ts: coluna-chave faltante (erro em linha 1 com nome da coluna), "Patrimônio Hoje" null/não-numérico/negativo, arquivo vazio, só cabeçalho, com e sem BOM, todos os erros coletados (nunca parcial)
+- [X] T032 [P] [US2] [especialista-csv] Testes com fixtures reais em tests/parser/samples.test.ts: docs/samples/Itaú.csv, Nubank.csv, Avenue.csv com golden values (totais em centavos, contagem de ativos, EXTERIOR fracionado com tipoAtivoInternacional) — **skip com aviso se os arquivos não existirem** (são dados reais gitignored)
+- [X] T033 [P] [US2] [especialista-csv] Testes de extrairInstituicao em tests/parser/instituicao.test.ts: "..._Itaú.csv"→"Itaú", "Nubank.csv"→"Nubank", nome vazio ⇒ erro
 
 ### Implementation for User Story 2
 
-- [ ] T034 [US2] [especialista-csv] Implementar src/parser/mycapital.ts e src/parser/instituicao.ts: BOM, separador ';', cabeçalho estrito, null literal, conversão a centavos via src/core/money, string opaca em tipoGrupo/tipoAtivoInternacional, dataMaisRecente — deixar tests/parser/ verde
-- [ ] T035 [P] [US2] [arquiteto-dados] Implementar src/services/backup-service.ts: VACUUM INTO 'backups/app-YYYY-MM-DD.db' (sufixo -2, -3… no mesmo dia) + retenção configurável (research.md R8)
-- [ ] T036 [US2] [arquiteto-dados] Implementar src/services/import-service.ts: previewImport (parse em memória, mes_referencia proposto por data_export — R9, aviso de substituição, instituições faltantes vs. sessão anterior, diff novos/sumidos/variações grandes) e confirmarImport (backup ANTES → transação: sessão VIGENTE + posições + ativo_mapeado pendentes para chaves novas + anterior do mês → SUBSTITUIDO; exige confirmação explícita se faltou instituição)
-- [ ] T037 [US2] [arquiteto-dados] Testes de integração de import-service em tests/services/import-service.test.ts: re-import mesmo mês (anterior preservada como SUBSTITUIDO, uma VIGENTE por mês), mes_referencia editado no preview respeitado, instituição faltante sem confirmação ⇒ recusa, backup criado antes, consolidação por chave em instituições diferentes, erro de parse ⇒ nada persiste
-- [ ] T038 [US2] [desenvolvedor-ui] Implementar server actions em src/app/actions/import.ts (previewImport com FormData/File[], confirmarImport) conforme contracts/server-actions.md
-- [ ] T039 [US2] [desenvolvedor-ui] Implementar a tela /import em src/app/import/page.tsx: drag-and-drop multi-arquivo, preview (totais, qtd ativos, data das cotações, mês editável), aviso de substituição, aviso forte + confirmação explícita de instituição faltante, diff, erros de parse com linha/coluna
+- [X] T034 [US2] [especialista-csv] Implementar src/parser/mycapital.ts e src/parser/instituicao.ts: BOM, separador ';', cabeçalho estrito, null literal, conversão a centavos via src/core/money, string opaca em tipoGrupo/tipoAtivoInternacional, dataMaisRecente — deixar tests/parser/ verde
+- [X] T035 [P] [US2] [arquiteto-dados] Implementar src/services/backup-service.ts: VACUUM INTO 'backups/app-YYYY-MM-DD.db' (sufixo -2, -3… no mesmo dia) + retenção configurável (research.md R8)
+- [X] T036 [US2] [arquiteto-dados] Implementar src/services/import-service.ts: previewImport (parse em memória, mes_referencia proposto por data_export — R9, aviso de substituição, instituições faltantes vs. sessão anterior, diff novos/sumidos/variações grandes) e confirmarImport (backup ANTES → transação: sessão VIGENTE + posições + ativo_mapeado pendentes para chaves novas + anterior do mês → SUBSTITUIDO; exige confirmação explícita se faltou instituição)
+- [X] T037 [US2] [arquiteto-dados] Testes de integração de import-service em tests/services/import-service.test.ts: re-import mesmo mês (anterior preservada como SUBSTITUIDO, uma VIGENTE por mês), mes_referencia editado no preview respeitado, instituição faltante sem confirmação ⇒ recusa, backup criado antes, consolidação por chave em instituições diferentes, erro de parse ⇒ nada persiste
+- [X] T038 [US2] [desenvolvedor-ui] Implementar server actions em src/app/actions/import.ts (previewImport com FormData/File[], confirmarImport) conforme contracts/server-actions.md
+- [X] T039 [US2] [desenvolvedor-ui] Implementar a tela /import em src/app/import/page.tsx: drag-and-drop multi-arquivo, preview (totais, qtd ativos, data das cotações, mês editável), aviso de substituição, aviso forte + confirmação explícita de instituição faltante, diff, erros de parse com linha/coluna
 
 **Checkpoint**: import real de ponta a ponta; com US1, o ritual completo já roda com dados reais (vínculos ainda via seed/manual)
 
@@ -111,11 +111,11 @@
 
 **Independent Test**: importar CSV com ativo inédito ⇒ pendência sinalizada, três opções oferecidas, escolha memorizada, calculadora desbloqueia só ao zerar pendências.
 
-- [ ] T040 [US3] [arquiteto-dados] Implementar src/services/mapeamento-service.ts: listar (pendentes/vinculados/fora-da-carteira), vincular a alvo existente, criar alvo na hora na vigência aberta, marcar fora-da-carteira (exclusão mútua com alvo_id), contarPendencias
-- [ ] T041 [P] [US3] [arquiteto-dados] Testes de mapeamento em tests/services/mapeamento-service.test.ts: memorização entre imports (mesma chave não vira pendência de novo), mudança de grafia ⇒ nova pendência, invariante alvo_id ⊕ fora_da_carteira, N-para-1
-- [ ] T042 [US3] [desenvolvedor-ui] Implementar server actions em src/app/actions/vinculos.ts (listarVinculos, vincularAtivo nas três formas)
-- [ ] T043 [US3] [desenvolvedor-ui] Implementar a tela /vinculos em src/app/vinculos/page.tsx: lista chave do export → dropdown de alvos + criar alvo + fora-da-carteira; acessível também para revisão/correção
-- [ ] T044 [US3] [desenvolvedor-ui] Integrar o bloqueio ponta a ponta: /aporte exibe estado bloqueado com as pendências e link para /vinculos; após resolver, desbloqueia sem passo extra (SC-008)
+- [X] T040 [US3] [arquiteto-dados] Implementar src/services/mapeamento-service.ts: listar (pendentes/vinculados/fora-da-carteira), vincular a alvo existente, criar alvo na hora na vigência aberta, marcar fora-da-carteira (exclusão mútua com alvo_id), contarPendencias
+- [X] T041 [P] [US3] [arquiteto-dados] Testes de mapeamento em tests/services/mapeamento-service.test.ts: memorização entre imports (mesma chave não vira pendência de novo), mudança de grafia ⇒ nova pendência, invariante alvo_id ⊕ fora_da_carteira, N-para-1
+- [X] T042 [US3] [desenvolvedor-ui] Implementar server actions em src/app/actions/vinculos.ts (listarVinculos, vincularAtivo nas três formas)
+- [X] T043 [US3] [desenvolvedor-ui] Implementar a tela /vinculos em src/app/vinculos/page.tsx: lista chave do export → dropdown de alvos + criar alvo + fora-da-carteira; acessível também para revisão/correção
+- [X] T044 [US3] [desenvolvedor-ui] Integrar o bloqueio ponta a ponta: /aporte exibe estado bloqueado com as pendências e link para /vinculos; após resolver, desbloqueia sem passo extra (SC-008)
 
 **Checkpoint**: primeiro import real guia o usuário pelos vínculos e libera a calculadora
 
@@ -127,10 +127,10 @@
 
 **Independent Test**: cadastrar alvos, ver a validação de soma, acionar "a carteira mudou" e verificar vigência anterior intacta + nova aberta.
 
-- [ ] T045 [US4] [arquiteto-dados] Implementar src/services/alvo-service.ts: CRUD na vigência aberta, validação soma = 10000 bps (±1), novaVigencia (fecha vigencia_fim de todos os abertos, clona alvos, re-aponta ativo_mapeado para os clones na mesma transação), ativos por alvo (FR-019)
-- [ ] T046 [P] [US4] [arquiteto-dados] Testes de alvo-service em tests/services/alvo-service.test.ts: soma inválida sinalizada, vigência fechada é somente-leitura, clone + re-aponte de vínculos, histórico preservado
-- [ ] T047 [US4] [desenvolvedor-ui] Implementar server actions em src/app/actions/alvos.ts (listarAlvos, salvarAlvo, removerAlvo, novaVigencia)
-- [ ] T048 [US4] [desenvolvedor-ui] Implementar a tela /alvos em src/app/alvos/page.tsx: CRUD nome + percentual, indicador da soma (verde em 100%), botão "a carteira de referência mudou", ativos apontando para cada alvo
+- [X] T045 [US4] [arquiteto-dados] Implementar src/services/alvo-service.ts: CRUD na vigência aberta, validação soma = 10000 bps (±1), novaVigencia (fecha vigencia_fim de todos os abertos, clona alvos, re-aponta ativo_mapeado para os clones na mesma transação), ativos por alvo (FR-019)
+- [X] T046 [P] [US4] [arquiteto-dados] Testes de alvo-service em tests/services/alvo-service.test.ts: soma inválida sinalizada, vigência fechada é somente-leitura, clone + re-aponte de vínculos, histórico preservado
+- [X] T047 [US4] [desenvolvedor-ui] Implementar server actions em src/app/actions/alvos.ts (listarAlvos, salvarAlvo, removerAlvo, novaVigencia)
+- [X] T048 [US4] [desenvolvedor-ui] Implementar a tela /alvos em src/app/alvos/page.tsx: CRUD nome + percentual, indicador da soma (verde em 100%), botão "a carteira de referência mudou", ativos apontando para cada alvo
 
 **Checkpoint**: v0 completo — parser, alvos, vínculo e calculadora funcionando de ponta a ponta com dados reais (seed dispensável)
 
@@ -142,11 +142,11 @@
 
 **Independent Test**: lançar dividendos, incluir num aporte registrado e confirmar que somem da oferta; não utilizados permanecem nos meses seguintes; re-import não os afeta.
 
-- [ ] T049 [US5] [arquiteto-dados] Implementar src/services/dividendo-service.ts: lançar (só ativos conhecidos; múltiplos por ativo/mês), listar por mês + total disponível, editar/excluir apenas com aporte_id null, totalDisponivel compartilhado com a calculadora
-- [ ] T050 [P] [US5] [arquiteto-dados] Testes de dividendo-service em tests/services/dividendo-service.test.ts: dupla contagem impossível (aporte_id definitivo), disponível não expira, edição de utilizado recusada, independência de re-imports
-- [ ] T051 [US5] [desenvolvedor-ui] Implementar server actions em src/app/actions/dividendos.ts (listar, lançar, editar, excluir)
-- [ ] T052 [US5] [desenvolvedor-ui] Implementar a tela /dividendos em src/app/dividendos/page.tsx: lançamento rápido (dropdown de conhecidos + mês + valor), lista do mês corrente + total acumulado, edição/exclusão
-- [ ] T053 [US5] [desenvolvedor-ui] Ativar na calculadora a oferta real "incluir R$ X de dividendos ainda não utilizados" em src/app/aporte/ (o serviço T026 já suporta; ligar UI + exibir a parcela de dividendos no resumo do registro)
+- [X] T049 [US5] [arquiteto-dados] Implementar src/services/dividendo-service.ts: lançar (só ativos conhecidos; múltiplos por ativo/mês), listar por mês + total disponível, editar/excluir apenas com aporte_id null, totalDisponivel compartilhado com a calculadora
+- [X] T050 [P] [US5] [arquiteto-dados] Testes de dividendo-service em tests/services/dividendo-service.test.ts: dupla contagem impossível (aporte_id definitivo), disponível não expira, edição de utilizado recusada, independência de re-imports
+- [X] T051 [US5] [desenvolvedor-ui] Implementar server actions em src/app/actions/dividendos.ts (listar, lançar, editar, excluir)
+- [X] T052 [US5] [desenvolvedor-ui] Implementar a tela /dividendos em src/app/dividendos/page.tsx: lançamento rápido (dropdown de conhecidos + mês + valor), lista do mês corrente + total acumulado, edição/exclusão
+- [X] T053 [US5] [desenvolvedor-ui] Ativar na calculadora a oferta real "incluir R$ X de dividendos ainda não utilizados" em src/app/aporte/ (o serviço T026 já suporta; ligar UI + exibir a parcela de dividendos no resumo do registro)
 
 **Checkpoint**: dividendos alimentam o aporte sem dupla contagem
 
@@ -158,9 +158,9 @@
 
 **Independent Test**: com ≥2 sessões de meses distintos e 1 aporte registrado, dashboard mostra desvios com banda verde/vermelho e histórico mostra série mensal + comparativo.
 
-- [ ] T054 [US6] [arquiteto-dados] Implementar leituras em src/services/dashboard-service.ts: dadosDashboard (patrimônio consolidado + data das posições, alocação atual vs. alvo em bps com banda da config — visual, regra 8; fora-da-carteira à parte; pendências) e dadosHistorico (série só de sessões VIGENTES — 1 ponto/mês, sugerido vs. executado por mês, acesso de auditoria às SUBSTITUIDAS)
-- [ ] T055 [US6] [desenvolvedor-ui] Implementar o dashboard em src/app/page.tsx: patrimônio + "posições de DD/MM", barras atual vs. alvo (verde dentro da banda, vermelho fora — dataviz), fora-da-carteira à parte, atalhos "Novo import"/"Calcular aporte", alerta de pendências
-- [ ] T056 [US6] [desenvolvedor-ui] Implementar o histórico em src/app/historico/page.tsx: evolução patrimonial mensal, linha do tempo sugerido vs. executado, visão de auditoria das sessões substituídas
+- [X] T054 [US6] [arquiteto-dados] Implementar leituras em src/services/dashboard-service.ts: dadosDashboard (patrimônio consolidado + data das posições, alocação atual vs. alvo em bps com banda da config — visual, regra 8; fora-da-carteira à parte; pendências) e dadosHistorico (série só de sessões VIGENTES — 1 ponto/mês, sugerido vs. executado por mês, acesso de auditoria às SUBSTITUIDAS)
+- [X] T055 [US6] [desenvolvedor-ui] Implementar o dashboard em src/app/page.tsx: patrimônio + "posições de DD/MM", barras atual vs. alvo (verde dentro da banda, vermelho fora — dataviz), fora-da-carteira à parte, atalhos "Novo import"/"Calcular aporte", alerta de pendências
+- [X] T056 [US6] [desenvolvedor-ui] Implementar o histórico em src/app/historico/page.tsx: evolução patrimonial mensal, linha do tempo sugerido vs. executado, visão de auditoria das sessões substituídas
 
 **Checkpoint**: todas as user stories funcionais e independentes
 
@@ -170,11 +170,11 @@
 
 **Purpose**: configurações, backup portável e validação final do quickstart
 
-- [ ] T057 [desenvolvedor-ui] Implementar a tela /configuracoes em src/app/configuracoes/page.tsx + src/app/actions/config.ts: banda de tolerância, aporte mínimo, retenção de backups; exibir caminhos do .db e da pasta backups/ com lembrete de backup completo
-- [ ] T058 [P] [arquiteto-dados] Implementar export/import de configuração JSON (alvos + vínculos + settings) em src/services/config-service.ts — nunca toca sessões/aportes/dividendos (FR-044)
-- [ ] T059 [P] [calculista-aporte] Revisar cobertura do motor contra a tabela de casos mínimos de contracts/motor.md e completar lacunas em tests/motor/
-- [ ] T060 Rodar a validação manual completa de quickstart.md (ritual cronometrado com os CSVs reais locais + tabela de comportamentos críticos da seção 7) e corrigir o que falhar
-- [ ] T061 Fluxo pós-implementação obrigatório do CLAUDE.md: engenheiro-testes (suíte completa + lacunas) → guardiao-spec (diff vs. spec: escopo negativo, regras intencionais, camadas) → gerente-release (propor commits e perguntar antes de commitar)
+- [X] T057 [desenvolvedor-ui] Implementar a tela /configuracoes em src/app/configuracoes/page.tsx + src/app/actions/config.ts: banda de tolerância, aporte mínimo, retenção de backups; exibir caminhos do .db e da pasta backups/ com lembrete de backup completo
+- [X] T058 [P] [arquiteto-dados] Implementar export/import de configuração JSON (alvos + vínculos + settings) em src/services/config-service.ts — nunca toca sessões/aportes/dividendos (FR-044)
+- [X] T059 [P] [calculista-aporte] Revisar cobertura do motor contra a tabela de casos mínimos de contracts/motor.md e completar lacunas em tests/motor/
+- [X] T060 Rodar a validação manual completa de quickstart.md (ritual cronometrado com os CSVs reais locais + tabela de comportamentos críticos da seção 7) e corrigir o que falhar
+- [X] T061 Fluxo pós-implementação obrigatório do CLAUDE.md: engenheiro-testes (suíte completa + lacunas) → guardiao-spec (diff vs. spec: escopo negativo, regras intencionais, camadas) → gerente-release (propor commits e perguntar antes de commitar)
 
 ---
 
