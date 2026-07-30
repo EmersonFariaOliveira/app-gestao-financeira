@@ -136,7 +136,12 @@ export default function AportePage() {
 
   const linhasCombinadas: LinhaCombinada[] = useMemo(() => {
     if (!resultado) return [];
-    const nomePorAlvoId = new Map(resultado.sugestao.map((l) => [l.alvo_id, l.nome_alvo]));
+    // Usa o mapa COMPLETO de nomes (todos os alvos vigentes, mesmo os que
+    // ficam só na fila sem receber fatia — déficit <= 0) em vez de derivar de
+    // `resultado.sugestao`, que só cobre os alvos presentes em
+    // `resultado.resultado.divisao`. Ver `CalcularOutput.nomesPorAlvoId`
+    // (src/services/aporte-service.ts) para o porquê.
+    const nomePorAlvoId = new Map(Object.entries(resultado.nomesPorAlvoId));
     const divisaoPorAlvoId = new Map(resultado.resultado.divisao.map((l) => [l.alvoId, l]));
     return resultado.resultado.fila.map((item) => {
       const linhaDivisao = divisaoPorAlvoId.get(item.alvoId);

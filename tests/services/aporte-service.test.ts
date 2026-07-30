@@ -418,6 +418,83 @@ describe("aporte-service", () => {
     });
   });
 
+  describe("nomesPorAlvoId — mapa completo de nomes (fix do bug de ID exposto na UI)", () => {
+    it("calcular() retorna nomesPorAlvoId com TODOS os alvos vigentes, inclusive um com déficit <= 0 que não recebe fatia em sugestao/divisao", async () => {
+      // alvoAcima já está muito acima do seu próprio alvo percentual (déficit
+      // negativo) — regra 1: fica na fila, mas nunca recebe fatia da divisão.
+      // alvoAbaixo está bem abaixo do seu alvo e recebe toda a divisão.
+      const alvoAcima = await prisma.alvo.create({
+        data: { nome: "WRLD11", percentual_alvo_bps: 2000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const alvoAbaixo = await prisma.alvo.create({
+        data: { nome: "Pós-fixado", percentual_alvo_bps: 8000, vigencia_inicio: new Date("2026-01-01") },
+      });
+
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+
+      await prisma.posicao.createMany({
+        data: [
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "WRLD11-CHAVE",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 900_000,
+            tipo_grupo: "ETF",
+            data_ultima_cotacao: new Date("2026-07-28"),
+          },
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "Tesouro Selic 2029",
+            instituicao: "Itaú",
+            quantidade: "1000.00",
+            patrimonio_hoje_centavos: 100_000,
+            tipo_grupo: "TESOURO_DIRETO",
+            data_ultima_cotacao: new Date("2026-07-28"),
+          },
+        ],
+      });
+
+      await prisma.ativo_mapeado.createMany({
+        data: [
+          { chave_export: "WRLD11-CHAVE", alvo_id: alvoAcima.id, fora_da_carteira: false },
+          { chave_export: "Tesouro Selic 2029", alvo_id: alvoAbaixo.id, fora_da_carteira: false },
+        ],
+      });
+
+      const calculo = await aporteService.calcular({
+        valorCentavos: 50_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 100,
+      });
+
+      // Sanity: alvoAcima de fato tem déficit negativo e não aparece em sugestao.
+      const itemFilaAcima = calculo.resultado.fila.find((f) => f.alvoId === alvoAcima.id);
+      expect(itemFilaAcima?.deficitCentavos).toBeLessThan(0);
+      expect(calculo.sugestao.some((l) => l.alvo_id === alvoAcima.id)).toBe(false);
+
+      // nomesPorAlvoId, ainda assim, resolve o nome de AMBOS os alvos vigentes.
+      expect(calculo.nomesPorAlvoId).toEqual({
+        [alvoAcima.id]: "WRLD11",
+        [alvoAbaixo.id]: "Pós-fixado",
+      });
+
+      // Shape serializável: objeto plano (não Map) — precisa atravessar a
+      // borda server action → client component via JSON.
+      expect(calculo.nomesPorAlvoId).not.toBeInstanceOf(Map);
+      expect(calculo.nomesPorAlvoId.constructor).toBe(Object);
+      expect(JSON.parse(JSON.stringify(calculo.nomesPorAlvoId))).toEqual(calculo.nomesPorAlvoId);
+    });
+  });
+
   describe("alvo removido (zumbi): removerAlvo recusa a remoção enquanto houver ativo_mapeado vinculado, fechando o bug que corrompia o déficit dos alvos ativos", () => {
     it("removerAlvo lança erro e o vínculo permanece intacto — patrimonioBaseCentavos e a fila nunca chegam a ser corrompidos por um 'vínculo zumbi'", async () => {
       const alvoAcoes = await alvoService.criarAlvo({ nome: "Ações BR", percentualAlvoBps: 5000 });

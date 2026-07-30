@@ -75,6 +75,17 @@ export interface CalcularOutput {
   trocoAnteriorIncluidoCentavos: number;
   /** `resultado.divisao` já convertido para o shape persistido, com nome do alvo denormalizado. */
   sugestao: LinhaAporte[];
+  /**
+   * Nome de TODO alvo vigente (`contexto.alvos`, não só os presentes em
+   * `sugestao`/`resultado.divisao`), indexado por `alvoId`. Necessário porque
+   * `resultado.fila` (research.md / motor.md) inclui todos os alvos vigentes,
+   * inclusive os que não recebem fatia (déficit <= 0) — a UI precisa resolver
+   * o nome desses também, não só dos que aparecem em `divisao`. Objeto plano
+   * (não `Map`) porque este valor atravessa a borda server action → client
+   * component via JSON (contracts/server-actions.md), onde `Map` não
+   * serializa.
+   */
+  nomesPorAlvoId: Record<string, string>;
 }
 
 export interface RegistrarAporteInput {
@@ -386,6 +397,7 @@ export async function calcular(input: CalcularInput): Promise<CalcularOutput> {
 
   const nomePorAlvoId = new Map(contexto.alvos.map((a) => [a.alvoId, a.nome]));
   const sugestao = resultado.divisao.map((linha) => paraLinhaAporte(linha, nomePorAlvoId));
+  const nomesPorAlvoId = Object.fromEntries(nomePorAlvoId);
 
   return {
     resultado,
@@ -395,6 +407,7 @@ export async function calcular(input: CalcularInput): Promise<CalcularOutput> {
     dividendosIncluidosIds,
     trocoAnteriorIncluidoCentavos,
     sugestao,
+    nomesPorAlvoId,
   };
 }
 
