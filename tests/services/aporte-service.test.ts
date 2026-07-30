@@ -23,6 +23,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 let tmpDir: string;
 let prisma: typeof import("@/db/client")["prisma"];
 let aporteService: typeof import("@/services/aporte-service");
+let alvoService: typeof import("@/services/alvo-service");
 
 beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "aporte-service-test-"));
@@ -44,6 +45,7 @@ beforeAll(async () => {
   const dbModule = await import("@/db/client");
   prisma = dbModule.prisma;
   aporteService = await import("@/services/aporte-service");
+  alvoService = await import("@/services/alvo-service");
 }, 30_000);
 
 afterAll(async () => {
@@ -413,6 +415,82 @@ describe("aporte-service", () => {
 
       const preparo = await aporteService.prepararCalculadora();
       expect(preparo.aporteMinimoCentavos).toBe(77_000);
+    });
+  });
+
+  describe("alvo removido (zumbi): removerAlvo recusa a remoção enquanto houver ativo_mapeado vinculado, fechando o bug que corrompia o déficit dos alvos ativos", () => {
+    it("removerAlvo lança erro e o vínculo permanece intacto — patrimonioBaseCentavos e a fila nunca chegam a ser corrompidos por um 'vínculo zumbi'", async () => {
+      const alvoAcoes = await alvoService.criarAlvo({ nome: "Ações BR", percentualAlvoBps: 5000 });
+      const alvoZumbi = await alvoService.criarAlvo({ nome: "Zumbi", percentualAlvoBps: 5000 });
+
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+
+      await prisma.posicao.createMany({
+        data: [
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 100_000,
+            tipo_grupo: "ACOES",
+          },
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "ZUMBI-ATIVO",
+            instituicao: "Itaú",
+            quantidade: "500",
+            patrimonio_hoje_centavos: 50_000,
+            tipo_grupo: "TESOURO_DIRETO",
+          },
+        ],
+      });
+
+      await prisma.ativo_mapeado.createMany({
+        data: [
+          { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+          { chave_export: "ZUMBI-ATIVO", alvo_id: alvoZumbi.id, fora_da_carteira: false },
+        ],
+      });
+
+      // Comportamento corrigido (alvo-service.removerAlvo): a remoção é
+      // recusada enquanto ZUMBI-ATIVO ainda apontar para alvoZumbi — nunca
+      // chega a existir um alvo com ativo=false e um vínculo órfão apontando
+      // para ele, então patrimonioBaseCentavos nunca é inflado por uma
+      // posição que não seria creditada a nenhum alvo real (regra 4).
+      await expect(alvoService.removerAlvo(alvoZumbi.id)).rejects.toThrow(
+        `Não é possível remover o alvo 'Zumbi': há 1 ativo(s) vinculado(s) a ele. Revincule-os a outro alvo ou marque como fora da carteira antes de remover.`,
+      );
+
+      const alvoZumbiNoBanco = await prisma.alvo.findUniqueOrThrow({ where: { id: alvoZumbi.id } });
+      expect(alvoZumbiNoBanco.ativo).toBe(true);
+
+      const preparo = await aporteService.prepararCalculadora();
+      expect(preparo.bloqueada).toBe(false);
+      expect(preparo.pendencias).toEqual([]);
+
+      const calculo = await aporteService.calcular({
+        valorCentavos: 100_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 100,
+      });
+
+      // Com alvoZumbi ainda vigente (remoção recusada), os 50_000 de
+      // ZUMBI-ATIVO seguem legitimamente na base — creditados ao próprio
+      // alvoZumbi, não "perdidos". patrimonioBaseCentavos continua 150_000,
+      // mas agora AMBOS os alvos aparecem na fila/divisão.
+      expect(calculo.resultado.patrimonioBaseCentavos).toBe(150_000);
+      expect(calculo.resultado.fila.map((f) => f.alvoId).sort()).toEqual(
+        [alvoAcoes.id, alvoZumbi.id].sort(),
+      );
     });
   });
 });
