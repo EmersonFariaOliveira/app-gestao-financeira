@@ -570,8 +570,11 @@ export default function AportePage() {
             <CardFooter className="flex items-center gap-3">
               {registrado ? (
                 <p className="text-sm text-muted-foreground">
-                  Aporte já registrado nesta sessão (ID {registrado}). Calcule novamente para
-                  registrar outro.
+                  Aporte já registrado nesta sessão (ID {registrado}), total{" "}
+                  {formatCentavosParaReais(resultado.valorTotalCentavos)}
+                  {resultado.valorDividendosCentavos > 0 &&
+                    ` (dos quais ${formatCentavosParaReais(resultado.valorDividendosCentavos)} vieram de dividendos incluídos)`}
+                  . Calcule novamente para registrar outro.
                 </p>
               ) : (
                 <Dialog open={dialogAberto} onOpenChange={setDialogAberto}>
@@ -584,7 +587,11 @@ export default function AportePage() {
                       <DialogDescription>
                         Ajuste os valores para o que foi de fato executado na ordem (a
                         cotação do export pode estar defasada). Sugerido vs. executado fica
-                        registrado para auditoria.
+                        registrado para auditoria. Total considerado:{" "}
+                        {formatCentavosParaReais(resultado.valorTotalCentavos)}
+                        {resultado.valorDividendosCentavos > 0 &&
+                          `, dos quais ${formatCentavosParaReais(resultado.valorDividendosCentavos)} vieram de dividendos incluídos`}
+                        .
                       </DialogDescription>
                     </DialogHeader>
                     <div className="flex flex-col gap-3">
