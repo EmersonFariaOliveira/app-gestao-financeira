@@ -128,3 +128,52 @@
     @apply font-sans;
   }
 }
+
+/**
+ * Paleta dos gráficos do dashboard (6.1) e histórico (6.7) — validada para
+ * daltonismo/contraste, prefixada `--chart-*` para não colidir com os
+ * tokens `--chart-1..5` do shadcn (usados em outro contexto, não
+ * relacionados a estes gráficos). Cores de status (`good`/`critical`)
+ * nunca mudam entre claro/escuro (mesma legibilidade em ambos); o resto
+ * segue o tema. Duas formas de dark mode são suportadas propositalmente:
+ * `prefers-color-scheme` (preferência do SO) e `[data-theme="dark"]` (um
+ * futuro toggle manual) — o app ainda não tem toggle de tema, mas o token
+ * já fica pronto para os dois casos sem precisar revisitar os componentes
+ * de gráfico depois.
+ */
+:root {
+  --chart-surface-1: #fcfcfb;
+  --chart-text-primary: #0b0b0b;
+  --chart-text-secondary: #52514e;
+  --chart-text-muted: #898781;
+  --chart-gridline: #e1e0d9;
+  --chart-baseline: #c3c2b7;
+  --chart-status-good: #0ca30c;
+  --chart-status-critical: #d03b3b;
+  --chart-series-1-blue: #2a78d6;
+  --chart-series-2-orange: #eb6834;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --chart-surface-1: #1a1a19;
+    --chart-text-primary: #ffffff;
+    --chart-text-secondary: #c3c2b7;
+    --chart-text-muted: #898781;
+    --chart-gridline: #2c2c2a;
+    --chart-baseline: #383835;
+    --chart-series-1-blue: #3987e5;
+    --chart-series-2-orange: #d95926;
+  }
+}
+
+:root[data-theme="dark"] {
+  --chart-surface-1: #1a1a19;
+  --chart-text-primary: #ffffff;
+  --chart-text-secondary: #c3c2b7;
+  --chart-text-muted: #898781;
+  --chart-gridline: #2c2c2a;
+  --chart-baseline: #383835;
+  --chart-series-1-blue: #3987e5;
+  --chart-series-2-orange: #d95926;
+}
