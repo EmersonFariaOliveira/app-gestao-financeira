@@ -1,0 +1,120 @@
+// Schema Prisma — App de Gestão de Aportes
+// T006: models completos conforme specs/001-gestao-aportes-v0-v1/data-model.md
+// (materialização da seção 4 de docs/app-gestao-aportes.md sob as restrições
+// Prisma + SQLite da seção 3).
+//
+// Notas de implementação (docs/app-gestao-aportes.md, seção 3):
+// - SQLite não suporta enum: status vira String + validação na aplicação
+//   (e CHECK constraint via migration SQL — ver research.md R12).
+// - Sem listas escalares: campos tipo instituicoes[] viram String (JSON).
+// - Valores monetários: sempre inteiro em centavos (*_centavos), nunca float.
+// - Percentuais: sempre inteiro em pontos-base (*_bps), nunca float.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Item da carteira de referência, versionado por vigência.
+model alvo {
+  id                  String    @id @default(cuid())
+  nome                String
+  percentual_alvo_bps Int
+  vigencia_inicio     DateTime
+  vigencia_fim        DateTime?
+  ativo               Boolean   @default(true)
+  criado_em           DateTime  @default(now())
+
+  ativos_mapeados ativo_mapeado[]
+}
+
+/// De-para memorizado entre a chave exata do export e um alvo (N-para-1),
+/// ou marcador fora-da-carteira.
+model ativo_mapeado {
+  id               String   @id @default(cuid())
+  chave_export     String   @unique
+  alvo_id          String?
+  fora_da_carteira Boolean  @default(false)
+  criado_em        DateTime @default(now())
+
+  alvo       alvo?       @relation(fields: [alvo_id], references: [id])
+  dividendos dividendo[] @relation("dividendo_ativo_mapeado")
+}
+
+/// Snapshot imutável das posições de um mês. Nunca é deletada nem tem
+/// posições alteradas — apenas o status transiciona VIGENTE -> SUBSTITUIDO.
+model sessao_import {
+  id             String   @id @default(cuid())
+  mes_referencia String
+  data_export    DateTime
+  /// 'VIGENTE' | 'SUBSTITUIDO' — validado na aplicação; CHECK adicionado
+  /// manualmente na migration SQL (research.md R12).
+  status         String
+  /// JSON string[] extraído dos nomes dos arquivos.
+  instituicoes   String
+  criado_em      DateTime @default(now())
+
+  posicoes posicao[]
+  aportes  aporte[]
+
+  @@index([mes_referencia, status])
+}
+
+/// Linha de posição de uma sessão (filha imutável de sessao_import).
+model posicao {
+  id                       String    @id @default(cuid())
+  sessao_import_id         String
+  chave_export             String
+  instituicao              String
+  /// Decimal literal do export, preservado (research.md R6); EXTERIOR pode
+  /// ser fracionado — nunca Int/Float.
+  quantidade               String
+  patrimonio_hoje_centavos Int
+  tipo_grupo               String
+  tipo_ativo_internacional String?
+  data_ultima_cotacao      DateTime?
+  criado_em                DateTime  @default(now())
+
+  sessao_import sessao_import @relation(fields: [sessao_import_id], references: [id], onDelete: Restrict)
+}
+
+/// Registro de um cálculo + execução declarada. Amarrado permanentemente à
+/// sessão do cálculo, mesmo que ela seja substituída depois.
+model aporte {
+  id                        String   @id @default(cuid())
+  sessao_import_id          String
+  valor_total_centavos      Int
+  valor_dividendos_centavos Int
+  /// JSON LinhaAporte[] — o que o motor sugeriu.
+  sugestao                  String
+  /// JSON LinhaAporte[] — o que o usuário declarou ter feito.
+  executado                 String
+  troco_centavos            Int
+  criado_em                 DateTime @default(now())
+
+  sessao_import sessao_import @relation(fields: [sessao_import_id], references: [id], onDelete: Restrict)
+  dividendos    dividendo[]
+}
+
+/// Lançamento manual, independente das sessões de import.
+model dividendo {
+  id             String   @id @default(cuid())
+  chave_export   String
+  mes_referencia String
+  valor_centavos Int
+  aporte_id      String?
+  criado_em      DateTime @default(now())
+
+  ativo_mapeado ativo_mapeado @relation("dividendo_ativo_mapeado", fields: [chave_export], references: [chave_export])
+  aporte        aporte?       @relation(fields: [aporte_id], references: [id])
+}
+
+/// Chave-valor em JSON, exportável/importável (backup portável).
+model config {
+  chave String @id
+  valor String
+}
