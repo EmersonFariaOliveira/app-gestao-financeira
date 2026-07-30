@@ -163,6 +163,19 @@ You **MUST** consider the user input before proceeding (if not empty).
    - **Integration work**: Database connections, middleware, logging, external services
    - **Polish and validation**: Unit tests, performance optimization, documentation
 
+**Layer delegation (project-specific rule — see CLAUDE.md)**:
+
+- Each task MUST be delegated to the subagent that owns the corresponding layer:
+  CSV format/parsing → `especialista-csv`; deficit, priority queue, contribution
+  split, dividends → `calculista-aporte`; schema, migrations, SQLite →
+  `arquiteto-dados`; screens/components → `desenvolvedor-ui`. Implementing
+  engine logic in the main thread is forbidden.
+- After each completed group of tasks (phase or user story), run the
+  post-implementation sequence: `engenheiro-testes` → `guardiao-spec` →
+  `gerente-release`. The commit proposals from `gerente-release` must be
+  presented to the user with the explicit question "Quer que eu commite?" —
+  commit only after an explicit yes.
+
 8. Progress tracking and error handling:
    - Report progress after each completed task
    - Halt execution if any non-parallel task fails

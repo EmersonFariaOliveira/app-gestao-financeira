@@ -85,6 +85,10 @@ You **MUST** consider the user input before proceeding (if not empty).
    - Final Phase: Polish & cross-cutting concerns
    - All tasks must follow the strict checklist format (see Task Generation Rules below)
    - Clear file paths for each task
+   - **Layer/subagent annotation (project-specific rule)**: annotate each task with
+     the suggested subagent in brackets — `[especialista-csv]`, `[calculista-aporte]`,
+     `[arquiteto-dados]` or `[desenvolvedor-ui]` (e.g. `- [ ] T012 [P] [US1]
+     [calculista-aporte] Implement priority queue in src/motor/fila.ts`)
    - Dependencies section showing story completion order
    - Parallel execution examples per story
    - Implementation strategy section (MVP first, incremental delivery)
