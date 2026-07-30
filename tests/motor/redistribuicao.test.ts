@@ -128,6 +128,35 @@ describe("regra 6 — veto humano / redistribuição", () => {
     );
   });
 
+  it("zera TODAS as linhas exceto uma ⇒ o alvo restante recebe 100% do restante (transbordo com bps só dele)", () => {
+    const input = cenarioBase();
+    input.aporteMinimoCentavos = 1;
+    input.valorAporteCentavos = 50_000;
+    // alvo-a e alvo-b fixados em 0 (veto humano em cascata) — só alvo-c
+    // (déficit -220000, negativo) permanece livre para receber o restante.
+    input.ajustesUsuario = [
+      { alvoId: "alvo-a", valorCentavos: 0 },
+      { alvoId: "alvo-b", valorCentavos: 0 },
+    ];
+
+    const resultado = calcularAporte(input);
+
+    const linhaA = resultado.divisao.find((l) => l.alvoId === "alvo-a");
+    const linhaB = resultado.divisao.find((l) => l.alvoId === "alvo-b");
+    const linhaC = resultado.divisao.find((l) => l.alvoId === "alvo-c");
+
+    expect(linhaA).toEqual({ alvoId: "alvo-a", valorCentavos: 0, origem: "AJUSTE_USUARIO" });
+    expect(linhaB).toEqual({ alvoId: "alvo-b", valorCentavos: 0, origem: "AJUSTE_USUARIO" });
+
+    // Restante = 50000, distribuído sobre o único alvo não fixado (alvo-c):
+    // como o déficit dele é negativo (ignorado no preenchimento), os 50000
+    // inteiros viram transbordo proporcional aos bps dos não-fixados — só
+    // alvo-c participa do denominador, então ele fica com 100% (50000/50000).
+    expect(linhaC).toEqual({ alvoId: "alvo-c", valorCentavos: 50_000, origem: "TRANSBORDO" });
+
+    expect(somaDivisao(resultado.divisao)).toBe(input.valorAporteCentavos);
+  });
+
   it("a soma final é sempre exata ao valorAporteCentavos, com ou sem ajustes", () => {
     const semAjuste = calcularAporte({ ...cenarioBase(), valorAporteCentavos: 300_000, aporteMinimoCentavos: 1 });
     expect(somaDivisao(semAjuste.divisao) + semAjuste.trocoCentavos).toBe(300_000);

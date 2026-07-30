@@ -197,6 +197,45 @@ describe("caso de borda — valores grandes (sem estouro de Number.MAX_SAFE_INTE
   });
 });
 
+describe("caso de borda — percentualBps extremo (1 bps vs. 9999 bps)", () => {
+  it("transbordo com bps=1 pode truncar para 0 (não cria linha) sem quebrar a soma exata", () => {
+    // patrimonioBase = 1_000_000: target-tiny (bps=1) = trunc(1*1e6/10000) = 100;
+    // target-big (bps=9999) = trunc(9999*1e6/10000) = 999_900. Soma exata
+    // (100 + 999_900 = 1_000_000, sem perda de bps porque 1+9999=10000) ⇒
+    // valorAtual igual ao target em ambos ⇒ déficit 0 nos dois (100% transbordo).
+    const alvos: EntradaMotor["alvos"] = [
+      { alvoId: "tiny", nome: "Tiny", percentualBps: 1, rendaFixa: false },
+      { alvoId: "big", nome: "Big", percentualBps: 9999, rendaFixa: false },
+    ];
+    const posicoes: EntradaMotor["posicoes"] = [
+      { chaveExport: "TINY1", alvoId: "tiny", foraDaCarteira: false, valorCentavos: 100, tipoGrupo: "ACOES" },
+      { chaveExport: "BIG1", alvoId: "big", foraDaCarteira: false, valorCentavos: 999_900, tipoGrupo: "ACOES" },
+    ];
+
+    // aporte=99: tiny = trunc(99*1/10000) = 0 (truncado a zero, sem chegar
+    // ao mínimo); big = trunc(99*9999/10000) = 98; distribuído=98, resto=1.
+    // Empate de déficit (0 e 0): fila ordenada por percentualBps desc ⇒
+    // big (9999) vem antes de tiny (1) ⇒ o resto de 1 centavo vai para big.
+    const resultado = calcularAporte({
+      alvos,
+      posicoes,
+      valorAporteCentavos: 99,
+      aporteMinimoCentavos: 1,
+    });
+
+    expect(resultado.fila.map((i) => i.alvoId)).toEqual(["big", "tiny"]);
+    expect(resultado.fila.every((i) => i.deficitCentavos === 0)).toBe(true);
+
+    // tiny não recebe nenhuma linha (0 truncado, não é "0 < valor < mínimo" —
+    // é exatamente zero, então não viola a regra 5 nem precisa realocação).
+    expect(resultado.divisao.find((l) => l.alvoId === "tiny")).toBeUndefined();
+    expect(resultado.divisao).toEqual([{ alvoId: "big", valorCentavos: 99, origem: "TRANSBORDO" }]);
+
+    const soma = resultado.divisao.reduce((acc, l) => acc + l.valorCentavos, 0);
+    expect(soma + resultado.trocoCentavos).toBe(99);
+  });
+});
+
 describe("caso de borda — pureza mesmo em valorAporteCentavos = 0", () => {
   it("chamar duas vezes com aporte zero produz resultado idêntico", () => {
     const input1 = { ...cenarioBase(), valorAporteCentavos: 0 };

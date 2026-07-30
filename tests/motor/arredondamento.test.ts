@@ -102,4 +102,69 @@ describe("regra 7 — arredondamento por lote B3", () => {
     // Sem lote, o déficit de alvo-lote (40000) é atendido em cheio.
     expect(resultado.divisao.find((l) => l.alvoId === "alvo-lote")?.valorCentavos).toBe(40_000);
   });
+
+  it("cotação de preço maior que o valor alocado ao alvo ⇒ 0 cotas, e o valor inteiro vira sobra para a renda fixa", () => {
+    // Mesma base de cenarioLoteComRendaFixa (déficit de alvo-lote = 40000),
+    // mas com precoCentavos MAIOR que o próprio valor alocado: não dá para
+    // comprar nem 1 cota inteira.
+    const input = cenarioLoteComRendaFixa();
+    input.cotacoes = [{ alvoId: "alvo-lote", precoCentavos: 50_000 }];
+
+    const resultado = calcularAporte(input);
+
+    // cotas = floor(40000/50000) = 0; valorAjustado = 0 ⇒ a linha de
+    // alvo-lote não aparece na divisão final (mesma convenção de valores
+    // zerados sem AJUSTE_USUARIO em divisao.ts/arredondamento.ts).
+    expect(resultado.divisao.find((l) => l.alvoId === "alvo-lote")).toBeUndefined();
+
+    // Toda a sobra (40000, o valor inteiro) vai para o único alvo de renda
+    // fixa da fila.
+    const linhaRf = resultado.divisao.find((l) => l.alvoId === "alvo-rf");
+    expect(linhaRf?.valorCentavos).toBe(40_000);
+    expect(linhaRf?.cotas).toBeUndefined();
+
+    const soma = resultado.divisao.reduce((acc, l) => acc + l.valorCentavos, 0);
+    expect(soma + resultado.trocoCentavos).toBe(40_000);
+    expect(resultado.trocoCentavos).toBe(0);
+  });
+
+  it("cotação com precoCentavos = 0 lança erro explícito (entrada inválida, nunca gera NaN/Infinity em silêncio)", () => {
+    const input = cenarioLoteComRendaFixa();
+    input.cotacoes = [{ alvoId: "alvo-lote", precoCentavos: 0 }];
+
+    expect(() => calcularAporte(input)).toThrow(/precoCentavos.*inv[aá]lido/i);
+  });
+
+  it("cotação com precoCentavos negativo lança erro explícito (entrada inválida)", () => {
+    const input = cenarioLoteComRendaFixa();
+    input.cotacoes = [{ alvoId: "alvo-lote", precoCentavos: -3000 }];
+
+    expect(() => calcularAporte(input)).toThrow(/precoCentavos.*inv[aá]lido/i);
+  });
+
+  it("cotação com precoCentavos = NaN lança erro explícito (não propaga NaN em silêncio pela soma)", () => {
+    const input = cenarioLoteComRendaFixa();
+    input.cotacoes = [{ alvoId: "alvo-lote", precoCentavos: Number.NaN }];
+
+    expect(() => calcularAporte(input)).toThrow(/precoCentavos.*inv[aá]lido/i);
+  });
+
+  it("cotação com precoCentavos fracionário (não-inteiro) lança erro explícito — centavos são sempre inteiros", () => {
+    const input = cenarioLoteComRendaFixa();
+    input.cotacoes = [{ alvoId: "alvo-lote", precoCentavos: 3000.5 }];
+
+    expect(() => calcularAporte(input)).toThrow(/precoCentavos.*inv[aá]lido/i);
+  });
+
+  it("cotação com precoCentavos undefined (entrada não tipada, ex.: vindo de JSON externo) lança erro explícito", () => {
+    const input = cenarioLoteComRendaFixa();
+    // `as unknown as number` simula um valor que escapa da checagem estática
+    // do TypeScript (ex.: JSON.parse de um payload externo malformado) —
+    // o motor precisa se defender em runtime, não só confiar no tipo.
+    input.cotacoes = [
+      { alvoId: "alvo-lote", precoCentavos: undefined as unknown as number },
+    ];
+
+    expect(() => calcularAporte(input)).toThrow(/precoCentavos.*inv[aá]lido/i);
+  });
 });

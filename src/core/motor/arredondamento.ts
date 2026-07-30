@@ -14,6 +14,21 @@
  * tinha `LinhaDivisao` própria antes), a origem é `TRANSBORDO` — o
  * contrato não define uma origem específica para "troco de lote" e o tipo
  * `OrigemLinhaDivisao` só tem DEFICIT/TRANSBORDO/AJUSTE_USUARIO.
+ *
+ * BUG REAL ENCONTRADO E CORRIGIDO (revisão T059 do calculista-aporte):
+ * `CotacaoB3.precoCentavos` não era validado antes de `Math.floor(valor /
+ * preco)`. Com `precoCentavos = 0`, o resultado é `Infinity` cotas e
+ * `valorAjustado = Infinity * 0 = NaN`, que se propagava em silêncio por
+ * `sobraTotal` e por toda a `divisao` (violando a invariante "Σ divisao +
+ * troco = valorAporteCentavos" sem nenhum erro visível). Com
+ * `precoCentavos` negativo, `cotas` fica negativo e `valorAjustado` vira
+ * MAIOR que o valor original (`cotas * preco` = negativo * negativo =
+ * positivo), inflando a linha e tornando `sobraTotal` negativo — outra
+ * violação silenciosa de invariante. Seguindo o mesmo princípio já usado em
+ * divisao.ts (Princípio V, "Falhar Alto, Nunca em Silêncio"): uma cotação
+ * com `precoCentavos <= 0` é entrada inválida (cotação de mercado nunca é
+ * zero ou negativa) e agora lança um erro explícito ANTES de qualquer
+ * cálculo, em vez de produzir NaN/valores inflados sem avisar.
  */
 import type { AlvoComputado } from "./deficit";
 import type { CotacaoB3, LinhaDivisao } from "./types";
@@ -35,6 +50,14 @@ export function aplicarArredondamentoLote(
 ): ResultadoArredondamento {
   if (!cotacoes || cotacoes.length === 0) {
     return { divisao: divisaoOriginal, trocoCentavos: 0 };
+  }
+
+  for (const cotacao of cotacoes) {
+    if (!Number.isInteger(cotacao.precoCentavos) || cotacao.precoCentavos <= 0) {
+      throw new Error(
+        `CotacaoB3.precoCentavos inválido para o alvo "${cotacao.alvoId}": esperado um inteiro positivo em centavos, recebido ${cotacao.precoCentavos}.`,
+      );
+    }
   }
 
   const cotacaoPorAlvo = new Map(cotacoes.map((c) => [c.alvoId, c.precoCentavos]));
