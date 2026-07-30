@@ -1,5 +1,6 @@
 import { prisma } from "@/db/client";
 import { getConfig, setConfig } from "@/services/config-service";
+import { totalDisponivelCentavos as totalDividendosDisponivelCentavos } from "@/services/dividendo-service";
 import { calcularAporte } from "@/core/motor";
 import type {
   AjusteUsuario,
@@ -289,13 +290,15 @@ async function obterTrocoAnterior(): Promise<number> {
 }
 
 /**
- * Dividendos ainda não utilizados (`aporte_id = null`). Implementado aqui
- * (não em um `dividendo-service.ts` próprio, que só existe a partir de
- * T049) por decisão documentada: é uma única query de soma, sem regra de
- * negócio própria; duplicar esta leitura mínima evita acoplar
- * prematuramente T026 a um serviço que ainda não existe. Quando
- * dividendo-service for implementado, esta função pode passar a delegar
- * para lá sem mudar a assinatura pública deste módulo.
+ * Dividendos ainda não utilizados (`aporte_id = null`), com os registros
+ * completos (não só a soma) porque `calcular()` precisa dos `id`s para
+ * marcá-los como utilizados em `registrarAporte` (`dividendosIncluidosIds`).
+ * Mantido aqui — em vez de expor uma listagem completa em
+ * `dividendo-service.ts` só para isso — porque é uma query trivial e o
+ * shape (`{id, valor_centavos}` do Prisma) é interno a este módulo; a SOMA
+ * usada em `prepararCalculadora` (T049/T050) já delega para
+ * `dividendo-service.totalDisponivelCentavos()` logo abaixo, evitando a
+ * duplicação de regra de negócio que antes existia aqui.
  */
 async function listarDividendosDisponiveis() {
   return prisma.dividendo.findMany({ where: { aporte_id: null } });
@@ -307,17 +310,17 @@ async function listarDividendosDisponiveis() {
  * dividendos não utilizados (FR-030) e troco do mês anterior (R10).
  */
 export async function prepararCalculadora(): Promise<PrepararCalculadoraOutput> {
-  const [pendencias, dividendos, trocoAnteriorCentavos, aporteMinimoCentavos] = await Promise.all([
-    listarPendencias(),
-    listarDividendosDisponiveis(),
-    obterTrocoAnterior(),
-    getConfig("aporte_minimo_centavos"),
-  ]);
-
-  const dividendosDisponiveisCentavos = dividendos.reduce(
-    (acc, dividendo) => acc + dividendo.valor_centavos,
-    0,
-  );
+  const [pendencias, dividendosDisponiveisCentavos, trocoAnteriorCentavos, aporteMinimoCentavos] =
+    await Promise.all([
+      listarPendencias(),
+      // Delegado a dividendo-service (T049) em vez de duplicar a query de
+      // soma — este módulo continua responsável apenas por buscar os
+      // registros completos quando precisa dos `id`s (`listarDividendosDisponiveis`,
+      // usado só por `calcular`).
+      totalDividendosDisponivelCentavos(),
+      obterTrocoAnterior(),
+      getConfig("aporte_minimo_centavos"),
+    ]);
 
   return {
     bloqueada: pendencias.length > 0,
@@ -413,6 +416,26 @@ export async function registrarAporte(
   }
 
   const aporteId = await prisma.$transaction(async (tx) => {
+    // Falhar alto, nunca em silêncio: antes de criar o `aporte`, confirma que
+    // TODOS os `dividendosIncluidosIds` ainda estão disponíveis
+    // (`aporte_id: null`). Sem essa checagem, o `updateMany` abaixo aceitaria
+    // silenciosamente ids já usados por outro aporte (guarda `WHERE
+    // aporte_id: null` some sem erro) — o `aporte` seria criado com
+    // `valor_dividendos_centavos` divergente do que de fato foi marcado como
+    // utilizado. Cenário de concorrência teórico (app single-user local),
+    // mas a validação garante que a transação inteira reverte em vez de
+    // persistir um registro divergente.
+    if (input.dividendosIncluidosIds && input.dividendosIncluidosIds.length > 0) {
+      const disponiveis = await tx.dividendo.count({
+        where: { id: { in: input.dividendosIncluidosIds }, aporte_id: null },
+      });
+      if (disponiveis !== input.dividendosIncluidosIds.length) {
+        throw new Error(
+          "Um ou mais dividendos incluídos já foram utilizados em outro aporte — recalcule antes de registrar.",
+        );
+      }
+    }
+
     const aporte = await tx.aporte.create({
       data: {
         sessao_import_id: input.sessaoImportId,
