@@ -1,0 +1,15 @@
+# Dados reais — nunca versionar
+docs/samples/
+
+# Banco SQLite local e backups (seção 3 do spec)
+data/
+backups/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+
+# Ambiente
+.env
+.env*.local
