@@ -410,7 +410,9 @@ export default function VinculosPage() {
                   const salvando = salvandoChave === v.chaveExport;
                   return (
                     <TableRow key={v.chaveExport}>
-                      <TableCell>{v.chaveExport}</TableCell>
+                      <TableCell className="max-w-48 whitespace-normal break-words">
+                        {v.chaveExport}
+                      </TableCell>
                       <TableCell>{formatCentavosParaReais(v.valorAtualCentavos)}</TableCell>
                       <TableCell>{v.nomeAlvo}</TableCell>
                       <TableCell>
@@ -498,7 +500,9 @@ export default function VinculosPage() {
                   const salvando = salvandoChave === f.chaveExport;
                   return (
                     <TableRow key={f.chaveExport}>
-                      <TableCell>{f.chaveExport}</TableCell>
+                      <TableCell className="max-w-48 whitespace-normal break-words">
+                        {f.chaveExport}
+                      </TableCell>
                       <TableCell>{formatCentavosParaReais(f.valorAtualCentavos)}</TableCell>
                       <TableCell>
                         <select
