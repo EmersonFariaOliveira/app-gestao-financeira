@@ -31,6 +31,7 @@ export interface AlvoDto {
   id: string;
   nome: string;
   percentualAlvoBps: number;
+  tag: string | null;
   vigenciaInicio: Date;
   vigenciaFim: Date | null;
   ativo: boolean;
@@ -56,6 +57,7 @@ export interface ListarAlvosOutput {
 export interface DadosAlvo {
   nome: string;
   percentualAlvoBps: number;
+  tag?: string | null;
 }
 
 /** Grupo de alvos de uma vigência fechada (mesmo par `vigencia_inicio`/`vigencia_fim`), para histórico/auditoria. */
@@ -69,6 +71,7 @@ function paraAlvoDto(a: {
   id: string;
   nome: string;
   percentual_alvo_bps: number;
+  tag: string | null;
   vigencia_inicio: Date;
   vigencia_fim: Date | null;
   ativo: boolean;
@@ -78,11 +81,24 @@ function paraAlvoDto(a: {
     id: a.id,
     nome: a.nome,
     percentualAlvoBps: a.percentual_alvo_bps,
+    tag: a.tag,
     vigenciaInicio: a.vigencia_inicio,
     vigenciaFim: a.vigencia_fim,
     ativo: a.ativo,
     criadoEm: a.criado_em,
   };
+}
+
+/**
+ * Normaliza uma tag recebida do usuário: string vazia/só espaço vira `null`
+ * (limpa a tag), qualquer outro valor é gravado com `trim()`. Usado tanto em
+ * `criarAlvo` quanto `atualizarAlvo` para que os dois pontos de escrita
+ * apliquem exatamente a mesma regra.
+ */
+function normalizarTag(tag: string | null | undefined): string | null {
+  if (tag === null || tag === undefined) return null;
+  const t = tag.trim();
+  return t === "" ? null : t;
 }
 
 /**
@@ -173,6 +189,7 @@ export async function criarAlvo(dados: DadosAlvo): Promise<AlvoDto> {
     data: {
       nome: dados.nome,
       percentual_alvo_bps: dados.percentualAlvoBps,
+      tag: normalizarTag(dados.tag),
       vigencia_inicio: vigenciaInicio,
       vigencia_fim: null,
       ativo: true,
@@ -216,6 +233,7 @@ export async function atualizarAlvo(
       ...(dados.percentualAlvoBps !== undefined
         ? { percentual_alvo_bps: dados.percentualAlvoBps }
         : {}),
+      ...(dados.tag !== undefined ? { tag: normalizarTag(dados.tag) } : {}),
     },
   });
 
@@ -300,6 +318,7 @@ export async function novaVigencia(): Promise<{ alvos: AlvoDto[] }> {
         data: {
           nome: alvoAntigo.nome,
           percentual_alvo_bps: alvoAntigo.percentual_alvo_bps,
+          tag: alvoAntigo.tag,
           vigencia_inicio: agora,
           vigencia_fim: null,
           ativo: alvoAntigo.ativo,
@@ -350,4 +369,23 @@ export async function listarVigenciasFechadas(): Promise<VigenciaFechadaDto[]> {
     vigenciaFim: alvos[0].vigencia_fim!,
     alvos: alvos.map(paraAlvoDto),
   }));
+}
+
+/**
+ * Tags distintas já usadas em QUALQUER alvo (todas as vigências, não só a
+ * aberta — vigências fechadas também alimentam a sugestão, já que a
+ * categorização do usuário tende a se repetir ao longo do tempo), não-nulas,
+ * ordenadas alfabeticamente. Alimenta o autocomplete de tag na UI (6.4).
+ */
+export async function listarTagsExistentes(): Promise<string[]> {
+  const registros = await prisma.alvo.findMany({
+    where: { tag: { not: null } },
+    select: { tag: true },
+    distinct: ["tag"],
+  });
+
+  return registros
+    .map((r) => r.tag)
+    .filter((t): t is string => t !== null)
+    .sort((a, b) => a.localeCompare(b));
 }

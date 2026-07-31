@@ -24,6 +24,10 @@ model alvo {
   id                  String    @id @default(cuid())
   nome                String
   percentual_alvo_bps Int
+  /// Categoria livre definida pelo usuário (ex.: A-AÇÕES, R-REAL ESTATE,
+  /// C-CAIXA), sem enum/CHECK por decisão do usuário — texto aberto,
+  /// sugerido por autocomplete na UI a partir de tags já usadas.
+  tag                 String?
   vigencia_inicio     DateTime
   vigencia_fim        DateTime?
   ativo               Boolean   @default(true)

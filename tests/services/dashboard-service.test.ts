@@ -474,6 +474,229 @@ describe("dashboard-service", () => {
       expect(somaAlocacao).toBe(100_000);
       expect(somaAlocacao).toBeLessThan(dados.patrimonioNaCarteiraCentavos);
     });
+
+    describe("alocacaoPorTag", () => {
+      it("agrupa por tag (somando múltiplos alvos com a MESMA tag), alvos sem tag caem em 'Sem tag', ordenação alfabética com 'Sem tag' sempre por último (mesmo com tags que viriam depois dela em ordem alfabética), e cada grupo segue a mesma fórmula usada por alvo individual", async () => {
+        // Grupo "A-AÇÕES": 2 alvos, deve somar percentual e valor (não sobrescrever).
+        const alvoA1 = await prisma.alvo.create({
+          data: {
+            nome: "Ações BR",
+            percentual_alvo_bps: 2000,
+            tag: "A-AÇÕES",
+            vigencia_inicio: new Date("2026-01-01"),
+          },
+        });
+        const alvoA2 = await prisma.alvo.create({
+          data: {
+            nome: "Ações US",
+            percentual_alvo_bps: 1000,
+            tag: "A-AÇÕES",
+            vigencia_inicio: new Date("2026-01-01"),
+          },
+        });
+        // Grupo "R-REAL ESTATE": 1 alvo.
+        const alvoR = await prisma.alvo.create({
+          data: {
+            nome: "FIIs",
+            percentual_alvo_bps: 3000,
+            tag: "R-REAL ESTATE",
+            vigencia_inicio: new Date("2026-01-01"),
+          },
+        });
+        // Grupo "Z-CRIPTO": tag que viria alfabeticamente DEPOIS de "Sem tag"
+        // se a ordenação fosse puramente alfabética — usado para provar que
+        // "Sem tag" é sempre por último por regra explícita, não por acaso.
+        const alvoZ = await prisma.alvo.create({
+          data: {
+            nome: "Cripto",
+            percentual_alvo_bps: 1000,
+            tag: "Z-CRIPTO",
+            vigencia_inicio: new Date("2026-01-01"),
+          },
+        });
+        // Alvo sem tag: cai no grupo "Sem tag".
+        const alvoSemTag = await prisma.alvo.create({
+          data: {
+            nome: "Caixa",
+            percentual_alvo_bps: 3000,
+            vigencia_inicio: new Date("2026-01-01"),
+          },
+        });
+
+        const sessao = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-07",
+            data_export: new Date("2026-07-28"),
+            status: "VIGENTE",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+        await prisma.posicao.createMany({
+          data: [
+            {
+              sessao_import_id: sessao.id,
+              chave_export: "ATIVO-A1",
+              instituicao: "Itaú",
+              quantidade: "1",
+              patrimonio_hoje_centavos: 150_000,
+              tipo_grupo: "ACOES",
+            },
+            {
+              sessao_import_id: sessao.id,
+              chave_export: "ATIVO-A2",
+              instituicao: "Itaú",
+              quantidade: "1",
+              patrimonio_hoje_centavos: 50_000,
+              tipo_grupo: "ACOES",
+            },
+            {
+              sessao_import_id: sessao.id,
+              chave_export: "ATIVO-R",
+              instituicao: "Itaú",
+              quantidade: "1",
+              patrimonio_hoje_centavos: 300_000,
+              tipo_grupo: "FII_FIAGRO",
+            },
+            {
+              sessao_import_id: sessao.id,
+              chave_export: "ATIVO-Z",
+              instituicao: "Itaú",
+              quantidade: "1",
+              patrimonio_hoje_centavos: 100_000,
+              tipo_grupo: "OUTROS_FUNDOS",
+            },
+            {
+              sessao_import_id: sessao.id,
+              chave_export: "ATIVO-SEM-TAG",
+              instituicao: "Itaú",
+              quantidade: "1",
+              patrimonio_hoje_centavos: 400_000,
+              tipo_grupo: "TESOURO_DIRETO",
+            },
+          ],
+        });
+        await prisma.ativo_mapeado.createMany({
+          data: [
+            { chave_export: "ATIVO-A1", alvo_id: alvoA1.id, fora_da_carteira: false },
+            { chave_export: "ATIVO-A2", alvo_id: alvoA2.id, fora_da_carteira: false },
+            { chave_export: "ATIVO-R", alvo_id: alvoR.id, fora_da_carteira: false },
+            { chave_export: "ATIVO-Z", alvo_id: alvoZ.id, fora_da_carteira: false },
+            { chave_export: "ATIVO-SEM-TAG", alvo_id: alvoSemTag.id, fora_da_carteira: false },
+          ],
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        if (dados.vazio) throw new Error("não deveria ser vazio");
+
+        // patrimonioNaCarteiraCentavos = 150k+50k+300k+100k+400k = 1_000_000.
+        expect(dados.patrimonioNaCarteiraCentavos).toBe(1_000_000);
+
+        // 4 grupos: A-AÇÕES, R-REAL ESTATE, Z-CRIPTO, Sem tag.
+        expect(dados.alocacaoPorTag).toHaveLength(4);
+
+        // Ordenação alfabética, com "Sem tag" sempre por último — mesmo que
+        // "Z-CRIPTO" viesse depois dela em ordem puramente alfabética.
+        expect(dados.alocacaoPorTag.map((g) => g.tag)).toEqual([
+          "A-AÇÕES",
+          "R-REAL ESTATE",
+          "Z-CRIPTO",
+          "Sem tag",
+        ]);
+
+        const acoes = dados.alocacaoPorTag.find((g) => g.tag === "A-AÇÕES")!;
+        // Soma dos 2 alvos do grupo — não sobrescreve, agrega.
+        expect(acoes.qtdAlvos).toBe(2);
+        expect(acoes.percentualAlvoBps).toBe(3000); // 2000 + 1000
+        expect(acoes.valorAtualCentavos).toBe(200_000); // 150k + 50k
+        // Mesma fórmula usada por alvo individual, sobre patrimonioNaCarteiraCentavos.
+        expect(acoes.percentualAtualBps).toBe(2000); // 200_000/1_000_000 = 20%
+        expect(acoes.desvioBps).toBe(-1000); // 2000 - 3000
+        expect(acoes.dentroDaBanda).toBe(false); // banda default 150 bps
+
+        const imoveis = dados.alocacaoPorTag.find((g) => g.tag === "R-REAL ESTATE")!;
+        expect(imoveis.qtdAlvos).toBe(1);
+        expect(imoveis.percentualAlvoBps).toBe(3000);
+        expect(imoveis.valorAtualCentavos).toBe(300_000);
+        expect(imoveis.percentualAtualBps).toBe(3000);
+        expect(imoveis.desvioBps).toBe(0);
+        expect(imoveis.dentroDaBanda).toBe(true);
+
+        const cripto = dados.alocacaoPorTag.find((g) => g.tag === "Z-CRIPTO")!;
+        expect(cripto.qtdAlvos).toBe(1);
+        expect(cripto.percentualAlvoBps).toBe(1000);
+        expect(cripto.valorAtualCentavos).toBe(100_000);
+        expect(cripto.percentualAtualBps).toBe(1000);
+        expect(cripto.desvioBps).toBe(0);
+        expect(cripto.dentroDaBanda).toBe(true);
+
+        const semTag = dados.alocacaoPorTag.find((g) => g.tag === "Sem tag")!;
+        expect(semTag.qtdAlvos).toBe(1);
+        expect(semTag.percentualAlvoBps).toBe(3000);
+        expect(semTag.valorAtualCentavos).toBe(400_000);
+        expect(semTag.percentualAtualBps).toBe(4000);
+        expect(semTag.desvioBps).toBe(1000);
+        expect(semTag.dentroDaBanda).toBe(false);
+
+        // Consistência: a soma dos valores por grupo bate com a soma por alvo
+        // individual e com o patrimônio na carteira.
+        const somaPorTag = dados.alocacaoPorTag.reduce((acc, g) => acc + g.valorAtualCentavos, 0);
+        const somaPorAlvo = dados.alocacao.reduce((acc, a) => acc + a.valorAtualCentavos, 0);
+        expect(somaPorTag).toBe(somaPorAlvo);
+        expect(somaPorTag).toBe(dados.patrimonioNaCarteiraCentavos);
+      });
+
+      it("todos os alvos vigentes sem tag: um único grupo 'Sem tag' contendo todos", async () => {
+        const alvo1 = await prisma.alvo.create({
+          data: { nome: "A", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        const alvo2 = await prisma.alvo.create({
+          data: { nome: "B", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        const sessao = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-07",
+            data_export: new Date("2026-07-28"),
+            status: "VIGENTE",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+        await prisma.posicao.createMany({
+          data: [
+            {
+              sessao_import_id: sessao.id,
+              chave_export: "ATIVO-A",
+              instituicao: "Itaú",
+              quantidade: "1",
+              patrimonio_hoje_centavos: 100_000,
+              tipo_grupo: "ACOES",
+            },
+            {
+              sessao_import_id: sessao.id,
+              chave_export: "ATIVO-B",
+              instituicao: "Itaú",
+              quantidade: "1",
+              patrimonio_hoje_centavos: 100_000,
+              tipo_grupo: "ACOES",
+            },
+          ],
+        });
+        await prisma.ativo_mapeado.createMany({
+          data: [
+            { chave_export: "ATIVO-A", alvo_id: alvo1.id, fora_da_carteira: false },
+            { chave_export: "ATIVO-B", alvo_id: alvo2.id, fora_da_carteira: false },
+          ],
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        if (dados.vazio) throw new Error("não deveria ser vazio");
+
+        expect(dados.alocacaoPorTag).toHaveLength(1);
+        expect(dados.alocacaoPorTag[0].tag).toBe("Sem tag");
+        expect(dados.alocacaoPorTag[0].qtdAlvos).toBe(2);
+        expect(dados.alocacaoPorTag[0].percentualAlvoBps).toBe(10000);
+        expect(dados.alocacaoPorTag[0].valorAtualCentavos).toBe(200_000);
+      });
+    });
   });
 
   describe("dadosHistorico", () => {

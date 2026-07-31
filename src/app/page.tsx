@@ -18,6 +18,7 @@ import { AlertTriangle, Calculator, Upload } from "lucide-react";
 
 import { dadosDashboard } from "@/app/actions/dashboard";
 import { AlocacaoAtualVsAlvo } from "@/components/dashboard/alocacao-atual-vs-alvo";
+import { AlocacaoPorTag } from "@/components/dashboard/alocacao-por-tag";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -209,6 +210,22 @@ export default function DashboardPage() {
         </CardHeader>
         <CardContent>
           <AlocacaoAtualVsAlvo alocacao={dados.alocacao} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Alocação por carteira/tag</CardTitle>
+          <CardDescription>
+            Mesma comparação atual vs. alvo, agrupada pela tag livre de cada alvo (ver{" "}
+            <Link href="/alvos" className="underline">
+              /alvos
+            </Link>
+            ). Alvos sem tag entram em &quot;Sem tag&quot;.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <AlocacaoPorTag alocacaoPorTag={dados.alocacaoPorTag} />
         </CardContent>
       </Card>
 

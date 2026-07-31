@@ -85,6 +85,32 @@ export interface AlocacaoPorAlvo {
   dentroDaBanda: boolean;
 }
 
+/**
+ * Alocação atual vs. alvo agrupada por `tag` (categorização livre do
+ * usuário — ex.: A-AÇÕES, R-REAL ESTATE, C-CAIXA). Alvos sem `tag` entram no
+ * grupo "Sem tag". Mesma segunda passada sobre os dados já buscados por
+ * `dadosDashboard` para montar `alocacao`; nenhuma query nova. Segue
+ * EXATAMENTE a mesma fórmula de `percentualAtualBps`/`desvioBps`/
+ * `dentroDaBanda` já usada por alvo (ver `AlocacaoPorAlvo`), só que somando
+ * `percentual_alvo_bps`/`valorAtualCentavos` de todos os alvos do grupo antes
+ * de aplicar a fórmula.
+ */
+export interface AlocacaoPorTag {
+  /** Nome livre da tag, ou `"Sem tag"` para alvos sem `tag` definida. */
+  tag: string;
+  qtdAlvos: number;
+  /** Soma de `percentual_alvo_bps` dos alvos do grupo. */
+  percentualAlvoBps: number;
+  /** Soma de `valorAtualCentavos` dos alvos do grupo. */
+  valorAtualCentavos: number;
+  /** `valorAtualCentavos` do grupo / `patrimonioNaCarteiraCentavos` * 10000, truncado — mesma fórmula usada por alvo. */
+  percentualAtualBps: number;
+  /** `percentualAtualBps - percentualAlvoBps` do grupo. */
+  desvioBps: number;
+  /** `Math.abs(desvioBps) <= bandaToleranciaBps` — mesma regra usada por alvo. */
+  dentroDaBanda: boolean;
+}
+
 /** Estado "app vazio" — nenhuma sessão de import foi confirmada ainda. */
 export interface DashboardVazio {
   vazio: true;
@@ -103,6 +129,8 @@ export interface DashboardComDados {
   patrimonioForaDaCarteiraCentavos: number;
   patrimonioPendenteCentavos: number;
   alocacao: AlocacaoPorAlvo[];
+  /** Mesma alocação de `alocacao`, agrupada por `tag` — ver `AlocacaoPorTag`. */
+  alocacaoPorTag: AlocacaoPorTag[];
   foraDaCarteira: AtivoComValor[];
   pendentes: AtivoComValor[];
   qtdPendencias: number;
@@ -246,6 +274,66 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
   };
 }
 
+/** Rótulo do grupo de alvos sem `tag` definida — sempre por último na ordenação de `alocacaoPorTag`. */
+const SEM_TAG = "Sem tag";
+
+/**
+ * Agrupa os alvos vigentes por `tag` e soma `percentual_alvo_bps`/
+ * `valorAtualCentavos` (via `valorPorAlvoId`, já calculado por
+ * `classificarPosicoesDaSessao`) dentro de cada grupo, aplicando por grupo a
+ * MESMA fórmula de `percentualAtualBps`/`desvioBps`/`dentroDaBanda` já usada
+ * por alvo em `dadosDashboard` (nenhuma query nova — segunda passada sobre
+ * dados já buscados). Alvos sem `tag` entram em `SEM_TAG`. Ordenado
+ * alfabeticamente por `tag`, com `SEM_TAG` sempre por último.
+ */
+function agruparAlocacaoPorTag(
+  alvosVigentes: Array<{ id: string; tag: string | null; percentual_alvo_bps: number }>,
+  valorPorAlvoId: Map<string, number>,
+  patrimonioNaCarteiraCentavos: number,
+  bandaToleranciaBps: number,
+): AlocacaoPorTag[] {
+  interface Acumulador {
+    qtdAlvos: number;
+    percentualAlvoBps: number;
+    valorAtualCentavos: number;
+  }
+  const grupos = new Map<string, Acumulador>();
+
+  for (const alvo of alvosVigentes) {
+    const tag = alvo.tag ?? SEM_TAG;
+    const valorAtualCentavos = valorPorAlvoId.get(alvo.id) ?? 0;
+    const acc = grupos.get(tag) ?? { qtdAlvos: 0, percentualAlvoBps: 0, valorAtualCentavos: 0 };
+    acc.qtdAlvos += 1;
+    acc.percentualAlvoBps += alvo.percentual_alvo_bps;
+    acc.valorAtualCentavos += valorAtualCentavos;
+    grupos.set(tag, acc);
+  }
+
+  const resultado: AlocacaoPorTag[] = Array.from(grupos.entries()).map(([tag, acc]) => {
+    const percentualAtualBps =
+      patrimonioNaCarteiraCentavos > 0
+        ? Math.trunc((acc.valorAtualCentavos * 10000) / patrimonioNaCarteiraCentavos)
+        : 0;
+    const desvioBps = percentualAtualBps - acc.percentualAlvoBps;
+
+    return {
+      tag,
+      qtdAlvos: acc.qtdAlvos,
+      percentualAlvoBps: acc.percentualAlvoBps,
+      valorAtualCentavos: acc.valorAtualCentavos,
+      percentualAtualBps,
+      desvioBps,
+      dentroDaBanda: Math.abs(desvioBps) <= bandaToleranciaBps,
+    };
+  });
+
+  return resultado.sort((a, b) => {
+    if (a.tag === SEM_TAG) return b.tag === SEM_TAG ? 0 : 1;
+    if (b.tag === SEM_TAG) return -1;
+    return a.tag.localeCompare(b.tag);
+  });
+}
+
 /**
  * Dados da tela 6.1 (dashboard/home): patrimônio consolidado + data das
  * posições, alocação atual vs. alvo por alvo com desvio e banda de
@@ -296,6 +384,13 @@ export async function dadosDashboard(): Promise<DadosDashboardOutput> {
     };
   });
 
+  const alocacaoPorTag = agruparAlocacaoPorTag(
+    alvosVigentes,
+    classificacao.valorPorAlvoId,
+    classificacao.patrimonioNaCarteiraCentavos,
+    bandaToleranciaBps,
+  );
+
   return {
     vazio: false,
     sessaoImportId: sessao.id,
@@ -306,6 +401,7 @@ export async function dadosDashboard(): Promise<DadosDashboardOutput> {
     patrimonioForaDaCarteiraCentavos: classificacao.patrimonioForaDaCarteiraCentavos,
     patrimonioPendenteCentavos: classificacao.patrimonioPendenteCentavos,
     alocacao,
+    alocacaoPorTag,
     foraDaCarteira: classificacao.foraDaCarteira,
     pendentes: classificacao.pendentes,
     qtdPendencias,

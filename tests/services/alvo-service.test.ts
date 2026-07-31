@@ -173,8 +173,13 @@ describe("alvo-service", () => {
   });
 
   describe("novaVigencia()", () => {
-    it("fecha a vigência atual, clona os alvos (mesmo nome/percentual, novo id, vigência aberta) e preserva o histórico", async () => {
-      const acoes = await alvoService.criarAlvo({ nome: "Ações BR", percentualAlvoBps: 6000 });
+    it("fecha a vigência atual, clona os alvos (mesmo nome/percentual/tag, novo id, vigência aberta) e preserva o histórico", async () => {
+      const acoes = await alvoService.criarAlvo({
+        nome: "Ações BR",
+        percentualAlvoBps: 6000,
+        tag: "A-AÇÕES",
+      });
+      // Sem tag (null) — a propagação da tag também precisa preservar o null.
       const rendaFixa = await alvoService.criarAlvo({ nome: "Pós-fixado", percentualAlvoBps: 4000 });
 
       const { alvos: clones } = await alvoService.novaVigencia();
@@ -183,6 +188,10 @@ describe("alvo-service", () => {
       const clonePorNome = new Map(clones.map((c) => [c.nome, c]));
       expect(clonePorNome.get("Ações BR")?.percentualAlvoBps).toBe(6000);
       expect(clonePorNome.get("Pós-fixado")?.percentualAlvoBps).toBe(4000);
+      // A tag sobrevive ao versionamento: se o alvo tinha tag "A-AÇÕES" antes
+      // de novaVigencia(), o clone na nova vigência também deve ter.
+      expect(clonePorNome.get("Ações BR")?.tag).toBe("A-AÇÕES");
+      expect(clonePorNome.get("Pós-fixado")?.tag).toBeNull();
       for (const clone of clones) {
         expect(clone.vigenciaFim).toBeNull();
         expect(clone.id).not.toBe(acoes.id);
@@ -351,6 +360,109 @@ describe("alvo-service", () => {
 
       const listagem = await alvoService.listarAlvos();
       expect(listagem.alvos[0].qtdAtivosMapeados).toBe(2);
+    });
+  });
+
+  describe("tag (categorização livre)", () => {
+    it("criarAlvo sem tag grava null", async () => {
+      const alvo = await alvoService.criarAlvo({ nome: "Sem tag", percentualAlvoBps: 10000 });
+      expect(alvo.tag).toBeNull();
+    });
+
+    it("criarAlvo normaliza string vazia/só espaço para null", async () => {
+      const vazia = await alvoService.criarAlvo({ nome: "A", percentualAlvoBps: 5000, tag: "" });
+      expect(vazia.tag).toBeNull();
+
+      const soEspaco = await alvoService.criarAlvo({ nome: "B", percentualAlvoBps: 5000, tag: "   " });
+      expect(soEspaco.tag).toBeNull();
+    });
+
+    it("criarAlvo grava a tag com trim() aplicado", async () => {
+      const alvo = await alvoService.criarAlvo({
+        nome: "Ações BR",
+        percentualAlvoBps: 10000,
+        tag: "  A-AÇÕES  ",
+      });
+      expect(alvo.tag).toBe("A-AÇÕES");
+    });
+
+    it("atualizarAlvo com tag=undefined (campo omitido) não altera a tag existente", async () => {
+      const alvo = await alvoService.criarAlvo({
+        nome: "Ações BR",
+        percentualAlvoBps: 10000,
+        tag: "A-AÇÕES",
+      });
+
+      const atualizado = await alvoService.atualizarAlvo(alvo.id, { percentualAlvoBps: 9000 });
+      expect(atualizado.tag).toBe("A-AÇÕES");
+      expect(atualizado.percentualAlvoBps).toBe(9000);
+    });
+
+    it("atualizarAlvo com tag=null ou string vazia LIMPA a tag existente", async () => {
+      const alvoNull = await alvoService.criarAlvo({
+        nome: "Ações BR",
+        percentualAlvoBps: 10000,
+        tag: "A-AÇÕES",
+      });
+      const limpoPorNull = await alvoService.atualizarAlvo(alvoNull.id, { tag: null });
+      expect(limpoPorNull.tag).toBeNull();
+
+      const alvoVazio = await alvoService.criarAlvo({
+        nome: "Pós-fixado",
+        percentualAlvoBps: 10000,
+        tag: "R-RENDA FIXA",
+      });
+      const limpoPorVazia = await alvoService.atualizarAlvo(alvoVazio.id, { tag: "   " });
+      expect(limpoPorVazia.tag).toBeNull();
+    });
+
+    it("atualizarAlvo troca a tag existente por uma nova (com trim)", async () => {
+      const alvo = await alvoService.criarAlvo({
+        nome: "Ações BR",
+        percentualAlvoBps: 10000,
+        tag: "A-AÇÕES",
+      });
+
+      const atualizado = await alvoService.atualizarAlvo(alvo.id, { tag: "  R-REAL ESTATE  " });
+      expect(atualizado.tag).toBe("R-REAL ESTATE");
+    });
+  });
+
+  describe("listarTagsExistentes", () => {
+    it("nenhum alvo cadastrado: retorna lista vazia", async () => {
+      expect(await alvoService.listarTagsExistentes()).toEqual([]);
+    });
+
+    it("retorna tags distintas, não-nulas, ordenadas alfabeticamente, ignorando duplicatas e nulls", async () => {
+      await alvoService.criarAlvo({ nome: "Ações BR", percentualAlvoBps: 3000, tag: "A-AÇÕES" });
+      await alvoService.criarAlvo({ nome: "Ações US", percentualAlvoBps: 2000, tag: "A-AÇÕES" });
+      await alvoService.criarAlvo({ nome: "FIIs", percentualAlvoBps: 3000, tag: "R-REAL ESTATE" });
+      await alvoService.criarAlvo({ nome: "Caixa", percentualAlvoBps: 2000 }); // sem tag
+
+      const tags = await alvoService.listarTagsExistentes();
+      expect(tags).toEqual(["A-AÇÕES", "R-REAL ESTATE"]);
+    });
+
+    it("inclui tags de vigências FECHADAS, não só da vigência aberta", async () => {
+      await alvoService.criarAlvo({ nome: "Ações BR", percentualAlvoBps: 10000, tag: "A-AÇÕES" });
+      // Fecha a vigência atual (a tag "A-AÇÕES" migra para o clone, mas o
+      // original fechado também continua no banco com a mesma tag).
+      await alvoService.novaVigencia();
+
+      // Um alvo de vigência fechada "pura" (criado direto via prisma, sem
+      // passar pelo clone) também deve alimentar a sugestão do autocomplete.
+      await prisma.alvo.create({
+        data: {
+          nome: "Legado",
+          percentual_alvo_bps: 10000,
+          tag: "C-CAIXA",
+          vigencia_inicio: new Date("2020-01-01"),
+          vigencia_fim: new Date("2020-06-01"),
+        },
+      });
+
+      const tags = await alvoService.listarTagsExistentes();
+      expect(tags).toEqual(["A-AÇÕES", "C-CAIXA"]);
     });
   });
 });

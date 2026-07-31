@@ -16,6 +16,7 @@ import { toast } from "sonner";
 
 import {
   listarAlvos,
+  listarTagsExistentes,
   novaVigencia,
   removerAlvo,
   salvarAlvo,
@@ -90,8 +91,15 @@ export default function AlvosPage() {
   const [editandoId, setEditandoId] = useState<string | null>(null);
   const [nomeTexto, setNomeTexto] = useState("");
   const [percentualTexto, setPercentualTexto] = useState("");
+  const [tagTexto, setTagTexto] = useState("");
   const [erroForm, setErroForm] = useState<string | null>(null);
   const [salvando, setSalvando] = useState(false);
+
+  // Sugestões de tag para o autocomplete do campo "Tag" — tags já usadas em
+  // qualquer alvo/vigência (ver src/services/alvo-service.ts
+  // listarTagsExistentes). Campo livre: a lista é só sugestão, nunca
+  // restringe o que o usuário pode digitar.
+  const [tagsSugeridas, setTagsSugeridas] = useState<string[]>([]);
 
   // Confirmação de remoção (a remoção é soft-delete, mas afeta a soma e pode
   // deixar ativos vinculados "órfãos" de vigência — vale confirmar).
@@ -109,17 +117,23 @@ export default function AlvosPage() {
   const alvosOrdenados = useSortableRows(dados?.alvos ?? [], {
     nome: (a) => a.nome,
     percentualAlvoBps: (a) => a.percentualAlvoBps,
+    tag: (a) => a.tag ?? "",
     qtdAtivosMapeados: (a) => a.qtdAtivosMapeados,
   });
 
   const carregar = useCallback(async () => {
-    const resp = await listarAlvos();
-    if (!resp.ok) {
-      setErroCarregamento(resp.erro);
+    const [respAlvos, respTags] = await Promise.all([listarAlvos(), listarTagsExistentes()]);
+    if (!respAlvos.ok) {
+      setErroCarregamento(respAlvos.erro);
       setFase("erro");
       return;
     }
-    setDados(resp.data);
+    setDados(respAlvos.data);
+    // Falha ao buscar sugestões não impede o uso da tela — o campo de tag
+    // continua livre, só sem autocomplete.
+    if (respTags.ok) {
+      setTagsSugeridas(respTags.data);
+    }
     setFase("pronto");
   }, []);
 
@@ -131,6 +145,7 @@ export default function AlvosPage() {
     setEditandoId(null);
     setNomeTexto("");
     setPercentualTexto("");
+    setTagTexto("");
     setErroForm(null);
   }
 
@@ -138,6 +153,7 @@ export default function AlvosPage() {
     setEditandoId(alvo.id);
     setNomeTexto(alvo.nome);
     setPercentualTexto(bpsParaTextoEditavel(alvo.percentualAlvoBps));
+    setTagTexto(alvo.tag ?? "");
     setErroForm(null);
   }
 
@@ -163,6 +179,7 @@ export default function AlvosPage() {
       id: editandoId ?? undefined,
       nome: nomeTexto.trim(),
       percentualAlvoBps,
+      tag: tagTexto.trim(),
     };
 
     setSalvando(true);
@@ -174,6 +191,13 @@ export default function AlvosPage() {
         return;
       }
       setDados(resp.data);
+      // Mantém o autocomplete atualizado com uma tag recém-criada, sem
+      // precisar de uma nova ida ao servidor (só sugestão local; a fonte da
+      // verdade continua sendo `listarTagsExistentes` no próximo `carregar`).
+      const tagSalva = tagTexto.trim();
+      if (tagSalva && !tagsSugeridas.includes(tagSalva)) {
+        setTagsSugeridas([...tagsSugeridas, tagSalva].sort((a, b) => a.localeCompare(b)));
+      }
       toast.success(editandoId ? "Alvo atualizado." : "Alvo criado.");
       limparFormulario();
     } finally {
@@ -303,6 +327,23 @@ export default function AlvosPage() {
               onChange={(e) => setPercentualTexto(e.target.value)}
             />
           </Field>
+          <Field className="sm:max-w-52">
+            <FieldLabel htmlFor="alvo-tag">Tag</FieldLabel>
+            <Input
+              id="alvo-tag"
+              list="alvo-tags-sugeridas"
+              placeholder="ex.: A-AÇÕES, R-REAL ESTATE"
+              value={tagTexto}
+              onChange={(e) => setTagTexto(e.target.value)}
+            />
+            {/* Campo livre: `datalist` só sugere as tags já usadas (ver
+                `listarTagsExistentes`), nunca restringe o valor digitado. */}
+            <datalist id="alvo-tags-sugeridas">
+              {tagsSugeridas.map((tag) => (
+                <option key={tag} value={tag} />
+              ))}
+            </datalist>
+          </Field>
           <div className="flex gap-2">
             <Button onClick={() => void handleSalvar()} disabled={salvando}>
               {salvando ? "Salvando…" : editandoId ? "Salvar edição" : "Criar alvo"}
@@ -350,6 +391,12 @@ export default function AlvosPage() {
                     Percentual alvo
                   </SortableTableHead>
                   <SortableTableHead
+                    sortDirection={alvosOrdenados.sortDirectionFor("tag")}
+                    onSort={() => alvosOrdenados.toggleSort("tag")}
+                  >
+                    Tag
+                  </SortableTableHead>
+                  <SortableTableHead
                     sortDirection={alvosOrdenados.sortDirectionFor("qtdAtivosMapeados")}
                     onSort={() => alvosOrdenados.toggleSort("qtdAtivosMapeados")}
                   >
@@ -363,6 +410,13 @@ export default function AlvosPage() {
                   <TableRow key={alvo.id}>
                     <TableCell>{alvo.nome}</TableCell>
                     <TableCell>{formatBps(alvo.percentualAlvoBps)}</TableCell>
+                    <TableCell>
+                      {alvo.tag ? (
+                        alvo.tag
+                      ) : (
+                        <span className="text-muted-foreground">Sem tag</span>
+                      )}
+                    </TableCell>
                     <TableCell>
                       {alvo.qtdAtivosMapeados} ativo(s) vinculado(s)
                     </TableCell>

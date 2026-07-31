@@ -19,6 +19,7 @@ import {
   atualizarAlvo as atualizarAlvoService,
   criarAlvo as criarAlvoService,
   listarAlvos as listarAlvosService,
+  listarTagsExistentes as listarTagsExistentesService,
   novaVigencia as novaVigenciaService,
   removerAlvo as removerAlvoService,
   type ListarAlvosOutput,
@@ -45,16 +46,36 @@ export async function listarAlvos(): Promise<ActionResult<ListarAlvosOutput>> {
 }
 
 /**
+ * Tags distintas já usadas em qualquer alvo (todas as vigências), ordenadas
+ * alfabeticamente — alimenta o autocomplete do campo "Tag" no formulário de
+ * alvo (tela 6.4). Campo livre: nenhuma validação de conteúdo aqui, só
+ * repasse ao serviço.
+ */
+export async function listarTagsExistentes(): Promise<ActionResult<string[]>> {
+  try {
+    const data = await listarTagsExistentesService();
+    return { ok: true, data };
+  } catch (erro) {
+    return { ok: false, erro: mensagemDeErro(erro) };
+  }
+}
+
+/**
  * Input do formulário de alvo (tela 6.4): `id` presente ⇒ atualiza o alvo
  * existente (só permitido na vigência aberta); `id` ausente ⇒ cria um alvo
  * novo. `percentualAlvoBps` já chega convertido em bps — a conversão de
  * texto digitado ("12,5%"/"12.5") para bps é responsabilidade da UI
- * (borda de exibição), não desta action.
+ * (borda de exibição), não desta action. `tag` é campo livre (categorização
+ * do usuário, ex.: "A-AÇÕES") — mesmo padrão partial-update de
+ * `alvo-service.ts`: chave ausente = não mexe na tag existente; `null`/string
+ * vazia limpa a tag. Sem validação de conteúdo (é livre por design), só de
+ * shape (deve ser string/null/undefined).
  */
 export interface SalvarAlvoInput {
   id?: string;
   nome: string;
   percentualAlvoBps: number;
+  tag?: string | null;
 }
 
 /** Cria ou atualiza um alvo (dependendo de `id`) e devolve a lista atualizada + status da soma (FR-017). */
@@ -67,17 +88,22 @@ export async function salvarAlvo(
   if (!Number.isInteger(input.percentualAlvoBps) || input.percentualAlvoBps <= 0) {
     return { ok: false, erro: "Informe um percentual maior que zero para o alvo." };
   }
+  if (input.tag !== undefined && input.tag !== null && typeof input.tag !== "string") {
+    return { ok: false, erro: "Tag inválida." };
+  }
 
   try {
     if (input.id) {
       await atualizarAlvoService(input.id, {
         nome: input.nome,
         percentualAlvoBps: input.percentualAlvoBps,
+        ...(input.tag !== undefined ? { tag: input.tag } : {}),
       });
     } else {
       await criarAlvoService({
         nome: input.nome,
         percentualAlvoBps: input.percentualAlvoBps,
+        tag: input.tag,
       });
     }
     const data = await listarAlvosService();
