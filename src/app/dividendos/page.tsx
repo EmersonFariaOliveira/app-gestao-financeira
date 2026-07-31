@@ -43,6 +43,7 @@ import {
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
+  SortableTableHead,
   Table,
   TableBody,
   TableCell,
@@ -51,6 +52,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatCentavosParaReais, parseDecimalParaCentavos } from "@/core/money";
+import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { DividendoDto } from "@/services/dividendo-service";
 
 type Fase = "carregando" | "erro" | "pronto";
@@ -105,6 +107,16 @@ export default function DividendosPage() {
   const [editandoId, setEditandoId] = useState<string | null>(null);
   const [edicao, setEdicao] = useState<EdicaoLinha>({ mesTexto: "", valorTexto: "" });
   const [processandoId, setProcessandoId] = useState<string | null>(null);
+
+  // Hook chamado incondicionalmente (regra dos hooks), com fallback `[]`
+  // antes de carregar. "Status" e "Ações" ficam de fora: status é um badge
+  // derivado (sem valor de ordenação além do que Ativo/Mês já oferecem) e
+  // ações não têm valor estável.
+  const lancamentosOrdenados = useSortableRows(lancamentos, {
+    chaveExport: (l) => l.chaveExport,
+    mesReferencia: (l) => l.mesReferencia,
+    valorCentavos: (l) => l.valorCentavos,
+  });
 
   const carregar = useCallback(async (mes: string | null) => {
     const [respAtivos, respDividendos] = await Promise.all([
@@ -372,15 +384,30 @@ export default function DividendosPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Ativo</TableHead>
-                  <TableHead>Mês</TableHead>
-                  <TableHead>Valor</TableHead>
+                  <SortableTableHead
+                    sortDirection={lancamentosOrdenados.sortDirectionFor("chaveExport")}
+                    onSort={() => lancamentosOrdenados.toggleSort("chaveExport")}
+                  >
+                    Ativo
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={lancamentosOrdenados.sortDirectionFor("mesReferencia")}
+                    onSort={() => lancamentosOrdenados.toggleSort("mesReferencia")}
+                  >
+                    Mês
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={lancamentosOrdenados.sortDirectionFor("valorCentavos")}
+                    onSort={() => lancamentosOrdenados.toggleSort("valorCentavos")}
+                  >
+                    Valor
+                  </SortableTableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Ações</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {lancamentos.map((l) => {
+                {lancamentosOrdenados.sortedRows.map((l) => {
                   const utilizado = l.aporteId !== null;
                   const editando = editandoId === l.id;
                   const processando = processandoId === l.id;

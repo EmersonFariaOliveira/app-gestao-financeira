@@ -23,6 +23,7 @@ import { AlertTriangle, CheckCircle2 } from "lucide-react";
 
 import { CHART_COLORS } from "@/components/charts/chart-colors";
 import {
+  SortableTableHead,
   Table,
   TableBody,
   TableCell,
@@ -32,6 +33,7 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatBps, formatCentavosParaReais } from "@/core/money";
+import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { AlocacaoPorAlvo } from "@/services/dashboard-service";
 
 /** bps (1/100 p.p., 10000 = 100%) -> percentual visual 0-100 para `width`/`left` do CSS, sem afetar o número exibido (que continua vindo de `formatBps`). */
@@ -95,6 +97,17 @@ function LinhaBarra({ item }: { item: AlocacaoPorAlvo }) {
 }
 
 export function AlocacaoAtualVsAlvo({ alocacao }: { alocacao: AlocacaoPorAlvo[] }) {
+  // Hook chamado incondicionalmente (regra dos hooks), antes do early return
+  // abaixo — aceita array vazio sem problema. "Status" fica fora por ser um
+  // badge (booleano derivado do desvio), sem valor estável de ordenação
+  // adicional ao que "Desvio" já oferece.
+  const alocacaoOrdenada = useSortableRows(alocacao, {
+    nomeAlvo: (i) => i.nomeAlvo,
+    percentualAtualBps: (i) => i.percentualAtualBps,
+    percentualAlvoBps: (i) => i.percentualAlvoBps,
+    desvioBps: (i) => i.desvioBps,
+  });
+
   if (alocacao.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -122,15 +135,35 @@ export function AlocacaoAtualVsAlvo({ alocacao }: { alocacao: AlocacaoPorAlvo[] 
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Alvo</TableHead>
-              <TableHead>% atual</TableHead>
-              <TableHead>% alvo</TableHead>
-              <TableHead>Desvio</TableHead>
+              <SortableTableHead
+                sortDirection={alocacaoOrdenada.sortDirectionFor("nomeAlvo")}
+                onSort={() => alocacaoOrdenada.toggleSort("nomeAlvo")}
+              >
+                Alvo
+              </SortableTableHead>
+              <SortableTableHead
+                sortDirection={alocacaoOrdenada.sortDirectionFor("percentualAtualBps")}
+                onSort={() => alocacaoOrdenada.toggleSort("percentualAtualBps")}
+              >
+                % atual
+              </SortableTableHead>
+              <SortableTableHead
+                sortDirection={alocacaoOrdenada.sortDirectionFor("percentualAlvoBps")}
+                onSort={() => alocacaoOrdenada.toggleSort("percentualAlvoBps")}
+              >
+                % alvo
+              </SortableTableHead>
+              <SortableTableHead
+                sortDirection={alocacaoOrdenada.sortDirectionFor("desvioBps")}
+                onSort={() => alocacaoOrdenada.toggleSort("desvioBps")}
+              >
+                Desvio
+              </SortableTableHead>
               <TableHead>Status</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {alocacao.map((item) => (
+            {alocacaoOrdenada.sortedRows.map((item) => (
               <TableRow key={item.alvoId}>
                 <TableCell>{item.nomeAlvo}</TableCell>
                 <TableCell>{formatBps(item.percentualAtualBps)}</TableCell>

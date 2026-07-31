@@ -30,6 +30,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  SortableTableHead,
   Table,
   TableBody,
   TableCell,
@@ -40,6 +41,7 @@ import {
 import { EvolucaoPatrimonialChart } from "@/components/historico/evolucao-patrimonial-chart";
 import { SugeridoVsExecutadoChart } from "@/components/historico/sugerido-vs-executado-chart";
 import { formatCentavosParaReais } from "@/core/money";
+import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { DadosHistoricoOutput } from "@/services/dashboard-service";
 
 type FaseCarregamento = "carregando" | "erro" | "pronto";
@@ -56,6 +58,16 @@ export default function HistoricoPage() {
   const [fase, setFase] = useState<FaseCarregamento>("carregando");
   const [erro, setErro] = useState<string | null>(null);
   const [dados, setDados] = useState<DadosHistoricoOutput | null>(null);
+
+  // Hook chamado incondicionalmente (regra dos hooks), com fallback `[]`
+  // antes de `dados` carregar. "Instituições" fica de fora por ser uma
+  // lista (join de várias, sem valor único estável para ordenar).
+  const sessoesSubstituidasOrdenadas = useSortableRows(dados?.sessoesSubstituidas ?? [], {
+    mesReferencia: (s) => s.mesReferencia,
+    dataExport: (s) => new Date(s.dataExport).getTime(),
+    criadoEm: (s) => new Date(s.criadoEm).getTime(),
+    patrimonioTotalCentavos: (s) => s.patrimonioTotalCentavos,
+  });
 
   useEffect(() => {
     let cancelado = false;
@@ -175,15 +187,39 @@ export default function HistoricoPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Mês de referência</TableHead>
-                  <TableHead>Data das posições</TableHead>
-                  <TableHead>Import feito em</TableHead>
+                  <SortableTableHead
+                    sortDirection={sessoesSubstituidasOrdenadas.sortDirectionFor("mesReferencia")}
+                    onSort={() => sessoesSubstituidasOrdenadas.toggleSort("mesReferencia")}
+                  >
+                    Mês de referência
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={sessoesSubstituidasOrdenadas.sortDirectionFor("dataExport")}
+                    onSort={() => sessoesSubstituidasOrdenadas.toggleSort("dataExport")}
+                  >
+                    Data das posições
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={sessoesSubstituidasOrdenadas.sortDirectionFor("criadoEm")}
+                    onSort={() => sessoesSubstituidasOrdenadas.toggleSort("criadoEm")}
+                  >
+                    Import feito em
+                  </SortableTableHead>
                   <TableHead>Instituições</TableHead>
-                  <TableHead>Patrimônio total (naquele import)</TableHead>
+                  <SortableTableHead
+                    sortDirection={sessoesSubstituidasOrdenadas.sortDirectionFor(
+                      "patrimonioTotalCentavos",
+                    )}
+                    onSort={() =>
+                      sessoesSubstituidasOrdenadas.toggleSort("patrimonioTotalCentavos")
+                    }
+                  >
+                    Patrimônio total (naquele import)
+                  </SortableTableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {dados.sessoesSubstituidas.map((sessao) => (
+                {sessoesSubstituidasOrdenadas.sortedRows.map((sessao) => (
                   <TableRow key={sessao.sessaoImportId}>
                     <TableCell>{sessao.mesReferencia}</TableCell>
                     <TableCell>{formatarData(sessao.dataExport)}</TableCell>

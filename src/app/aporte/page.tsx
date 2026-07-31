@@ -48,6 +48,7 @@ import {
 import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
+  SortableTableHead,
   Table,
   TableBody,
   TableCell,
@@ -56,6 +57,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatBps, formatCentavosParaReais, parseDecimalParaCentavos } from "@/core/money";
+import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { AjusteUsuario, LinhaDivisao } from "@/core/motor";
 import type { CalcularOutput, LinhaAporte, PrepararCalculadoraOutput } from "@/services/aporte-service";
 
@@ -292,6 +294,25 @@ export default function AportePage() {
     }
   }
 
+  // Hooks de ordenação chamados incondicionalmente (regra dos hooks), antes
+  // dos early returns abaixo — aceitam array vazio sem problema. "Sugestão"
+  // (Input editável) e "Ações" ficam de fora da primeira tabela por não
+  // terem valor estável para ordenar; "Cotas/Preço" combina dois valores
+  // (cotas × preço) num único texto, também fora.
+  const filaOrdenada = useSortableRows(linhasCombinadas, {
+    nome: (l) => l.nome,
+    percentualAtualBps: (l) => l.percentualAtualBps,
+    deficitCentavos: (l) => l.deficitCentavos,
+    origem: (l) => l.origem ?? "",
+  });
+  const simulacaoOrdenada = useSortableRows(resultado?.resultado.simulacaoDepois ?? [], {
+    nome: (l) =>
+      linhasCombinadas.find((c) => c.alvoId === l.alvoId)?.nome ?? l.alvoId,
+    percentualAntesBps: (l) => l.percentualAntesBps,
+    percentualDepoisBps: (l) => l.percentualDepoisBps,
+    deficitDepoisCentavos: (l) => l.deficitDepoisCentavos,
+  });
+
   if (fase === "carregando") {
     return (
       <div className="flex flex-col gap-6">
@@ -435,17 +456,37 @@ export default function AportePage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Alvo</TableHead>
-                    <TableHead>% atual</TableHead>
-                    <TableHead>Déficit</TableHead>
+                    <SortableTableHead
+                      sortDirection={filaOrdenada.sortDirectionFor("nome")}
+                      onSort={() => filaOrdenada.toggleSort("nome")}
+                    >
+                      Alvo
+                    </SortableTableHead>
+                    <SortableTableHead
+                      sortDirection={filaOrdenada.sortDirectionFor("percentualAtualBps")}
+                      onSort={() => filaOrdenada.toggleSort("percentualAtualBps")}
+                    >
+                      % atual
+                    </SortableTableHead>
+                    <SortableTableHead
+                      sortDirection={filaOrdenada.sortDirectionFor("deficitCentavos")}
+                      onSort={() => filaOrdenada.toggleSort("deficitCentavos")}
+                    >
+                      Déficit
+                    </SortableTableHead>
                     <TableHead>Sugestão (R$)</TableHead>
-                    <TableHead>Origem</TableHead>
+                    <SortableTableHead
+                      sortDirection={filaOrdenada.sortDirectionFor("origem")}
+                      onSort={() => filaOrdenada.toggleSort("origem")}
+                    >
+                      Origem
+                    </SortableTableHead>
                     <TableHead>Cotas/Preço</TableHead>
                     <TableHead>Ações</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {linhasCombinadas.map((linha) => {
+                  {filaOrdenada.sortedRows.map((linha) => {
                     const ajustada = ajustes[linha.alvoId] !== undefined;
                     return (
                       <TableRow key={linha.alvoId}>
@@ -547,14 +588,34 @@ export default function AportePage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Alvo</TableHead>
-                    <TableHead>% antes</TableHead>
-                    <TableHead>% depois</TableHead>
-                    <TableHead>Déficit depois</TableHead>
+                    <SortableTableHead
+                      sortDirection={simulacaoOrdenada.sortDirectionFor("nome")}
+                      onSort={() => simulacaoOrdenada.toggleSort("nome")}
+                    >
+                      Alvo
+                    </SortableTableHead>
+                    <SortableTableHead
+                      sortDirection={simulacaoOrdenada.sortDirectionFor("percentualAntesBps")}
+                      onSort={() => simulacaoOrdenada.toggleSort("percentualAntesBps")}
+                    >
+                      % antes
+                    </SortableTableHead>
+                    <SortableTableHead
+                      sortDirection={simulacaoOrdenada.sortDirectionFor("percentualDepoisBps")}
+                      onSort={() => simulacaoOrdenada.toggleSort("percentualDepoisBps")}
+                    >
+                      % depois
+                    </SortableTableHead>
+                    <SortableTableHead
+                      sortDirection={simulacaoOrdenada.sortDirectionFor("deficitDepoisCentavos")}
+                      onSort={() => simulacaoOrdenada.toggleSort("deficitDepoisCentavos")}
+                    >
+                      Déficit depois
+                    </SortableTableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {resultado.resultado.simulacaoDepois.map((linha) => {
+                  {simulacaoOrdenada.sortedRows.map((linha) => {
                     const nome =
                       linhasCombinadas.find((l) => l.alvoId === linha.alvoId)?.nome ??
                       linha.alvoId;

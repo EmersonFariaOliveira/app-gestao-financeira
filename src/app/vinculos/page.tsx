@@ -45,6 +45,7 @@ import {
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
+  SortableTableHead,
   Table,
   TableBody,
   TableCell,
@@ -53,6 +54,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatBps, formatCentavosParaReais, parseDecimalParaCentavos } from "@/core/money";
+import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { ListarVinculosOutput, VincularAtivoInput } from "@/services/mapeamento-service";
 
 type Fase = "carregando" | "erro" | "pronto";
@@ -203,6 +205,20 @@ export default function VinculosPage() {
   async function handleMarcarForaDaCarteira(chaveExport: string) {
     await executarVinculo(chaveExport, { chaveExport, foraDaCarteira: true });
   }
+
+  // Hooks de ordenação chamados incondicionalmente (regra dos hooks) — usam
+  // fallback `[]` enquanto `vinculos` ainda não carregou; a coluna
+  // "Reatribuir para"/"Vincular a" (select) e "Ações" ficam de fora por não
+  // terem valor estável para ordenar.
+  const vinculadosOrdenados = useSortableRows(vinculos?.vinculados ?? [], {
+    chaveExport: (v) => v.chaveExport,
+    valorAtualCentavos: (v) => v.valorAtualCentavos,
+    nomeAlvo: (v) => v.nomeAlvo,
+  });
+  const foraDaCarteiraOrdenados = useSortableRows(vinculos?.foraDaCarteira ?? [], {
+    chaveExport: (f) => f.chaveExport,
+    valorAtualCentavos: (f) => f.valorAtualCentavos,
+  });
 
   if (fase === "carregando") {
     return (
@@ -367,15 +383,30 @@ export default function VinculosPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Chave do export</TableHead>
-                  <TableHead>Valor atual</TableHead>
-                  <TableHead>Alvo atual</TableHead>
+                  <SortableTableHead
+                    sortDirection={vinculadosOrdenados.sortDirectionFor("chaveExport")}
+                    onSort={() => vinculadosOrdenados.toggleSort("chaveExport")}
+                  >
+                    Chave do export
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={vinculadosOrdenados.sortDirectionFor("valorAtualCentavos")}
+                    onSort={() => vinculadosOrdenados.toggleSort("valorAtualCentavos")}
+                  >
+                    Valor atual
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={vinculadosOrdenados.sortDirectionFor("nomeAlvo")}
+                    onSort={() => vinculadosOrdenados.toggleSort("nomeAlvo")}
+                  >
+                    Alvo atual
+                  </SortableTableHead>
                   <TableHead>Reatribuir para</TableHead>
                   <TableHead>Ações</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {vinculados.map((v) => {
+                {vinculadosOrdenados.sortedRows.map((v) => {
                   const salvando = salvandoChave === v.chaveExport;
                   return (
                     <TableRow key={v.chaveExport}>
@@ -446,14 +477,24 @@ export default function VinculosPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Chave do export</TableHead>
-                  <TableHead>Valor atual</TableHead>
+                  <SortableTableHead
+                    sortDirection={foraDaCarteiraOrdenados.sortDirectionFor("chaveExport")}
+                    onSort={() => foraDaCarteiraOrdenados.toggleSort("chaveExport")}
+                  >
+                    Chave do export
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={foraDaCarteiraOrdenados.sortDirectionFor("valorAtualCentavos")}
+                    onSort={() => foraDaCarteiraOrdenados.toggleSort("valorAtualCentavos")}
+                  >
+                    Valor atual
+                  </SortableTableHead>
                   <TableHead>Vincular a</TableHead>
                   <TableHead>Ações</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {foraDaCarteira.map((f) => {
+                {foraDaCarteiraOrdenados.sortedRows.map((f) => {
                   const salvando = salvandoChave === f.chaveExport;
                   return (
                     <TableRow key={f.chaveExport}>

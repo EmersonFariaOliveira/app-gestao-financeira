@@ -48,14 +48,15 @@ import {
 import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
+  SortableTableHead,
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
 import { formatCentavosParaReais } from "@/core/money";
+import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { ErroParse } from "@/parser/types";
 
 /** "yyyy-mm-dd" ou "yyyy-mm-ddTHH:mm:ss..." (ISO) → "dd/mm/aaaa" para exibição; falha graciosamente devolvendo o ISO cru. */
@@ -165,6 +166,15 @@ export default function ImportPage() {
     setConfirmouInstituicoesFaltantes(false);
     setFaseAnalise("pronto");
   }, [arquivos, construirFormData]);
+
+  // "Cotação mais recente" pode ser `null` (dataMaisRecente não observada) —
+  // ordenado como string vazia (fica no início/fim conforme a direção).
+  const arquivosOrdenados = useSortableRows(preview?.arquivos ?? [], {
+    instituicao: (a) => a.instituicao,
+    qtdAtivos: (a) => a.qtdAtivos,
+    totalCentavos: (a) => a.totalCentavos,
+    dataMaisRecente: (a) => a.dataMaisRecente ?? "",
+  });
 
   const temInstituicoesFaltantes = (preview?.instituicoesFaltantes?.length ?? 0) > 0;
   const podeConfirmar = useMemo(() => {
@@ -311,14 +321,34 @@ export default function ImportPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Instituição</TableHead>
-                    <TableHead>Ativos</TableHead>
-                    <TableHead>Total</TableHead>
-                    <TableHead>Cotação mais recente</TableHead>
+                    <SortableTableHead
+                      sortDirection={arquivosOrdenados.sortDirectionFor("instituicao")}
+                      onSort={() => arquivosOrdenados.toggleSort("instituicao")}
+                    >
+                      Instituição
+                    </SortableTableHead>
+                    <SortableTableHead
+                      sortDirection={arquivosOrdenados.sortDirectionFor("qtdAtivos")}
+                      onSort={() => arquivosOrdenados.toggleSort("qtdAtivos")}
+                    >
+                      Ativos
+                    </SortableTableHead>
+                    <SortableTableHead
+                      sortDirection={arquivosOrdenados.sortDirectionFor("totalCentavos")}
+                      onSort={() => arquivosOrdenados.toggleSort("totalCentavos")}
+                    >
+                      Total
+                    </SortableTableHead>
+                    <SortableTableHead
+                      sortDirection={arquivosOrdenados.sortDirectionFor("dataMaisRecente")}
+                      onSort={() => arquivosOrdenados.toggleSort("dataMaisRecente")}
+                    >
+                      Cotação mais recente
+                    </SortableTableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {preview.arquivos.map((resumo) => (
+                  {arquivosOrdenados.sortedRows.map((resumo) => (
                     <TableRow key={resumo.instituicao}>
                       <TableCell>{resumo.instituicao}</TableCell>
                       <TableCell>{resumo.qtdAtivos}</TableCell>

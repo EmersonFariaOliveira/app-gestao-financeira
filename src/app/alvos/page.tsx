@@ -42,6 +42,7 @@ import {
 import { Field, FieldError, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
+  SortableTableHead,
   Table,
   TableBody,
   TableCell,
@@ -50,6 +51,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatBps, parseDecimalParaCentavos } from "@/core/money";
+import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { AlvoComContagemDto, ListarAlvosOutput } from "@/services/alvo-service";
 
 /**
@@ -100,6 +102,15 @@ export default function AlvosPage() {
   // no sentido de que os alvos atuais passam a ser somente-leitura).
   const [dialogVigenciaAberto, setDialogVigenciaAberto] = useState(false);
   const [processandoVigencia, setProcessandoVigencia] = useState(false);
+
+  // Hook chamado incondicionalmente (regra dos hooks), com fallback `[]`
+  // antes de `dados` carregar. "Ações" fica de fora por não ter valor
+  // estável de ordenação.
+  const alvosOrdenados = useSortableRows(dados?.alvos ?? [], {
+    nome: (a) => a.nome,
+    percentualAlvoBps: (a) => a.percentualAlvoBps,
+    qtdAtivosMapeados: (a) => a.qtdAtivosMapeados,
+  });
 
   const carregar = useCallback(async () => {
     const resp = await listarAlvos();
@@ -326,14 +337,29 @@ export default function AlvosPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Nome</TableHead>
-                  <TableHead>Percentual alvo</TableHead>
-                  <TableHead>Ativos vinculados</TableHead>
+                  <SortableTableHead
+                    sortDirection={alvosOrdenados.sortDirectionFor("nome")}
+                    onSort={() => alvosOrdenados.toggleSort("nome")}
+                  >
+                    Nome
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={alvosOrdenados.sortDirectionFor("percentualAlvoBps")}
+                    onSort={() => alvosOrdenados.toggleSort("percentualAlvoBps")}
+                  >
+                    Percentual alvo
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={alvosOrdenados.sortDirectionFor("qtdAtivosMapeados")}
+                    onSort={() => alvosOrdenados.toggleSort("qtdAtivosMapeados")}
+                  >
+                    Ativos vinculados
+                  </SortableTableHead>
                   <TableHead>Ações</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {dados.alvos.map((alvo) => (
+                {alvosOrdenados.sortedRows.map((alvo) => (
                   <TableRow key={alvo.id}>
                     <TableCell>{alvo.nome}</TableCell>
                     <TableCell>{formatBps(alvo.percentualAlvoBps)}</TableCell>

@@ -1,8 +1,10 @@
 "use client"
 
 import * as React from "react"
+import { ChevronDown, ChevronUp, ChevronsUpDown } from "lucide-react"
 
 import { cn } from "@/lib/utils"
+import type { SortDirection } from "@/hooks/use-sortable-rows"
 
 function Table({ className, ...props }: React.ComponentProps<"table">) {
   return (
@@ -78,6 +80,57 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
   )
 }
 
+interface SortableTableHeadProps extends React.ComponentProps<"th"> {
+  /** Direção ativa desta coluna (`undefined` = não ordenada no momento) — normalmente `sortDirectionFor(chave)` de `useSortableRows`. */
+  sortDirection?: SortDirection
+  /** Chamado ao clicar/ativar o cabeçalho — normalmente `() => toggleSort(chave)` de `useSortableRows`. */
+  onSort?: () => void
+}
+
+/**
+ * Variante de `TableHead` para colunas ordenáveis (src/hooks/use-sortable-rows.ts).
+ * O cabeçalho inteiro é um `<button>` clicável/operável por teclado, com
+ * `aria-sort` no `<th>` (acessibilidade) e um ícone de direção
+ * (neutro/asc/desc). Não usar em colunas de ações ou de inputs/selects
+ * interativos — não há valor estável para ordenar essas colunas.
+ */
+function SortableTableHead({
+  className,
+  children,
+  sortDirection,
+  onSort,
+  ...props
+}: SortableTableHeadProps) {
+  const Icone =
+    sortDirection === "asc" ? ChevronUp : sortDirection === "desc" ? ChevronDown : ChevronsUpDown
+
+  return (
+    <th
+      data-slot="table-head"
+      aria-sort={
+        sortDirection === "asc" ? "ascending" : sortDirection === "desc" ? "descending" : "none"
+      }
+      className={cn(
+        "h-10 px-2 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0",
+        className
+      )}
+      {...props}
+    >
+      <button
+        type="button"
+        onClick={onSort}
+        className="inline-flex items-center gap-1 rounded-sm font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+      >
+        {children}
+        <Icone
+          className={cn("size-3.5 shrink-0", sortDirection === undefined && "text-muted-foreground/50")}
+          aria-hidden
+        />
+      </button>
+    </th>
+  )
+}
+
 function TableCell({ className, ...props }: React.ComponentProps<"td">) {
   return (
     <td
@@ -110,6 +163,7 @@ export {
   TableBody,
   TableFooter,
   TableHead,
+  SortableTableHead,
   TableRow,
   TableCell,
   TableCaption,

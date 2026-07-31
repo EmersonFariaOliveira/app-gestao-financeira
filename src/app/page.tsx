@@ -28,14 +28,15 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  SortableTableHead,
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
 import { formatCentavosParaReais } from "@/core/money";
+import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { DadosDashboardOutput } from "@/services/dashboard-service";
 
 type FaseCarregamento = "carregando" | "erro" | "pronto";
@@ -52,6 +53,22 @@ export default function DashboardPage() {
   const [fase, setFase] = useState<FaseCarregamento>("carregando");
   const [erro, setErro] = useState<string | null>(null);
   const [dados, setDados] = useState<DadosDashboardOutput | null>(null);
+
+  // Hooks chamados incondicionalmente (regra dos hooks), com fallback `[]`
+  // antes de `dados` carregar / quando `dados.vazio` (DashboardVazio não tem
+  // `foraDaCarteira`/`pendentes` — só o estado com dados, ver
+  // src/services/dashboard-service.ts).
+  const foraDaCarteiraOrdenados = useSortableRows(
+    dados && !dados.vazio ? dados.foraDaCarteira : [],
+    {
+      chaveExport: (a) => a.chaveExport,
+      valorCentavos: (a) => a.valorCentavos,
+    },
+  );
+  const pendentesOrdenados = useSortableRows(dados && !dados.vazio ? dados.pendentes : [], {
+    chaveExport: (a) => a.chaveExport,
+    valorCentavos: (a) => a.valorCentavos,
+  });
 
   useEffect(() => {
     let cancelado = false;
@@ -209,12 +226,22 @@ export default function DashboardPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Ativo</TableHead>
-                  <TableHead>Valor</TableHead>
+                  <SortableTableHead
+                    sortDirection={foraDaCarteiraOrdenados.sortDirectionFor("chaveExport")}
+                    onSort={() => foraDaCarteiraOrdenados.toggleSort("chaveExport")}
+                  >
+                    Ativo
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={foraDaCarteiraOrdenados.sortDirectionFor("valorCentavos")}
+                    onSort={() => foraDaCarteiraOrdenados.toggleSort("valorCentavos")}
+                  >
+                    Valor
+                  </SortableTableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {dados.foraDaCarteira.map((ativo) => (
+                {foraDaCarteiraOrdenados.sortedRows.map((ativo) => (
                   <TableRow key={ativo.chaveExport}>
                     <TableCell>{ativo.chaveExport}</TableCell>
                     <TableCell>{formatCentavosParaReais(ativo.valorCentavos)}</TableCell>
@@ -242,12 +269,22 @@ export default function DashboardPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Ativo</TableHead>
-                  <TableHead>Valor</TableHead>
+                  <SortableTableHead
+                    sortDirection={pendentesOrdenados.sortDirectionFor("chaveExport")}
+                    onSort={() => pendentesOrdenados.toggleSort("chaveExport")}
+                  >
+                    Ativo
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={pendentesOrdenados.sortDirectionFor("valorCentavos")}
+                    onSort={() => pendentesOrdenados.toggleSort("valorCentavos")}
+                  >
+                    Valor
+                  </SortableTableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {dados.pendentes.map((ativo) => (
+                {pendentesOrdenados.sortedRows.map((ativo) => (
                   <TableRow key={ativo.chaveExport}>
                     <TableCell>{ativo.chaveExport}</TableCell>
                     <TableCell>{formatCentavosParaReais(ativo.valorCentavos)}</TableCell>
