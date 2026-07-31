@@ -318,7 +318,7 @@ describe("alvo-service", () => {
       const vinculos = await mapeamentoService.listarVinculos();
       expect(vinculos.pendentes).toEqual([]);
       expect(vinculos.vinculados).toEqual([
-        { chaveExport: "ZUMBI-ATIVO", alvoId: alvo.id, nomeAlvo: "Zumbi" },
+        { chaveExport: "ZUMBI-ATIVO", alvoId: alvo.id, nomeAlvo: "Zumbi", valorAtualCentavos: 0 },
       ]);
       const listagemAlvos = await alvoService.listarAlvos();
       expect(listagemAlvos.alvos.find((a) => a.id === alvo.id)).toBeDefined();

@@ -19,16 +19,19 @@ import { prisma } from "@/db/client";
 
 export interface VinculoPendente {
   chaveExport: string;
+  valorAtualCentavos: number;
 }
 
 export interface VinculoVinculado {
   chaveExport: string;
   alvoId: string;
   nomeAlvo: string;
+  valorAtualCentavos: number;
 }
 
 export interface VinculoForaDaCarteira {
   chaveExport: string;
+  valorAtualCentavos: number;
 }
 
 export interface ListarVinculosOutput {
@@ -50,38 +53,94 @@ export interface VinculoAtualizado {
 }
 
 /**
+ * Sessão VIGENTE mais recente (mesmo critério de
+ * `dashboard-service.obterSessaoVigenteMaisRecente`/
+ * `aporte-service.obterSessaoVigenteMaisRecente`). Cópia intencional da
+ * mesma query — não importada dos outros módulos (funções privadas deles)
+ * para não acoplar os serviços por uma função interna; os três locais devem
+ * permanecer idênticos se a regra mudar (só duas linhas de query, baixo
+ * risco de divergência silenciosa).
+ */
+async function obterSessaoVigenteMaisRecente() {
+  return prisma.sessao_import.findFirst({
+    where: { status: "VIGENTE" },
+    orderBy: [{ data_export: "desc" }, { criado_em: "desc" }],
+  });
+}
+
+/**
+ * Valor consolidado (soma de `patrimonio_hoje_centavos`) por `chave_export`
+ * na sessão VIGENTE mais recente — mesmo padrão de consolidação de
+ * `dashboard-service.classificarPosicoesDaSessao` (uma chave pode aparecer
+ * em instituições diferentes; consolida-se numa posição só). Se não houver
+ * nenhuma sessão VIGENTE ainda (app recém-instalado), retorna um Map vazio
+ * — chamador trata ausência como `0`, nunca lança erro.
+ */
+async function obterValorAtualPorChave(): Promise<Map<string, number>> {
+  const sessao = await obterSessaoVigenteMaisRecente();
+  const valorPorChave = new Map<string, number>();
+  if (!sessao) return valorPorChave;
+
+  const posicoesBrutas = await prisma.posicao.findMany({
+    where: { sessao_import_id: sessao.id },
+    select: { chave_export: true, patrimonio_hoje_centavos: true },
+  });
+
+  for (const p of posicoesBrutas) {
+    valorPorChave.set(
+      p.chave_export,
+      (valorPorChave.get(p.chave_export) ?? 0) + p.patrimonio_hoje_centavos,
+    );
+  }
+
+  return valorPorChave;
+}
+
+/**
  * Estado completo de `ativo_mapeado` (data-model.md, "Estados derivados"),
  * agrupado nos três baldes da tela 6.3. `vinculados` traz `nomeAlvo`
  * denormalizado para exibição direta (N-para-1: vários `chaveExport` podem
  * repetir o mesmo `alvoId`/`nomeAlvo` — agrupável no cliente por `alvoId`).
+ *
+ * Cada balde também traz `valorAtualCentavos`: o patrimônio consolidado da
+ * `chave_export` na sessão VIGENTE mais recente (mesmo padrão de
+ * `dashboard-service.classificarPosicoesDaSessao`). Uma `chave_export` sem
+ * posição na sessão vigente (ativo zerado/vendido, ou nunca chegou a ter
+ * posição na sessão atual) recebe `0` — nunca lança erro por ausência.
  */
 export async function listarVinculos(): Promise<ListarVinculosOutput> {
-  const registros = await prisma.ativo_mapeado.findMany({
-    include: { alvo: true },
-    orderBy: { chave_export: "asc" },
-  });
+  const [registros, valorPorChave] = await Promise.all([
+    prisma.ativo_mapeado.findMany({
+      include: { alvo: true },
+      orderBy: { chave_export: "asc" },
+    }),
+    obterValorAtualPorChave(),
+  ]);
 
   const pendentes: VinculoPendente[] = [];
   const vinculados: VinculoVinculado[] = [];
   const foraDaCarteira: VinculoForaDaCarteira[] = [];
 
   for (const registro of registros) {
+    const valorAtualCentavos = valorPorChave.get(registro.chave_export) ?? 0;
+
     if (registro.fora_da_carteira) {
       // Estado "fora da carteira" — independente de alvo_id (que, pela
       // invariante, deve estar null aqui; ver nota em vincularAtivo).
-      foraDaCarteira.push({ chaveExport: registro.chave_export });
+      foraDaCarteira.push({ chaveExport: registro.chave_export, valorAtualCentavos });
     } else if (registro.alvo_id !== null) {
       vinculados.push({
         chaveExport: registro.chave_export,
         alvoId: registro.alvo_id,
         nomeAlvo: registro.alvo?.nome ?? registro.alvo_id,
+        valorAtualCentavos,
       });
     } else {
       // Pendente: alvo_id = null AND fora_da_carteira = false — bloqueia a
       // calculadora (FR-015). aporte-service.listarPendencias faz a mesma
       // checagem hoje (duplicada por decisão explícita da task: não alterar
       // aporte-service nesta task); este é o balde equivalente.
-      pendentes.push({ chaveExport: registro.chave_export });
+      pendentes.push({ chaveExport: registro.chave_export, valorAtualCentavos });
     }
   }
 

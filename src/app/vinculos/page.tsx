@@ -52,7 +52,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatBps, parseDecimalParaCentavos } from "@/core/money";
+import { formatBps, formatCentavosParaReais, parseDecimalParaCentavos } from "@/core/money";
 import type { ListarVinculosOutput, VincularAtivoInput } from "@/services/mapeamento-service";
 
 type Fase = "carregando" | "erro" | "pronto";
@@ -254,7 +254,12 @@ export default function VinculosPage() {
                   key={pendente.chaveExport}
                   className="flex flex-col gap-3 rounded-lg border border-amber-400/40 bg-amber-400/5 p-3"
                 >
-                  <p className="font-medium">{pendente.chaveExport}</p>
+                  <p className="font-medium">
+                    {pendente.chaveExport}{" "}
+                    <span className="font-normal text-muted-foreground">
+                      — {formatCentavosParaReais(pendente.valorAtualCentavos)}
+                    </span>
+                  </p>
 
                   <div className="flex flex-wrap items-end gap-3">
                     <Field className="w-auto">
@@ -363,6 +368,7 @@ export default function VinculosPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Chave do export</TableHead>
+                  <TableHead>Valor atual</TableHead>
                   <TableHead>Alvo atual</TableHead>
                   <TableHead>Reatribuir para</TableHead>
                   <TableHead>Ações</TableHead>
@@ -374,6 +380,7 @@ export default function VinculosPage() {
                   return (
                     <TableRow key={v.chaveExport}>
                       <TableCell>{v.chaveExport}</TableCell>
+                      <TableCell>{formatCentavosParaReais(v.valorAtualCentavos)}</TableCell>
                       <TableCell>{v.nomeAlvo}</TableCell>
                       <TableCell>
                         <select
@@ -440,6 +447,7 @@ export default function VinculosPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Chave do export</TableHead>
+                  <TableHead>Valor atual</TableHead>
                   <TableHead>Vincular a</TableHead>
                   <TableHead>Ações</TableHead>
                 </TableRow>
@@ -450,6 +458,7 @@ export default function VinculosPage() {
                   return (
                     <TableRow key={f.chaveExport}>
                       <TableCell>{f.chaveExport}</TableCell>
+                      <TableCell>{formatCentavosParaReais(f.valorAtualCentavos)}</TableCell>
                       <TableCell>
                         <select
                           className="h-8 rounded-lg border border-input bg-background px-2 text-sm"

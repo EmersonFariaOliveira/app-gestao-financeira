@@ -73,6 +73,36 @@ async function criarAlvo(nome: string, percentualBps: number) {
   });
 }
 
+/** Cria uma sessao_import VIGENTE (mesmo padrão de tests/services/dashboard-service.test.ts). */
+async function criarSessaoVigente(mesReferencia: string, dataExport: string, status = "VIGENTE") {
+  return prisma.sessao_import.create({
+    data: {
+      mes_referencia: mesReferencia,
+      data_export: new Date(dataExport),
+      status,
+      instituicoes: JSON.stringify(["Itaú"]),
+    },
+  });
+}
+
+async function criarPosicao(
+  sessaoId: string,
+  chaveExport: string,
+  patrimonioHojeCentavos: number,
+  instituicao = "Itaú",
+) {
+  return prisma.posicao.create({
+    data: {
+      sessao_import_id: sessaoId,
+      chave_export: chaveExport,
+      instituicao,
+      quantidade: "1",
+      patrimonio_hoje_centavos: patrimonioHojeCentavos,
+      tipo_grupo: "ACOES",
+    },
+  });
+}
+
 /** Simula o que import-service faz para chaves novas: só cria pendente se NENHUM registro existir. */
 async function simularImportCriaPendenteSeNovo(chaves: string[]) {
   const existentes = await prisma.ativo_mapeado.findMany({
@@ -99,11 +129,11 @@ describe("mapeamento-service", () => {
 
       const vinculos = await mapeamentoService.listarVinculos();
 
-      expect(vinculos.pendentes).toEqual([{ chaveExport: "WRLD11" }]);
+      expect(vinculos.pendentes).toEqual([{ chaveExport: "WRLD11", valorAtualCentavos: 0 }]);
       expect(vinculos.vinculados).toEqual([
-        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR" },
+        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR", valorAtualCentavos: 0 },
       ]);
-      expect(vinculos.foraDaCarteira).toEqual([{ chaveExport: "LEGADO-X" }]);
+      expect(vinculos.foraDaCarteira).toEqual([{ chaveExport: "LEGADO-X", valorAtualCentavos: 0 }]);
 
       expect(await mapeamentoService.contarPendencias()).toBe(1);
     });
@@ -122,7 +152,7 @@ describe("mapeamento-service", () => {
       const vinculos = await mapeamentoService.listarVinculos();
       expect(vinculos.pendentes).toEqual([]);
       expect(vinculos.vinculados).toEqual([
-        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR" },
+        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR", valorAtualCentavos: 0 },
       ]);
       expect(await prisma.ativo_mapeado.count({ where: { chave_export: "PRIO3" } })).toBe(1);
     });
@@ -135,7 +165,7 @@ describe("mapeamento-service", () => {
 
       const vinculos = await mapeamentoService.listarVinculos();
       expect(vinculos.pendentes).toEqual([]);
-      expect(vinculos.foraDaCarteira).toEqual([{ chaveExport: "LEGADO-X" }]);
+      expect(vinculos.foraDaCarteira).toEqual([{ chaveExport: "LEGADO-X", valorAtualCentavos: 0 }]);
     });
 
     it("mudança de grafia no export gera uma chave_export diferente ⇒ nova pendência (comportamento esperado)", async () => {
@@ -147,9 +177,9 @@ describe("mapeamento-service", () => {
       expect(chavesNovas).toEqual(["PRIO 3"]);
 
       const vinculos = await mapeamentoService.listarVinculos();
-      expect(vinculos.pendentes).toEqual([{ chaveExport: "PRIO 3" }]);
+      expect(vinculos.pendentes).toEqual([{ chaveExport: "PRIO 3", valorAtualCentavos: 0 }]);
       expect(vinculos.vinculados).toEqual([
-        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR" },
+        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR", valorAtualCentavos: 0 },
       ]);
       expect(await mapeamentoService.contarPendencias()).toBe(1);
     });
@@ -302,6 +332,83 @@ describe("mapeamento-service", () => {
 
       expect(resultado.foraDaCarteira).toBe(true);
       expect(resultado.alvoId).toBeNull();
+    });
+  });
+
+  describe("listarVinculos / valorAtualCentavos", () => {
+    it("cada balde traz o patrimônio consolidado da sessão VIGENTE mais recente por chave_export", async () => {
+      const alvo = await criarAlvo("Ações BR", 10000);
+      await prisma.ativo_mapeado.create({ data: { chave_export: "PRIO3", alvo_id: alvo.id } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "LEGADO-X", fora_da_carteira: true } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "WRLD11" } });
+
+      const sessao = await criarSessaoVigente("2026-07", "2026-07-28");
+      // PRIO3 consolidado em 2 instituições: 300_000 + 100_000 = 400_000.
+      await criarPosicao(sessao.id, "PRIO3", 300_000, "Itaú");
+      await criarPosicao(sessao.id, "PRIO3", 100_000, "Nubank");
+      await criarPosicao(sessao.id, "LEGADO-X", 50_000);
+      await criarPosicao(sessao.id, "WRLD11", 20_000);
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      expect(vinculos.vinculados).toEqual([
+        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR", valorAtualCentavos: 400_000 },
+      ]);
+      expect(vinculos.foraDaCarteira).toEqual([
+        { chaveExport: "LEGADO-X", valorAtualCentavos: 50_000 },
+      ]);
+      expect(vinculos.pendentes).toEqual([{ chaveExport: "WRLD11", valorAtualCentavos: 20_000 }]);
+    });
+
+    it("chave_export sem posição na sessão VIGENTE mais recente recebe valorAtualCentavos = 0", async () => {
+      const alvo = await criarAlvo("Ações BR", 10000);
+      await prisma.ativo_mapeado.create({ data: { chave_export: "PRIO3", alvo_id: alvo.id } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "ZERADO", alvo_id: alvo.id } });
+
+      const sessao = await criarSessaoVigente("2026-07", "2026-07-28");
+      await criarPosicao(sessao.id, "PRIO3", 100_000);
+      // ZERADO nunca teve posição na sessão vigente (ativo vendido/liquidado).
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      const zerado = vinculos.vinculados.find((v) => v.chaveExport === "ZERADO");
+      expect(zerado?.valorAtualCentavos).toBe(0);
+    });
+
+    it("considera apenas a sessão VIGENTE mais recente, ignorando sessões SUBSTITUIDO", async () => {
+      const alvo = await criarAlvo("Ações BR", 10000);
+      await prisma.ativo_mapeado.create({ data: { chave_export: "PRIO3", alvo_id: alvo.id } });
+
+      const sessaoAntiga = await criarSessaoVigente("2026-06", "2026-06-28", "SUBSTITUIDO");
+      await criarPosicao(sessaoAntiga.id, "PRIO3", 999_999);
+
+      const sessaoAtual = await criarSessaoVigente("2026-07", "2026-07-28", "VIGENTE");
+      await criarPosicao(sessaoAtual.id, "PRIO3", 111_000);
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      expect(vinculos.vinculados).toEqual([
+        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR", valorAtualCentavos: 111_000 },
+      ]);
+    });
+
+    it("sem nenhuma sessão VIGENTE (app recém-instalado), todos os valores são 0 e nenhum erro é lançado", async () => {
+      const alvo = await criarAlvo("Ações BR", 10000);
+      await prisma.ativo_mapeado.create({ data: { chave_export: "PRIO3", alvo_id: alvo.id } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "LEGADO-X", fora_da_carteira: true } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "WRLD11" } });
+
+      // Só existe sessão SUBSTITUIDO — nenhuma VIGENTE.
+      const sessaoSubstituida = await criarSessaoVigente("2026-06", "2026-06-28", "SUBSTITUIDO");
+      await criarPosicao(sessaoSubstituida.id, "PRIO3", 500_000);
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      expect(vinculos.vinculados).toEqual([
+        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR", valorAtualCentavos: 0 },
+      ]);
+      expect(vinculos.foraDaCarteira).toEqual([{ chaveExport: "LEGADO-X", valorAtualCentavos: 0 }]);
+      expect(vinculos.pendentes).toEqual([{ chaveExport: "WRLD11", valorAtualCentavos: 0 }]);
     });
   });
 
