@@ -51,6 +51,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { TagBadge } from "@/components/ui/tag-badge";
 import { formatBps, parseDecimalParaCentavos } from "@/core/money";
 import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { AlvoComContagemDto, ListarAlvosOutput } from "@/services/alvo-service";
@@ -343,6 +344,13 @@ export default function AlvosPage() {
                 <option key={tag} value={tag} />
               ))}
             </datalist>
+            {/* Preview do pill enquanto digita — mesma cor que a tag terá em
+                qualquer outro lugar do app (`corParaTag` é determinística). */}
+            {tagTexto.trim() && (
+              <div className="pt-1">
+                <TagBadge tag={tagTexto.trim()} />
+              </div>
+            )}
           </Field>
           <div className="flex gap-2">
             <Button onClick={() => void handleSalvar()} disabled={salvando}>
@@ -412,7 +420,7 @@ export default function AlvosPage() {
                     <TableCell>{formatBps(alvo.percentualAlvoBps)}</TableCell>
                     <TableCell>
                       {alvo.tag ? (
-                        alvo.tag
+                        <TagBadge tag={alvo.tag} />
                       ) : (
                         <span className="text-muted-foreground">Sem tag</span>
                       )}

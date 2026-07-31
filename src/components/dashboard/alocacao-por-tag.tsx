@@ -31,6 +31,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { TagBadge } from "@/components/ui/tag-badge";
 import { formatBps, formatCentavosParaReais } from "@/core/money";
 import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { AlocacaoPorTag as AlocacaoPorTagDto } from "@/services/dashboard-service";
@@ -59,8 +60,8 @@ function LinhaBarra({ item }: { item: AlocacaoPorTagDto }) {
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm font-medium">
-          {item.tag}{" "}
+        <span className="flex items-center gap-1.5 text-sm font-medium">
+          <TagBadge tag={item.tag} />
           <span className="font-normal text-muted-foreground">
             ({item.qtdAlvos} alvo(s))
           </span>
@@ -174,7 +175,9 @@ export function AlocacaoPorTag({ alocacaoPorTag }: { alocacaoPorTag: AlocacaoPor
           <TableBody>
             {alocacaoOrdenada.sortedRows.map((item) => (
               <TableRow key={item.tag}>
-                <TableCell>{item.tag}</TableCell>
+                <TableCell>
+                  <TagBadge tag={item.tag} />
+                </TableCell>
                 <TableCell>{item.qtdAlvos}</TableCell>
                 <TableCell>{formatBps(item.percentualAtualBps)}</TableCell>
                 <TableCell>{formatBps(item.percentualAlvoBps)}</TableCell>

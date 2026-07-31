@@ -7,6 +7,16 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  // tsconfig.json usa "jsx": "preserve" (exigido pelo Next.js/SWC no build
+  // real da app). Sem isto, o transformador do Vite (oxc, na v8) herda
+  // "preserve" ao ler o tsconfig e falha ao importar qualquer .tsx que
+  // contenha JSX de verdade (erro "Failed to parse source for import
+  // analysis... make sure to not set jsx to preserve"). Isto só afeta a
+  // transformação usada pelos testes — o build de produção continua via
+  // Next.js/SWC, inalterado.
+  oxc: {
+    jsx: { runtime: "automatic" },
+  },
   test: {
     environment: "node",
     // "forks" em vez do default "threads": o pool de worker_threads do
