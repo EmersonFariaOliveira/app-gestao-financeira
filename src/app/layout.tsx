@@ -36,7 +36,7 @@ export default function RootLayout({
           <div className="flex min-h-screen flex-col">
             <SiteHeader />
             <div className="flex flex-1">
-              <aside className="w-60 shrink-0 border-r border-border bg-sidebar text-sidebar-foreground">
+              <aside className="sticky top-14 h-[calc(100vh-3.5rem)] w-60 shrink-0 overflow-y-auto border-r border-border bg-sidebar text-sidebar-foreground">
                 <SidebarNav />
               </aside>
               <main className="flex-1 p-6 sm:p-8">{children}</main>
