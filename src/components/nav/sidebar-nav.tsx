@@ -11,6 +11,7 @@ import {
   Coins,
   History,
   Settings,
+  Wallet,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -25,6 +26,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/import", label: "Import mensal", icon: Upload },
   { href: "/vinculos", label: "Vínculos", icon: Link2 },
+  { href: "/posicoes-manuais", label: "Posições manuais", icon: Wallet },
   { href: "/alvos", label: "Carteira alvo", icon: Target },
   { href: "/aporte", label: "Aporte", icon: Calculator },
   { href: "/dividendos", label: "Dividendos", icon: Coins },
