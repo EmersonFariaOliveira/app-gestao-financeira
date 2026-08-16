@@ -33,20 +33,31 @@ model alvo {
   ativo               Boolean   @default(true)
   criado_em           DateTime  @default(now())
 
-  ativos_mapeados ativo_mapeado[]
+  ativos_mapeados                      ativo_mapeado[]
+  posicoes_manuais                     posicao_manual[]
+  incrementos_valor_investido_pendente incremento_valor_investido_pendente[]
 }
 
 /// De-para memorizado entre a chave exata do export e um alvo (N-para-1),
 /// ou marcador fora-da-carteira.
 model ativo_mapeado {
-  id               String   @id @default(cuid())
-  chave_export     String   @unique
-  alvo_id          String?
-  fora_da_carteira Boolean  @default(false)
-  criado_em        DateTime @default(now())
+  id                String   @id @default(cuid())
+  chave_export      String   @unique
+  alvo_id           String?
+  fora_da_carteira  Boolean  @default(false)
+  /// true = ativo lido do CSV mas excluído da consolidação, substituído
+  /// por uma posicao_manual; não dispara alarme de "ativo novo" em
+  /// imports futuros. Mutuamente exclusivo com fora_da_carteira=true
+  /// (validado na aplicação — data-model.md da feature 002).
+  ignorar_no_import Boolean  @default(false)
+  criado_em         DateTime @default(now())
 
   alvo       alvo?       @relation(fields: [alvo_id], references: [id])
   dividendos dividendo[] @relation("dividendo_ativo_mapeado")
+
+  posicoes_manuais_origem              posicao_manual[]
+  ajustes_valor_investido              ajuste_valor_investido[]
+  incrementos_valor_investido_pendente incremento_valor_investido_pendente[]
 }
 
 /// Snapshot imutável das posições de um mês. Nunca é deletada nem tem
@@ -64,6 +75,12 @@ model sessao_import {
 
   posicoes posicao[]
   aportes  aporte[]
+
+  posicoes_manuais_valores posicao_manual_valor[]
+  ajustes_valor_investido  ajuste_valor_investido[]
+  /// Incrementos pendentes aplicados (consumidos) por esta sessão —
+  /// sessao_aplicacao_id.
+  incrementos_aplicados    incremento_valor_investido_pendente[]
 
   @@index([mes_referencia, status])
 }
@@ -100,8 +117,9 @@ model aporte {
   troco_centavos            Int
   criado_em                 DateTime @default(now())
 
-  sessao_import sessao_import @relation(fields: [sessao_import_id], references: [id], onDelete: Restrict)
-  dividendos    dividendo[]
+  sessao_import                        sessao_import                         @relation(fields: [sessao_import_id], references: [id], onDelete: Restrict)
+  dividendos                           dividendo[]
+  incrementos_valor_investido_pendente incremento_valor_investido_pendente[]
 }
 
 /// Lançamento manual, independente das sessões de import.
@@ -121,4 +139,129 @@ model dividendo {
 model config {
   chave String @id
   valor String
+}
+
+// ---------------------------------------------------------------------
+// Feature 002 — Posições Manuais e Ajustes de Valor Investido
+// (specs/002-posicoes-manuais-ajustes/data-model.md)
+// ---------------------------------------------------------------------
+
+/// Identidade memorizada de um ativo que não vem (ou não deve vir)
+/// corretamente do CSV — tipicamente um CDB. Não é filha de
+/// sessao_import: existe fora do ciclo de import, com valores que mudam
+/// a cada sessão via posicao_manual_valor.
+model posicao_manual {
+  id                  String   @id @default(cuid())
+  /// Definida pelo usuário, ex.: "CDB-ITAU-2029"; imutável após criação
+  /// — trocar a chave é cadastrar uma posição manual nova.
+  chave_manual        String   @unique
+  instituicao         String
+  alvo_id             String
+  descricao           String
+  /// String livre (sem enum), como posicao.tipo_grupo; não entra no
+  /// arredondamento por lote (regra 7 do motor).
+  tipo_grupo          String   @default("RENDA_FIXA_MANUAL")
+  /// chave_export (ativo_mapeado) marcado ignorar_no_import que esta
+  /// posição substitui; null quando cadastrada sem CSV de origem.
+  chave_export_origem String?
+  /// false = encerrada (FR-004) — some do carry-forward e do cálculo de
+  /// déficit, histórico preservado; transição unidirecional (true -> false
+  /// apenas), sem reativação.
+  ativo               Boolean  @default(true)
+  criado_em           DateTime @default(now())
+
+  alvo                 alvo           @relation(fields: [alvo_id], references: [id], onDelete: Restrict)
+  ativo_mapeado_origem ativo_mapeado? @relation(fields: [chave_export_origem], references: [chave_export])
+
+  valores     posicao_manual_valor[]
+  incrementos incremento_valor_investido_pendente[]
+}
+
+/// Snapshot por sessão de uma posicao_manual — o que muda mês a mês.
+/// Nunca sobrescrito; um novo import gera novas linhas, nunca UPDATE em
+/// linhas de sessões já confirmadas.
+model posicao_manual_valor {
+  id                       String   @id @default(cuid())
+  posicao_manual_id        String
+  /// Sessão em que este snapshot foi confirmado.
+  sessao_import_id         String
+  /// Pré-preenchido = valor da sessão vigente anterior + incremento
+  /// pendente aplicado; editável até a confirmação; nunca usado no
+  /// cálculo de déficit (FR-006).
+  valor_investido_centavos Int
+  /// Pré-preenchido = valor da sessão vigente anterior, sem cálculo;
+  /// editável; vem do extrato do banco; compõe o patrimônio do alvo
+  /// exatamente como posicao.patrimonio_hoje_centavos (FR-003).
+  valor_atual_centavos     Int
+  criado_em                DateTime @default(now())
+
+  posicao_manual posicao_manual @relation(fields: [posicao_manual_id], references: [id], onDelete: Restrict)
+  sessao_import  sessao_import  @relation(fields: [sessao_import_id], references: [id], onDelete: Restrict)
+
+  @@unique([posicao_manual_id, sessao_import_id])
+}
+
+/// Correção pontual do valor_investido de um ativo que continua vindo
+/// do CSV (ex.: fundo de investimento). Mesmo padrão de snapshot por
+/// sessão de posicao_manual_valor; valor_atual não é duplicado aqui —
+/// continua vindo de posicao.patrimonio_hoje_centavos da sessão.
+model ajuste_valor_investido {
+  id                                 String   @id @default(cuid())
+  /// Ativo já conhecido pelo import.
+  chave_export                       String
+  sessao_import_id                   String
+  /// null = primeira aparição desse chave_export na tela de ajustes,
+  /// aguardando preenchimento (FR-009) — nenhuma sessão anterior da qual
+  /// herdar; quando preenchido, >= 0; pré-preenchido nas sessões
+  /// seguintes = anterior + incremento pendente aplicado; nunca usado no
+  /// cálculo de déficit (FR-006).
+  valor_investido_corrigido_centavos Int?
+  criado_em                          DateTime @default(now())
+
+  ativo_mapeado ativo_mapeado @relation(fields: [chave_export], references: [chave_export], onDelete: Restrict)
+  sessao_import sessao_import @relation(fields: [sessao_import_id], references: [id], onDelete: Restrict)
+
+  @@unique([chave_export, sessao_import_id])
+}
+
+/// Gerado ao registrar um aporte como executado (tela 6.5); consumido
+/// (aplicado) no próximo import que oferecer pré-preenchimento para o
+/// ativo/alvo correspondente. Única entidade desta feature que sofre
+/// UPDATE após criada (aplicado: false -> true) — é fila de trabalho,
+/// não snapshot histórico; nunca DELETE.
+///
+/// CHECK constraints (adicionados manualmente na migration SQL, mesmo
+/// padrão de sessao_import.status — research.md R12 da feature 001):
+///   CHECK (NOT (chave_export IS NOT NULL AND posicao_manual_id IS NOT NULL))
+///   CHECK ((aplicado = 0 AND sessao_aplicacao_id IS NULL) OR (aplicado = 1 AND sessao_aplicacao_id IS NOT NULL))
+model incremento_valor_investido_pendente {
+  id                        String   @id @default(cuid())
+  /// Alvo do aporte que originou o incremento.
+  alvo_id                   String
+  /// Preenchido apenas quando o alvo mapeia exclusivamente um único
+  /// chave_export com ajuste ativo (FR-010/011). Mutuamente exclusivo
+  /// com posicao_manual_id (CHECK).
+  chave_export              String?
+  /// Preenchido apenas quando o alvo mapeia exclusivamente uma única
+  /// posicao_manual ativa (FR-010/011). Mutuamente exclusivo com
+  /// chave_export (CHECK).
+  posicao_manual_id         String?
+  /// Proveniência, auditável.
+  aporte_id                 String
+  /// Valor executado daquele alvo (ou fração do alvo, se o motor gerar
+  /// múltiplas linhas por alvo — não ocorre em v1); sempre > 0.
+  valor_incremento_centavos Int
+  /// true = já consumido por uma sessão de import (FR-013), nunca mais
+  /// oferecido.
+  aplicado                  Boolean  @default(false)
+  /// null enquanto aplicado=false; preenchido no momento em que aplicado
+  /// vira true, com a sessão que o consumiu.
+  sessao_aplicacao_id       String?
+  criado_em                 DateTime @default(now())
+
+  alvo             alvo            @relation(fields: [alvo_id], references: [id], onDelete: Restrict)
+  ativo_mapeado    ativo_mapeado?  @relation(fields: [chave_export], references: [chave_export], onDelete: Restrict)
+  posicao_manual   posicao_manual? @relation(fields: [posicao_manual_id], references: [id], onDelete: Restrict)
+  aporte           aporte          @relation(fields: [aporte_id], references: [id], onDelete: Restrict)
+  sessao_aplicacao sessao_import?  @relation(fields: [sessao_aplicacao_id], references: [id], onDelete: SetNull)
 }

@@ -12,6 +12,11 @@ import { PrismaClient } from "@prisma/client";
 //   pendência, para não bloquear a calculadora no teste do MVP.
 // - 1 ativo (PETR4) marcado fora_da_carteira=true, para exercitar a
 //   exclusão da base de percentuais/déficits.
+// - Feature 002 (specs/002-posicoes-manuais-ajustes): 1 ativo_mapeado
+//   existente marcado ignorar_no_import=true ("Tesouro Selic 2029"), 1
+//   posicao_manual ativa (CDB) que o substitui, com posicao_manual_valor
+//   na sessão VIGENTE, e 1 ajuste_valor_investido sobre um chave_export
+//   já vinculado a um alvo ("Tesouro IPCA+ 2035").
 //
 // Regra inviolável: nenhum valor monetário como float — tudo em
 // *_centavos (Int) e percentuais em *_bps (Int).
@@ -21,12 +26,18 @@ const prisma = new PrismaClient();
 async function main() {
   console.log("Seed: limpando dados sintéticos anteriores...");
   // Ordem respeita FKs (dividendo -> aporte/ativo_mapeado; posicao/aporte ->
-  // sessao_import; ativo_mapeado -> alvo). Seed é o único código com
-  // permissão para apagar dados — não usar este padrão em serviços.
+  // sessao_import; ativo_mapeado -> alvo; entidades da feature 002 são
+  // filhas de alvo/ativo_mapeado/posicao_manual/sessao_import/aporte,
+  // por isso são apagadas primeiro). Seed é o único código com permissão
+  // para apagar dados — não usar este padrão em serviços.
+  await prisma.incremento_valor_investido_pendente.deleteMany();
   await prisma.dividendo.deleteMany();
+  await prisma.posicao_manual_valor.deleteMany();
+  await prisma.ajuste_valor_investido.deleteMany();
   await prisma.aporte.deleteMany();
   await prisma.posicao.deleteMany();
   await prisma.ativo_mapeado.deleteMany();
+  await prisma.posicao_manual.deleteMany();
   await prisma.sessao_import.deleteMany();
   await prisma.alvo.deleteMany();
 
@@ -145,6 +156,9 @@ async function main() {
   });
 
   console.log("Seed: criando vínculos (sem pendências)...");
+  // "Tesouro Selic 2029" é marcado ignorar_no_import=true (feature 002):
+  // simula um ativo que vem torto do CSV (ex.: CDB classificado errado) e
+  // é substituído por uma posicao_manual — ver bloco abaixo.
   await prisma.ativo_mapeado.createMany({
     data: [
       { chave_export: "WRLD11", alvo_id: alvoWrld11.id, fora_da_carteira: false },
@@ -153,6 +167,7 @@ async function main() {
         chave_export: "Tesouro Selic 2029",
         alvo_id: alvoPosFixado.id,
         fora_da_carteira: false,
+        ignorar_no_import: true,
       },
       {
         chave_export: "Tesouro IPCA+ 2035",
@@ -161,6 +176,39 @@ async function main() {
       },
       { chave_export: "PETR4", alvo_id: null, fora_da_carteira: true },
     ],
+  });
+
+  console.log(
+    "Seed: criando posição manual (feature 002) que substitui 'Tesouro Selic 2029'...",
+  );
+  const posicaoManualCdb = await prisma.posicao_manual.create({
+    data: {
+      chave_manual: "CDB-ITAU-2029",
+      instituicao: "Itaú",
+      alvo_id: alvoPosFixado.id,
+      descricao: "CDB Itaú 120% CDI 2029",
+      chave_export_origem: "Tesouro Selic 2029",
+      ativo: true,
+    },
+  });
+  await prisma.posicao_manual_valor.create({
+    data: {
+      posicao_manual_id: posicaoManualCdb.id,
+      sessao_import_id: sessao.id,
+      valor_investido_centavos: 500000,
+      valor_atual_centavos: 520000,
+    },
+  });
+
+  console.log(
+    "Seed: criando ajuste de valor investido (feature 002) para 'Tesouro IPCA+ 2035'...",
+  );
+  await prisma.ajuste_valor_investido.create({
+    data: {
+      chave_export: "Tesouro IPCA+ 2035",
+      sessao_import_id: sessao.id,
+      valor_investido_corrigido_centavos: 405000,
+    },
   });
 
   console.log("Seed concluído.");
