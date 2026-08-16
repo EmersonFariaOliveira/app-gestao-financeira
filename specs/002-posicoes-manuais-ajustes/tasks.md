@@ -20,7 +20,7 @@
 
 **Purpose**: segurança antes de alterar o schema de um banco que já tem dados reais (feature 001 em produção local)
 
-- [ ] T001 [arquiteto-dados] Backup manual de `data/app.db` (cópia datada em `backups/`, ou `npm run` do `backup-service.ts` existente) antes de qualquer migration desta feature
+- [X] T001 [arquiteto-dados] Backup manual de `data/app.db` (cópia datada em `backups/`, ou `npm run` do `backup-service.ts` existente) antes de qualquer migration desta feature
 
 ---
 
@@ -30,9 +30,9 @@
 
 **⚠️ CRITICAL**: nenhuma user story começa antes desta fase terminar
 
-- [ ] T002 [arquiteto-dados] Adicionar `ativo_mapeado.ignorar_no_import Boolean @default(false)` e as 4 entidades novas (`posicao_manual`, `posicao_manual_valor`, `ajuste_valor_investido`, `incremento_valor_investido_pendente`) em `prisma/schema.prisma`, exatamente conforme `data-model.md` (campos, FKs, `@@unique`)
-- [ ] T003 [arquiteto-dados] Gerar migration (`prisma migrate dev`) e editar o SQL manualmente para adicionar os 2 `CHECK` constraints de `incremento_valor_investido_pendente` (exclusividade mútua `chave_export`/`posicao_manual_id`; consistência `aplicado`/`sessao_aplicacao_id` — data-model.md) — depende de T002
-- [ ] T004 [P] [arquiteto-dados] Estender `prisma/seed.ts`: 1 `ativo_mapeado` existente marcado `ignorar_no_import = true`, 1 `posicao_manual` ativa com `posicao_manual_valor` na sessão VIGENTE do seed, 1 `ajuste_valor_investido` para um `chave_export` já vinculado — habilita teste independente das stories sem depender de cadastro manual prévio — depende de T003
+- [X] T002 [arquiteto-dados] Adicionar `ativo_mapeado.ignorar_no_import Boolean @default(false)` e as 4 entidades novas (`posicao_manual`, `posicao_manual_valor`, `ajuste_valor_investido`, `incremento_valor_investido_pendente`) em `prisma/schema.prisma`, exatamente conforme `data-model.md` (campos, FKs, `@@unique`)
+- [X] T003 [arquiteto-dados] Gerar migration (`prisma migrate dev`) e editar o SQL manualmente para adicionar os 2 `CHECK` constraints de `incremento_valor_investido_pendente` (exclusividade mútua `chave_export`/`posicao_manual_id`; consistência `aplicado`/`sessao_aplicacao_id` — data-model.md) — depende de T002
+- [X] T004 [P] [arquiteto-dados] Estender `prisma/seed.ts`: 1 `ativo_mapeado` existente marcado `ignorar_no_import = true`, 1 `posicao_manual` ativa com `posicao_manual_valor` na sessão VIGENTE do seed, 1 `ajuste_valor_investido` para um `chave_export` já vinculado — habilita teste independente das stories sem depender de cadastro manual prévio — depende de T003
 
 **Checkpoint**: `npx prisma migrate dev && npx prisma db seed` roda sem erro; `prisma studio` mostra as 4 tabelas novas e o campo novo em `ativo_mapeado`
 
@@ -46,17 +46,17 @@
 
 ### Tests for User Story 1 (escrever PRIMEIRO — devem FALHAR antes da implementação)
 
-- [ ] T005 [P] [US1] [arquiteto-dados] Testes de CRUD em `tests/services/posicao-manual-service.test.ts`: `criarPosicaoManual` anexa `posicao_manual_valor` à sessão VIGENTE existente, falha alto sem sessão vigente (research.md R7), `editarPosicaoManual`, `encerrarPosicaoManual` (irreversível, some do carry-forward)
-- [ ] T006 [P] [US1] [calculista-aporte] Testes em `tests/services/aporte-service.test.ts` (estende arquivo existente): posição manual ativa entra em `PosicaoConsolidada[]` com `valorCentavos = valor_atual` (nunca `valor_investido`); `chave_export` com `ignorar_no_import = true` é excluída da consolidação do CSV; colisão `chave_manual` × `chave_export` lança erro explícito (research.md R8, motor-integracao.md §2.2)
+- [X] T005 [P] [US1] [arquiteto-dados] Testes de CRUD em `tests/services/posicao-manual-service.test.ts`: `criarPosicaoManual` anexa `posicao_manual_valor` à sessão VIGENTE existente, falha alto sem sessão vigente (research.md R7), `editarPosicaoManual`, `encerrarPosicaoManual` (irreversível, some do carry-forward)
+- [X] T006 [P] [US1] [calculista-aporte] Testes em `tests/services/aporte-service.test.ts` (estende arquivo existente): posição manual ativa entra em `PosicaoConsolidada[]` com `valorCentavos = valor_atual` (nunca `valor_investido`); `chave_export` com `ignorar_no_import = true` é excluída da consolidação do CSV; colisão `chave_manual` × `chave_export` lança erro explícito (research.md R8, motor-integracao.md §2.2)
 
 ### Implementation for User Story 1
 
-- [ ] T007 [P] [US1] [arquiteto-dados] Implementar `src/services/posicao-manual-service.ts`: `criarPosicaoManual` (cria `posicao_manual` + `posicao_manual_valor` inicial na sessão vigente, se existir), `editarPosicaoManual`, `encerrarPosicaoManual` (`ativo: true → false`, irreversível)
-- [ ] T008 [P] [US1] [calculista-aporte] Estender `montarContextoEntradaMotor` em `src/services/aporte-service.ts`: excluir `chave_export` com `ignorar_no_import = true` do `consolidadoPorChave`; incluir `posicao_manual` ativas com snapshot na sessão vigente (`chaveExport: chave_manual`, `tipoGrupo: "RENDA_FIXA_MANUAL"`, `valorCentavos: valor_atual_centavos`); guarda de colisão de identidade (motor-integracao.md §2.2)
-- [ ] T009 [US1] [desenvolvedor-ui] Estender `vincularAtivo`/`listarVinculos` em `src/services/mapeamento-service.ts` e `src/app/actions/vinculos.ts` com a forma `ignorarNoImport` (união discriminada) e o balde `ignorados` (`posicaoManualPendente` heurístico), conforme `contracts/server-actions.md` — depende de T002
-- [ ] T010 [US1] [desenvolvedor-ui] Atualizar `src/app/vinculos/page.tsx`: opção "Ignorar (substituído por posição manual)", balde "ignorados", CTA "+ Cadastrar posição manual" com querystring quando `posicaoManualPendente` — depende de T009
-- [ ] T011 [US1] [desenvolvedor-ui] Implementar `criarPosicaoManual`/`editarPosicaoManual`/`encerrarPosicaoManual` em `src/app/actions/posicoes-manuais.ts` conforme `contracts/server-actions.md` — depende de T007
-- [ ] T012 [US1] [desenvolvedor-ui] Implementar `src/app/posicoes-manuais/page.tsx`: lista de posições manuais ativas, "+ Nova posição manual" (lendo `alvoId`/`descricaoSugerida` da querystring do CTA de T010), ação "Encerrar" — depende de T011
+- [X] T007 [P] [US1] [arquiteto-dados] Implementar `src/services/posicao-manual-service.ts`: `criarPosicaoManual` (cria `posicao_manual` + `posicao_manual_valor` inicial na sessão vigente, se existir), `editarPosicaoManual`, `encerrarPosicaoManual` (`ativo: true → false`, irreversível)
+- [X] T008 [P] [US1] [calculista-aporte] Estender `montarContextoEntradaMotor` em `src/services/aporte-service.ts`: excluir `chave_export` com `ignorar_no_import = true` do `consolidadoPorChave`; incluir `posicao_manual` ativas com snapshot na sessão vigente (`chaveExport: chave_manual`, `tipoGrupo: "RENDA_FIXA_MANUAL"`, `valorCentavos: valor_atual_centavos`); guarda de colisão de identidade (motor-integracao.md §2.2)
+- [X] T009 [US1] [desenvolvedor-ui] Estender `vincularAtivo`/`listarVinculos` em `src/services/mapeamento-service.ts` e `src/app/actions/vinculos.ts` com a forma `ignorarNoImport` (união discriminada) e o balde `ignorados` (`posicaoManualPendente` heurístico), conforme `contracts/server-actions.md` — depende de T002
+- [X] T010 [US1] [desenvolvedor-ui] Atualizar `src/app/vinculos/page.tsx`: opção "Ignorar (substituído por posição manual)", balde "ignorados", CTA "+ Cadastrar posição manual" com querystring quando `posicaoManualPendente` — depende de T009
+- [X] T011 [US1] [desenvolvedor-ui] Implementar `criarPosicaoManual`/`editarPosicaoManual`/`encerrarPosicaoManual` em `src/app/actions/posicoes-manuais.ts` conforme `contracts/server-actions.md` — depende de T007
+- [X] T012 [US1] [desenvolvedor-ui] Implementar `src/app/posicoes-manuais/page.tsx`: lista de posições manuais ativas, "+ Nova posição manual" (lendo `alvoId`/`descricaoSugerida` da querystring do CTA de T010), ação "Encerrar" — depende de T011
 
 **Checkpoint**: User Story 1 funcional e testável de ponta a ponta, independente das demais
 
