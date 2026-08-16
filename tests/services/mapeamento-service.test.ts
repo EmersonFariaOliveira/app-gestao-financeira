@@ -57,10 +57,25 @@ async function resetDb() {
   await prisma.dividendo.deleteMany();
   await prisma.aporte.deleteMany();
   await prisma.posicao.deleteMany();
+  await prisma.posicao_manual_valor.deleteMany();
   await prisma.ativo_mapeado.deleteMany();
+  await prisma.posicao_manual.deleteMany();
   await prisma.sessao_import.deleteMany();
   await prisma.alvo.deleteMany();
   await prisma.config.deleteMany();
+}
+
+/** Cria uma posicao_manual ATIVA vinculada a um alvo (heurística de posicaoManualPendente). */
+async function criarPosicaoManualAtiva(alvoId: string, chaveManual: string, ativo = true) {
+  return prisma.posicao_manual.create({
+    data: {
+      chave_manual: chaveManual,
+      instituicao: "Itaú",
+      alvo_id: alvoId,
+      descricao: "CDB Itaú 120% CDI 2029",
+      ativo,
+    },
+  });
 }
 
 beforeEach(async () => {
@@ -432,6 +447,203 @@ describe("mapeamento-service", () => {
       await expect(
         mapeamentoService.vincularAtivo({ chaveExport: "PRIO3", alvoId: alvo.id }),
       ).rejects.toThrow();
+    });
+  });
+
+  describe("balde ignorados (feature 002, FR-001, contracts/server-actions.md §vinculos.ts)", () => {
+    it("chave_export com ignorar_no_import=true vai para o balde ignorados, nunca para vinculados", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await prisma.ativo_mapeado.create({
+        data: {
+          chave_export: "TESOURO-IGNORADO",
+          alvo_id: alvo.id,
+          fora_da_carteira: false,
+          ignorar_no_import: true,
+        },
+      });
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      expect(vinculos.vinculados).toEqual([]);
+      expect(vinculos.pendentes).toEqual([]);
+      expect(vinculos.ignorados).toEqual([
+        {
+          chaveExport: "TESOURO-IGNORADO",
+          alvoId: alvo.id,
+          nomeAlvo: "Pós-fixado",
+          valorAtualCentavos: 0,
+          posicaoManualPendente: true,
+        },
+      ]);
+    });
+
+    it("valorAtualCentavos do balde ignorados é o valor bruto consolidado do CSV (só referência — motor usa a posicao_manual, não este campo)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: alvo.id, ignorar_no_import: true },
+      });
+      const sessao = await criarSessaoVigente("2026-07", "2026-07-28");
+      await criarPosicao(sessao.id, "TESOURO-IGNORADO", 999_000);
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      expect(vinculos.ignorados[0].valorAtualCentavos).toBe(999_000);
+    });
+
+    it("posicaoManualPendente=false quando existe uma posicao_manual ATIVA com o mesmo alvoId", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: alvo.id, ignorar_no_import: true },
+      });
+      await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      expect(vinculos.ignorados[0].posicaoManualPendente).toBe(false);
+    });
+
+    it("posicaoManualPendente volta a true quando a posicao_manual do alvo está ENCERRADA (ativo=false)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: alvo.id, ignorar_no_import: true },
+      });
+      await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029", false);
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      expect(vinculos.ignorados[0].posicaoManualPendente).toBe(true);
+    });
+
+    it("posicaoManualPendente é calculado por alvoId — posicao_manual ativa de OUTRO alvo não conta", async () => {
+      const alvoIgnorado = await criarAlvo("Pós-fixado", 3000);
+      const alvoOutro = await criarAlvo("Ações BR", 7000);
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: alvoIgnorado.id, ignorar_no_import: true },
+      });
+      await criarPosicaoManualAtiva(alvoOutro.id, "CDB-OUTRO");
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      expect(vinculos.ignorados[0].posicaoManualPendente).toBe(true);
+    });
+  });
+
+  describe("vincularAtivo — forma ignorarNoImport (feature 002, FR-001)", () => {
+    it("{chaveExport, ignorarNoImport:true, alvoId} marca ignorar_no_import=true, preserva alvo_id e mantém fora_da_carteira=false", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+
+      const resultado = await mapeamentoService.vincularAtivo({
+        chaveExport: "TESOURO-IGNORADO",
+        ignorarNoImport: true,
+        alvoId: alvo.id,
+      });
+
+      expect(resultado).toEqual({
+        chaveExport: "TESOURO-IGNORADO",
+        alvoId: alvo.id,
+        nomeAlvo: "Pós-fixado",
+        foraDaCarteira: false,
+        ignorarNoImport: true,
+        posicaoManualPendente: true,
+      });
+
+      const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
+        where: { chave_export: "TESOURO-IGNORADO" },
+      });
+      expect(registro.ignorar_no_import).toBe(true);
+      expect(registro.alvo_id).toBe(alvo.id);
+      expect(registro.fora_da_carteira).toBe(false);
+
+      // Some do balde pendentes/vinculados; aparece só em ignorados.
+      const vinculos = await mapeamentoService.listarVinculos();
+      expect(vinculos.pendentes).toEqual([]);
+      expect(vinculos.vinculados).toEqual([]);
+      expect(vinculos.ignorados.map((i) => i.chaveExport)).toEqual(["TESOURO-IGNORADO"]);
+    });
+
+    it("posicaoManualPendente=false na resposta de vincularAtivo quando já existe posicao_manual ativa para o alvo escolhido", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+
+      const resultado = await mapeamentoService.vincularAtivo({
+        chaveExport: "TESOURO-IGNORADO",
+        ignorarNoImport: true,
+        alvoId: alvo.id,
+      });
+
+      expect(resultado.posicaoManualPendente).toBe(false);
+    });
+
+    it("{chaveExport, ignorarNoImport:true, novoAlvo} cria o alvo e já marca ignorar_no_import=true na MESMA operação; posicaoManualPendente sempre true (alvo recém-criado nunca tem posicao_manual)", async () => {
+      const antesCount = await prisma.alvo.count();
+
+      const resultado = await mapeamentoService.vincularAtivo({
+        chaveExport: "TESOURO-IGNORADO-2",
+        ignorarNoImport: true,
+        novoAlvo: { nome: "Renda Fixa Nova", percentualBps: 2000 },
+      });
+
+      expect(await prisma.alvo.count()).toBe(antesCount + 1);
+      expect(resultado.ignorarNoImport).toBe(true);
+      expect(resultado.posicaoManualPendente).toBe(true);
+      expect(resultado.foraDaCarteira).toBe(false);
+
+      const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
+        where: { chave_export: "TESOURO-IGNORADO-2" },
+      });
+      expect(registro.ignorar_no_import).toBe(true);
+      expect(registro.alvo_id).toBe(resultado.alvoId);
+    });
+
+    it("as 3 formas pré-existentes de vincularAtivo continuam sem os campos ignorarNoImport/posicaoManualPendente na resposta (shape preservado)", async () => {
+      const alvo = await criarAlvo("Ações BR", 10000);
+
+      const vinculado = await mapeamentoService.vincularAtivo({ chaveExport: "PRIO3", alvoId: alvo.id });
+      expect(vinculado.ignorarNoImport).toBeUndefined();
+      expect(vinculado.posicaoManualPendente).toBeUndefined();
+
+      const foraDaCarteira = await mapeamentoService.vincularAtivo({
+        chaveExport: "LEGADO-X",
+        foraDaCarteira: true,
+      });
+      expect(foraDaCarteira.ignorarNoImport).toBeUndefined();
+      expect(foraDaCarteira.posicaoManualPendente).toBeUndefined();
+
+      const novoAlvo = await mapeamentoService.vincularAtivo({
+        chaveExport: "HGLG11",
+        novoAlvo: { nome: "FIIs", percentualBps: 3000 },
+      });
+      expect(novoAlvo.ignorarNoImport).toBeUndefined();
+      expect(novoAlvo.posicaoManualPendente).toBeUndefined();
+    });
+
+    it("ignorar com alvoId inexistente lança erro, mesma validação da forma {chaveExport, alvoId} simples", async () => {
+      await expect(
+        mapeamentoService.vincularAtivo({
+          chaveExport: "TESOURO-X",
+          ignorarNoImport: true,
+          alvoId: "id-inexistente",
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("re-ignorar uma chave já vinculada a outro alvo troca o alvo_id (upsert, sem duplicar ativo_mapeado)", async () => {
+      const alvoAntigo = await criarAlvo("Pós-fixado", 3000);
+      const alvoNovo = await criarAlvo("Tesouro IPCA+", 2000);
+      await mapeamentoService.vincularAtivo({ chaveExport: "TESOURO-IGNORADO", alvoId: alvoAntigo.id });
+
+      await mapeamentoService.vincularAtivo({
+        chaveExport: "TESOURO-IGNORADO",
+        ignorarNoImport: true,
+        alvoId: alvoNovo.id,
+      });
+
+      expect(await prisma.ativo_mapeado.count({ where: { chave_export: "TESOURO-IGNORADO" } })).toBe(1);
+      const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
+        where: { chave_export: "TESOURO-IGNORADO" },
+      });
+      expect(registro.alvo_id).toBe(alvoNovo.id);
+      expect(registro.ignorar_no_import).toBe(true);
     });
   });
 });

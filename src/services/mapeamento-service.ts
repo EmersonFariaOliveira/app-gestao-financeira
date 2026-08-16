@@ -34,22 +34,53 @@ export interface VinculoForaDaCarteira {
   valorAtualCentavos: number;
 }
 
+/**
+ * Balde "ignorados" (feature 002, FR-001): `chave_export` lida do CSV mas
+ * excluída da consolidação porque foi substituída por uma `posicao_manual`.
+ * `valorAtualCentavos` é o valor bruto do CSV, exibido só como referência —
+ * o motor usa o `valor_atual` da posição manual, nunca este campo.
+ * `posicaoManualPendente = true` quando não existe nenhuma `posicao_manual`
+ * ativa com o mesmo `alvoId` — heurística de UX (sem FK direta entre
+ * `ativo_mapeado` e `posicao_manual`; data-model.md da feature 002).
+ */
+export interface IgnoradoRow {
+  chaveExport: string;
+  alvoId: string;
+  nomeAlvo: string;
+  valorAtualCentavos: number;
+  posicaoManualPendente: boolean;
+}
+
 export interface ListarVinculosOutput {
   pendentes: VinculoPendente[];
   vinculados: VinculoVinculado[];
   foraDaCarteira: VinculoForaDaCarteira[];
+  ignorados: IgnoradoRow[];
 }
 
 export type VincularAtivoInput =
   | { chaveExport: string; alvoId: string }
   | { chaveExport: string; foraDaCarteira: true }
-  | { chaveExport: string; novoAlvo: { nome: string; percentualBps: number } };
+  | { chaveExport: string; novoAlvo: { nome: string; percentualBps: number } }
+  // NOVO (feature 002, FR-001) — "Ignorar (substituído por posição manual)".
+  // Reaproveita os mesmos dois sub-modos de escolha de alvo já existentes
+  // acima; não existe um modo "ignorar sem alvo" (contracts/server-actions.md).
+  | { chaveExport: string; ignorarNoImport: true; alvoId: string }
+  | { chaveExport: string; ignorarNoImport: true; novoAlvo: { nome: string; percentualBps: number } };
 
 export interface VinculoAtualizado {
   chaveExport: string;
   alvoId: string | null;
   nomeAlvo: string | null;
   foraDaCarteira: boolean;
+  /**
+   * Presentes apenas quando a resolução foi feita com `ignorarNoImport: true`
+   * (contracts/server-actions.md) — omitidos (`undefined`) nas 3 formas
+   * pré-existentes para não alterar o shape que a tela 6.3 já consome há
+   * mais tempo.
+   */
+  ignorarNoImport?: boolean;
+  posicaoManualPendente?: boolean;
 }
 
 /**
@@ -97,8 +128,21 @@ async function obterValorAtualPorChave(): Promise<Map<string, number>> {
 }
 
 /**
+ * `alvoId`s que têm ao menos uma `posicao_manual` ATIVA associada — usado
+ * pela heurística de `posicaoManualPendente` (feature 002, FR-001; sem FK
+ * direta entre `ativo_mapeado` e `posicao_manual`, data-model.md).
+ */
+async function obterAlvoIdsComPosicaoManualAtiva(): Promise<Set<string>> {
+  const posicoesManuaisAtivas = await prisma.posicao_manual.findMany({
+    where: { ativo: true },
+    select: { alvo_id: true },
+  });
+  return new Set(posicoesManuaisAtivas.map((p) => p.alvo_id));
+}
+
+/**
  * Estado completo de `ativo_mapeado` (data-model.md, "Estados derivados"),
- * agrupado nos três baldes da tela 6.3. `vinculados` traz `nomeAlvo`
+ * agrupado nos quatro baldes da tela 6.3. `vinculados` traz `nomeAlvo`
  * denormalizado para exibição direta (N-para-1: vários `chaveExport` podem
  * repetir o mesmo `alvoId`/`nomeAlvo` — agrupável no cliente por `alvoId`).
  *
@@ -107,24 +151,41 @@ async function obterValorAtualPorChave(): Promise<Map<string, number>> {
  * `dashboard-service.classificarPosicoesDaSessao`). Uma `chave_export` sem
  * posição na sessão vigente (ativo zerado/vendido, ou nunca chegou a ter
  * posição na sessão atual) recebe `0` — nunca lança erro por ausência.
+ *
+ * `ignorados` (feature 002, FR-001): `chave_export` com `ignorar_no_import
+ * = true` — checado ANTES de `fora_da_carteira`/`alvo_id`, já que a
+ * invariante do data-model garante exclusão mútua com `fora_da_carteira` e
+ * o `alvo_id` continua preenchido (não é o mesmo estado de "vinculado" —
+ * some do balde `vinculados` e vira `ignorados`).
  */
 export async function listarVinculos(): Promise<ListarVinculosOutput> {
-  const [registros, valorPorChave] = await Promise.all([
+  const [registros, valorPorChave, alvoIdsComPosicaoManualAtiva] = await Promise.all([
     prisma.ativo_mapeado.findMany({
       include: { alvo: true },
       orderBy: { chave_export: "asc" },
     }),
     obterValorAtualPorChave(),
+    obterAlvoIdsComPosicaoManualAtiva(),
   ]);
 
   const pendentes: VinculoPendente[] = [];
   const vinculados: VinculoVinculado[] = [];
   const foraDaCarteira: VinculoForaDaCarteira[] = [];
+  const ignorados: IgnoradoRow[] = [];
 
   for (const registro of registros) {
     const valorAtualCentavos = valorPorChave.get(registro.chave_export) ?? 0;
 
-    if (registro.fora_da_carteira) {
+    if (registro.ignorar_no_import) {
+      const alvoId = registro.alvo_id ?? "";
+      ignorados.push({
+        chaveExport: registro.chave_export,
+        alvoId,
+        nomeAlvo: registro.alvo?.nome ?? alvoId,
+        valorAtualCentavos,
+        posicaoManualPendente: !alvoIdsComPosicaoManualAtiva.has(alvoId),
+      });
+    } else if (registro.fora_da_carteira) {
       // Estado "fora da carteira" — independente de alvo_id (que, pela
       // invariante, deve estar null aqui; ver nota em vincularAtivo).
       foraDaCarteira.push({ chaveExport: registro.chave_export, valorAtualCentavos });
@@ -144,7 +205,7 @@ export async function listarVinculos(): Promise<ListarVinculosOutput> {
     }
   }
 
-  return { pendentes, vinculados, foraDaCarteira };
+  return { pendentes, vinculados, foraDaCarteira, ignorados };
 }
 
 /** Quantidade de `ativo_mapeado` pendentes (alvo_id null AND fora_da_carteira false). */
@@ -166,6 +227,15 @@ async function obterAlvoVigentePorId(alvoId: string) {
  * (upsert) — nunca duplicado, já que `chave_export` é `@unique`.
  */
 export async function vincularAtivo(input: VincularAtivoInput): Promise<VinculoAtualizado> {
+  // `ignorarNoImport` é checado primeiro: as duas formas novas (feature 002)
+  // reaproveitam os mesmos sub-modos `alvoId`/`novoAlvo` das formas
+  // pré-existentes, então o discriminante precisa vir antes deles.
+  if ("ignorarNoImport" in input && input.ignorarNoImport) {
+    if ("novoAlvo" in input) {
+      return vincularIgnorarNoImportComNovoAlvo(input.chaveExport, input.novoAlvo);
+    }
+    return vincularIgnorarNoImportComAlvoExistente(input.chaveExport, input.alvoId);
+  }
   if ("novoAlvo" in input) {
     return vincularNovoAlvo(input.chaveExport, input.novoAlvo);
   }
@@ -259,4 +329,91 @@ async function vincularNovoAlvo(
       foraDaCarteira: false,
     };
   });
+}
+
+/**
+ * Forma `{chaveExport, ignorarNoImport: true, alvoId}` (feature 002,
+ * FR-001) — marca `ignorar_no_import = true` e preserva o `alvo_id`
+ * escolhido (não é descartado: é o "mesmo alvo" que a `posicao_manual`
+ * substituta deverá usar, contracts/server-actions.md). `fora_da_carteira`
+ * permanece `false` — invariante de exclusão mútua do data-model.md.
+ */
+async function vincularIgnorarNoImportComAlvoExistente(
+  chaveExport: string,
+  alvoId: string,
+): Promise<VinculoAtualizado> {
+  const alvo = await obterAlvoVigentePorId(alvoId);
+  if (!alvo) {
+    throw new Error(
+      `vincularAtivo: alvo "${alvoId}" não encontrado na vigência aberta (vigencia_fim = null).`,
+    );
+  }
+
+  const mapeamento = await prisma.ativo_mapeado.upsert({
+    where: { chave_export: chaveExport },
+    create: {
+      chave_export: chaveExport,
+      alvo_id: alvo.id,
+      fora_da_carteira: false,
+      ignorar_no_import: true,
+    },
+    update: { alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: true },
+  });
+
+  const posicaoManualPendente = !(await obterAlvoIdsComPosicaoManualAtiva()).has(alvo.id);
+
+  return {
+    chaveExport: mapeamento.chave_export,
+    alvoId: alvo.id,
+    nomeAlvo: alvo.nome,
+    foraDaCarteira: false,
+    ignorarNoImport: true,
+    posicaoManualPendente,
+  };
+}
+
+/**
+ * Forma `{chaveExport, ignorarNoImport: true, novoAlvo}` (feature 002,
+ * FR-001) — cria o alvo e já resolve o vínculo como "ignorado" na MESMA
+ * transação, mesmo padrão de `vincularNovoAlvo`.
+ */
+async function vincularIgnorarNoImportComNovoAlvo(
+  chaveExport: string,
+  novoAlvo: { nome: string; percentualBps: number },
+): Promise<VinculoAtualizado> {
+  const resultado = await prisma.$transaction(async (tx) => {
+    const alvo = await tx.alvo.create({
+      data: {
+        nome: novoAlvo.nome,
+        percentual_alvo_bps: novoAlvo.percentualBps,
+        vigencia_inicio: new Date(),
+        vigencia_fim: null,
+      },
+    });
+
+    const mapeamento = await tx.ativo_mapeado.upsert({
+      where: { chave_export: chaveExport },
+      create: {
+        chave_export: chaveExport,
+        alvo_id: alvo.id,
+        fora_da_carteira: false,
+        ignorar_no_import: true,
+      },
+      update: { alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: true },
+    });
+
+    return { mapeamento, alvo };
+  });
+
+  // Alvo recém-criado nunca tem posicao_manual ativa associada ainda —
+  // sempre pendente. Calculado fora da transação (leitura simples), sem
+  // custo relevante.
+  return {
+    chaveExport: resultado.mapeamento.chave_export,
+    alvoId: resultado.alvo.id,
+    nomeAlvo: resultado.alvo.nome,
+    foraDaCarteira: false,
+    ignorarNoImport: true,
+    posicaoManualPendente: true,
+  };
 }

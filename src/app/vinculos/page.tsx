@@ -25,6 +25,7 @@
  * conversão sem nenhuma lógica nova — "12,5" → 1250, que é exatamente 1250
  * bps.
  */
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -59,7 +60,11 @@ import type { ListarVinculosOutput, VincularAtivoInput } from "@/services/mapeam
 
 type Fase = "carregando" | "erro" | "pronto";
 
-type ModoResolucao = "existente" | "novo" | "fora";
+// "ignorar-existente"/"ignorar-novo" (feature 002, FR-001): mesma escolha de
+// alvo dos modos "existente"/"novo" (reaproveitam os campos do form), só que
+// gravam `ignorarNoImport: true` — o ativo some da consolidação do CSV
+// porque será substituído por uma posição manual.
+type ModoResolucao = "existente" | "novo" | "fora" | "ignorar-existente" | "ignorar-novo";
 
 interface FormPendente {
   modo: ModoResolucao;
@@ -147,7 +152,15 @@ export default function VinculosPage() {
         toast.error(resp.erro);
         return;
       }
-      toast.success(`"${chaveExport}" vinculado com sucesso.`);
+      if (resp.data.ignorarNoImport) {
+        toast.success(
+          resp.data.posicaoManualPendente
+            ? `"${chaveExport}" marcado como ignorado — cadastre a posição manual correspondente.`
+            : `"${chaveExport}" marcado como ignorado.`,
+        );
+      } else {
+        toast.success(`"${chaveExport}" vinculado com sucesso.`);
+      }
       await carregar();
     } finally {
       setSalvandoChave(null);
@@ -162,16 +175,23 @@ export default function VinculosPage() {
       return;
     }
 
-    if (form.modo === "existente") {
+    const ignorarNoImport = form.modo === "ignorar-existente" || form.modo === "ignorar-novo";
+
+    if (form.modo === "existente" || form.modo === "ignorar-existente") {
       if (!form.alvoId) {
         toast.error("Selecione um alvo existente.");
         return;
       }
-      await executarVinculo(chaveExport, { chaveExport, alvoId: form.alvoId });
+      await executarVinculo(
+        chaveExport,
+        ignorarNoImport
+          ? { chaveExport, ignorarNoImport: true, alvoId: form.alvoId }
+          : { chaveExport, alvoId: form.alvoId },
+      );
       return;
     }
 
-    // modo === "novo"
+    // modo === "novo" | "ignorar-novo"
     if (!form.novoNome.trim()) {
       toast.error("Informe o nome do novo alvo.");
       return;
@@ -187,10 +207,16 @@ export default function VinculosPage() {
       toast.error("Percentual do novo alvo deve ser maior que zero.");
       return;
     }
-    await executarVinculo(chaveExport, {
+    await executarVinculo(
       chaveExport,
-      novoAlvo: { nome: form.novoNome.trim(), percentualBps },
-    });
+      ignorarNoImport
+        ? {
+            chaveExport,
+            ignorarNoImport: true,
+            novoAlvo: { nome: form.novoNome.trim(), percentualBps },
+          }
+        : { chaveExport, novoAlvo: { nome: form.novoNome.trim(), percentualBps } },
+    );
   }
 
   async function handleReatribuir(chaveExport: string) {
@@ -219,6 +245,11 @@ export default function VinculosPage() {
     chaveExport: (f) => f.chaveExport,
     valorAtualCentavos: (f) => f.valorAtualCentavos,
   });
+  const ignoradosOrdenados = useSortableRows(vinculos?.ignorados ?? [], {
+    chaveExport: (i) => i.chaveExport,
+    valorAtualCentavos: (i) => i.valorAtualCentavos,
+    nomeAlvo: (i) => i.nomeAlvo,
+  });
 
   if (fase === "carregando") {
     return (
@@ -243,7 +274,7 @@ export default function VinculosPage() {
     );
   }
 
-  const { pendentes, vinculados, foraDaCarteira } = vinculos;
+  const { pendentes, vinculados, foraDaCarteira, ignorados } = vinculos;
 
   return (
     <div className="flex flex-col gap-6">
@@ -293,10 +324,16 @@ export default function VinculosPage() {
                         <option value="existente">Vincular a alvo existente</option>
                         <option value="novo">Criar novo alvo</option>
                         <option value="fora">Marcar fora da carteira</option>
+                        <option value="ignorar-existente">
+                          Ignorar (substituído por posição manual) — alvo existente
+                        </option>
+                        <option value="ignorar-novo">
+                          Ignorar (substituído por posição manual) — criar alvo
+                        </option>
                       </select>
                     </Field>
 
-                    {form.modo === "existente" && (
+                    {(form.modo === "existente" || form.modo === "ignorar-existente") && (
                       <Field className="w-auto">
                         <FieldLabel htmlFor={`alvo-${pendente.chaveExport}`}>Alvo</FieldLabel>
                         <select
@@ -317,7 +354,7 @@ export default function VinculosPage() {
                       </Field>
                     )}
 
-                    {form.modo === "novo" && (
+                    {(form.modo === "novo" || form.modo === "ignorar-novo") && (
                       <>
                         <Field className="w-auto">
                           <FieldLabel htmlFor={`nome-${pendente.chaveExport}`}>
@@ -362,6 +399,13 @@ export default function VinculosPage() {
                       {salvando ? "Salvando…" : "Confirmar"}
                     </Button>
                   </div>
+                  {(form.modo === "ignorar-existente" || form.modo === "ignorar-novo") && (
+                    <p className="text-xs text-muted-foreground">
+                      Este valor deixa de ser lido do export em imports futuros. Cadastre a
+                      posição manual correspondente em seguida, na tela &quot;Posições
+                      manuais&quot;.
+                    </p>
+                  )}
                 </div>
               );
             })}
@@ -536,6 +580,75 @@ export default function VinculosPage() {
                     </TableRow>
                   );
                 })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Ignorados {ignorados.length > 0 && `(${ignorados.length})`}</CardTitle>
+          <CardDescription>
+            Ativos lidos do export mas substituídos por uma posição manual — o valor abaixo é
+            só referência do CSV, não usado no cálculo (o motor usa a posição manual).
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {ignorados.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Nenhum ativo marcado como ignorado.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <SortableTableHead
+                    sortDirection={ignoradosOrdenados.sortDirectionFor("chaveExport")}
+                    onSort={() => ignoradosOrdenados.toggleSort("chaveExport")}
+                  >
+                    Chave do export
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={ignoradosOrdenados.sortDirectionFor("valorAtualCentavos")}
+                    onSort={() => ignoradosOrdenados.toggleSort("valorAtualCentavos")}
+                  >
+                    Valor no CSV (não usado no cálculo)
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={ignoradosOrdenados.sortDirectionFor("nomeAlvo")}
+                    onSort={() => ignoradosOrdenados.toggleSort("nomeAlvo")}
+                  >
+                    Alvo
+                  </SortableTableHead>
+                  <TableHead>Posição manual</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {ignoradosOrdenados.sortedRows.map((i) => (
+                  <TableRow key={i.chaveExport}>
+                    <TableCell className="max-w-48 whitespace-normal break-words">
+                      {i.chaveExport}
+                    </TableCell>
+                    <TableCell>{formatCentavosParaReais(i.valorAtualCentavos)}</TableCell>
+                    <TableCell>{i.nomeAlvo}</TableCell>
+                    <TableCell>
+                      {i.posicaoManualPendente ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          render={
+                            <Link
+                              href={`/posicoes-manuais?alvoId=${encodeURIComponent(i.alvoId)}&descricaoSugerida=${encodeURIComponent(i.chaveExport)}`}
+                            />
+                          }
+                        >
+                          + Cadastrar posição manual
+                        </Button>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">Já cadastrada</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
           )}

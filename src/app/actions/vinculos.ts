@@ -25,10 +25,13 @@ import {
   contarPendencias as contarPendenciasService,
   listarVinculos as listarVinculosService,
   vincularAtivo as vincularAtivoService,
+  type IgnoradoRow,
   type ListarVinculosOutput,
   type VinculoAtualizado,
   type VincularAtivoInput,
 } from "@/services/mapeamento-service";
+
+export type { IgnoradoRow };
 import { listarAlvos as listarAlvosAction } from "@/app/actions/alvos";
 
 export type ActionResult<T> =
