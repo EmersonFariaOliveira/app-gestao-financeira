@@ -210,6 +210,12 @@ async function montarContextoEntradaMotor(): Promise<ContextoEntradaMotor> {
   }
   const consolidadoPorChave = new Map<string, Consolidado>();
   for (const p of posicoesBrutas) {
+    // Regra §2.1 (contracts/motor-integracao.md): chave_export marcado
+    // ignorar_no_import é excluída INTEIRAMENTE da consolidação do CSV —
+    // nunca entra em posicoes[] com o dado do CSV, é substituída pela
+    // posicao_manual vinculada ao mesmo alvo (bloco abaixo, §2.2).
+    if (mapaPorChave.get(p.chave_export)?.ignorar_no_import) continue;
+
     const existente = consolidadoPorChave.get(p.chave_export);
     if (existente) {
       existente.valorCentavos += p.patrimonio_hoje_centavos;
@@ -256,6 +262,64 @@ async function montarContextoEntradaMotor(): Promise<ContextoEntradaMotor> {
         lista.push(precoCentavos);
         candidatosCotacaoPorAlvo.set(alvoId, lista);
       }
+    }
+  }
+
+  // §2.2 (contracts/motor-integracao.md): posicao_manual ativas com
+  // snapshot na sessão vigente entram em posicoes[] usando SEMPRE
+  // valor_atual_centavos — nunca valor_investido_centavos (FR-006). Uma
+  // posicao_manual ativa SEM snapshot na sessão vigente (§2.3) é omitida
+  // silenciosamente (não é erro): ainda não existe dado suficiente para
+  // ela entrar no cálculo deste mês.
+  const chavesConsolidadasDoCsv = new Set(consolidadoPorChave.keys());
+  const chavesManuaisInseridas = new Set<string>();
+  const posicoesManuaisAtivas = await prisma.posicao_manual.findMany({
+    where: { ativo: true },
+  });
+  if (posicoesManuaisAtivas.length > 0) {
+    const snapshots = await prisma.posicao_manual_valor.findMany({
+      where: {
+        sessao_import_id: sessao.id,
+        posicao_manual_id: { in: posicoesManuaisAtivas.map((p) => p.id) },
+      },
+    });
+    const snapshotPorPosicaoManualId = new Map(
+      snapshots.map((s) => [s.posicao_manual_id, s]),
+    );
+
+    for (const posicaoManual of posicoesManuaisAtivas) {
+      const snapshot = snapshotPorPosicaoManualId.get(posicaoManual.id);
+      if (!snapshot) continue;
+
+      // Guarda de colisão de identidade (fail loud, research.md R8, §2.2):
+      // uma chave_manual não pode coincidir com um chave_export já
+      // consolidado do CSV nem com outra chave_manual já inserida — nunca
+      // somar silenciosamente duas posições distintas sob a mesma chave.
+      if (
+        chavesConsolidadasDoCsv.has(posicaoManual.chave_manual) ||
+        chavesManuaisInseridas.has(posicaoManual.chave_manual)
+      ) {
+        throw new Error(
+          `Colisão de identidade: a chave manual "${posicaoManual.chave_manual}" coincide com um ativo já importado do CSV (ou outra posição manual) nesta sessão — corrija o cadastro da posição manual antes de calcular o aporte.`,
+        );
+      }
+      chavesManuaisInseridas.add(posicaoManual.chave_manual);
+
+      posicoes.push({
+        chaveExport: posicaoManual.chave_manual,
+        alvoId: posicaoManual.alvo_id,
+        foraDaCarteira: false,
+        valorCentavos: snapshot.valor_atual_centavos,
+        tipoGrupo: posicaoManual.tipo_grupo,
+      });
+
+      const tipos = tiposGrupoPorAlvoId.get(posicaoManual.alvo_id) ?? new Set<string>();
+      tipos.add(posicaoManual.tipo_grupo);
+      tiposGrupoPorAlvoId.set(posicaoManual.alvo_id, tipos);
+      // Nunca entra em candidatosCotacaoPorAlvo: GRUPOS_B3 não inclui
+      // RENDA_FIXA_MANUAL, então posições manuais nunca são candidatas ao
+      // arredondamento por lote (regra 7 — "não se aplica a posições
+      // manuais"), por construção, sem caso especial de código.
     }
   }
 

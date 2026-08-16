@@ -53,11 +53,20 @@ afterAll(async () => {
   if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-/** Limpa todas as tabelas (ordem respeita FKs, igual a prisma/seed.ts). */
+/**
+ * Limpa todas as tabelas (ordem respeita FKs, igual a prisma/seed.ts).
+ * Inclui as tabelas da feature 002 (posicao_manual e afins) mesmo que ainda
+ * não sejam usadas por todos os testes deste arquivo, para manter o reset
+ * simétrico ao schema completo.
+ */
 async function resetDb() {
+  await prisma.incremento_valor_investido_pendente.deleteMany();
+  await prisma.ajuste_valor_investido.deleteMany();
+  await prisma.posicao_manual_valor.deleteMany();
   await prisma.dividendo.deleteMany();
   await prisma.aporte.deleteMany();
   await prisma.posicao.deleteMany();
+  await prisma.posicao_manual.deleteMany();
   await prisma.ativo_mapeado.deleteMany();
   await prisma.sessao_import.deleteMany();
   await prisma.alvo.deleteMany();
@@ -568,6 +577,258 @@ describe("aporte-service", () => {
       expect(calculo.resultado.fila.map((f) => f.alvoId).sort()).toEqual(
         [alvoAcoes.id, alvoZumbi.id].sort(),
       );
+    });
+  });
+
+  describe("posições manuais e ignorar_no_import — contracts/motor-integracao.md §2 (T006, TDD: montarContextoEntradaMotor ainda não foi estendido — falhas aqui são esperadas até T008)", () => {
+    it("posição manual ativa com posicao_manual_valor na sessão vigente entra no cálculo com valorCentavos = valor_atual, NUNCA valor_investido (§2.2, FR-006)", async () => {
+      const alvoAcoes = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const alvoRendaFixa = await prisma.alvo.create({
+        data: { nome: "Pós-fixado", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+      });
+
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessao.id,
+          chave_export: "PRIO3",
+          instituicao: "Itaú",
+          quantidade: "100",
+          patrimonio_hoje_centavos: 300_000,
+          tipo_grupo: "ACOES",
+          data_ultima_cotacao: new Date("2026-07-28"),
+        },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+      });
+
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          alvo_id: alvoRendaFixa.id,
+          descricao: "CDB Itaú 120% CDI 2029",
+        },
+      });
+      // valor_investido propositalmente bem diferente (e muito menor) de
+      // valor_atual: se montarContextoEntradaMotor por engano lesse
+      // valor_investido, patrimonioBaseCentavos ficaria ~300_001 em vez de
+      // 820_000 — a asserção abaixo comprova que o campo lido é valor_atual.
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManual.id,
+          sessao_import_id: sessao.id,
+          valor_investido_centavos: 1,
+          valor_atual_centavos: 520_000,
+        },
+      });
+
+      const calculo = await aporteService.calcular({
+        valorCentavos: 50_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 100,
+      });
+
+      // 300_000 (PRIO3/CSV) + 520_000 (manual, valor_atual) = 820_000.
+      expect(calculo.resultado.patrimonioBaseCentavos).toBe(820_000);
+
+      const itemFilaRendaFixa = calculo.resultado.fila.find((f) => f.alvoId === alvoRendaFixa.id);
+      expect(itemFilaRendaFixa?.valorAtualCentavos).toBe(520_000);
+    });
+
+    it("chave_export marcado ignorar_no_import=true é excluído inteiramente da consolidação do CSV, mesmo vinculado a um alvo (§2.1)", async () => {
+      const alvoAcoes = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const alvoRendaFixa = await prisma.alvo.create({
+        data: { nome: "Pós-fixado", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+      });
+
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+
+      await prisma.posicao.createMany({
+        data: [
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 300_000,
+            tipo_grupo: "ACOES",
+            data_ultima_cotacao: new Date("2026-07-28"),
+          },
+          {
+            // Ignorado: nunca deveria contribuir com 999_000 ao alvo
+            // Pós-fixado, mesmo estando vinculado a ele.
+            sessao_import_id: sessao.id,
+            chave_export: "TESOURO-IGNORADO",
+            instituicao: "Itaú",
+            quantidade: "1000.00",
+            patrimonio_hoje_centavos: 999_000,
+            tipo_grupo: "TESOURO_DIRETO",
+            data_ultima_cotacao: new Date("2026-07-28"),
+          },
+        ],
+      });
+
+      await prisma.ativo_mapeado.createMany({
+        data: [
+          { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+          {
+            chave_export: "TESOURO-IGNORADO",
+            alvo_id: alvoRendaFixa.id,
+            fora_da_carteira: false,
+            ignorar_no_import: true,
+          },
+        ],
+      });
+
+      const calculo = await aporteService.calcular({
+        valorCentavos: 50_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 100,
+      });
+
+      // Sem TESOURO-IGNORADO (999_000): só PRIO3 (300_000) entra na base.
+      expect(calculo.resultado.patrimonioBaseCentavos).toBe(300_000);
+      const itemFilaRendaFixa = calculo.resultado.fila.find((f) => f.alvoId === alvoRendaFixa.id);
+      expect(itemFilaRendaFixa?.valorAtualCentavos ?? 0).toBe(0);
+    });
+
+    it("colisão entre chave_manual de uma posicao_manual e um chave_export já consolidado do CSV lança erro explícito (fail loud, research.md R8, §2.2)", async () => {
+      const alvoAcoes = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const alvoRendaFixa = await prisma.alvo.create({
+        data: { nome: "Pós-fixado", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+      });
+
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessao.id,
+          chave_export: "PRIO3",
+          instituicao: "Itaú",
+          quantidade: "100",
+          patrimonio_hoje_centavos: 300_000,
+          tipo_grupo: "ACOES",
+          data_ultima_cotacao: new Date("2026-07-28"),
+        },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+      });
+
+      // Colisão de identidade: chave_manual igual a uma chave_export real
+      // já consolidada do CSV — nunca deve ser somada silenciosamente.
+      const posicaoManualColidente = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "PRIO3",
+          instituicao: "Itaú",
+          alvo_id: alvoRendaFixa.id,
+          descricao: "Posição manual colidente (erro de cadastro do usuário)",
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManualColidente.id,
+          sessao_import_id: sessao.id,
+          valor_investido_centavos: 500_000,
+          valor_atual_centavos: 520_000,
+        },
+      });
+
+      await expect(
+        aporteService.calcular({
+          valorCentavos: 50_000,
+          incluirDividendos: false,
+          incluirTroco: false,
+          aporteMinimoCentavos: 100,
+        }),
+      ).rejects.toThrow(/PRIO3/);
+    });
+
+    it("posicao_manual ativa SEM posicao_manual_valor na sessão vigente não entra no cálculo (pré-condição §2.3) nem quebra o cálculo", async () => {
+      const alvoAcoes = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const alvoRendaFixa = await prisma.alvo.create({
+        data: { nome: "Pós-fixado", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+      });
+
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessao.id,
+          chave_export: "PRIO3",
+          instituicao: "Itaú",
+          quantidade: "100",
+          patrimonio_hoje_centavos: 300_000,
+          tipo_grupo: "ACOES",
+          data_ultima_cotacao: new Date("2026-07-28"),
+        },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+      });
+
+      // posicao_manual ativa, mas sem NENHUM posicao_manual_valor criado
+      // (nem nesta sessão, nem em qualquer outra).
+      await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-SEM-SNAPSHOT",
+          instituicao: "Itaú",
+          alvo_id: alvoRendaFixa.id,
+          descricao: "CDB cadastrado mas sem snapshot ainda",
+        },
+      });
+
+      const calculo = await aporteService.calcular({
+        valorCentavos: 50_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 100,
+      });
+
+      expect(calculo.resultado.patrimonioBaseCentavos).toBe(300_000);
+      const itemFilaRendaFixa = calculo.resultado.fila.find((f) => f.alvoId === alvoRendaFixa.id);
+      expect(itemFilaRendaFixa?.valorAtualCentavos ?? 0).toBe(0);
     });
   });
 });
