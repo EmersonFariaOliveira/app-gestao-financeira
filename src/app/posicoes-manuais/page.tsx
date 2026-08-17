@@ -9,11 +9,15 @@
  * `src/app/actions/posicoes-manuais.ts` (que delega a
  * `src/services/posicao-manual-service.ts`) e exibe o resultado.
  *
- * Escopo desta task (T012, User Story 1): listagem de posições manuais
- * ATIVAS, criação ("+ Nova posição manual", pré-preenchida por querystring
- * quando chega do CTA de /vinculos — T010) e encerramento. A seção "Ajustes
- * de fundos" (User Story 2, T017) e a revisão de carry-forward dentro do
- * import (User Story 3) NÃO fazem parte desta task.
+ * Escopo original (T012, User Story 1): listagem de posições manuais ATIVAS,
+ * criação ("+ Nova posição manual", pré-preenchida por querystring quando
+ * chega do CTA de /vinculos — T010) e encerramento.
+ *
+ * T017 (User Story 2, FR-005/FR-009) acrescenta a seção "Ajustes de fundos":
+ * correção pontual do `valor_investido` de um `chave_export` que continua
+ * vindo do CSV (ex.: fundo) — nunca toca `valor_atual`/déficit (FR-006). A
+ * revisão de carry-forward dentro do import (User Story 3) NÃO faz parte
+ * desta task.
  *
  * `alvoId`/`descricaoSugerida` na querystring (contracts/server-actions.md,
  * nota de design 2): vêm do CTA "+ Cadastrar posição manual" da tela de
@@ -28,11 +32,17 @@ import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 
 import {
+  criarOuAtualizarAjuste,
   criarPosicaoManual,
   encerrarPosicaoManual,
+  listarAjustesAtivos,
   listarPosicoesManuaisAtivas,
 } from "@/app/actions/posicoes-manuais";
-import { listarAlvosParaDropdown, type AlvoParaDropdown } from "@/app/actions/vinculos";
+import {
+  listarAlvosParaDropdown,
+  listarVinculos,
+  type AlvoParaDropdown,
+} from "@/app/actions/vinculos";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -63,7 +73,8 @@ import {
 } from "@/components/ui/table";
 import { formatCentavosParaReais, parseDecimalParaCentavos } from "@/core/money";
 import { useSortableRows } from "@/hooks/use-sortable-rows";
-import type { PosicaoManualListItem } from "@/services/posicao-manual-service";
+import type { VinculoVinculado } from "@/services/mapeamento-service";
+import type { AjusteAtivoListItem, PosicaoManualListItem } from "@/services/posicao-manual-service";
 
 type Fase = "carregando" | "erro" | "pronto";
 
@@ -107,10 +118,25 @@ function PosicoesManuaisContent() {
   );
   const [encerrando, setEncerrando] = useState(false);
 
+  // Seção "Ajustes de fundos" (T017, User Story 2): correção pontual do
+  // valor investido de um chave_export que continua vindo do CSV — nunca
+  // toca valor_atual/déficit (FR-006). `vinculados` popula o dropdown de
+  // "qual ativo ajustar" (só ativos vinculados a um alvo fazem sentido
+  // aqui — pendentes/fora-da-carteira/ignorados não).
+  const [ajustes, setAjustes] = useState<AjusteAtivoListItem[]>([]);
+  const [vinculados, setVinculados] = useState<VinculoVinculado[]>([]);
+  const [mostrarFormAjuste, setMostrarFormAjuste] = useState(false);
+  const [chaveExportSelecionada, setChaveExportSelecionada] = useState("");
+  const [valorAjusteTexto, setValorAjusteTexto] = useState("");
+  const [erroFormAjuste, setErroFormAjuste] = useState<string | null>(null);
+  const [salvandoAjuste, setSalvandoAjuste] = useState(false);
+
   const carregar = useCallback(async () => {
-    const [respPosicoes, respAlvos] = await Promise.all([
+    const [respPosicoes, respAlvos, respAjustes, respVinculos] = await Promise.all([
       listarPosicoesManuaisAtivas(),
       listarAlvosParaDropdown(),
+      listarAjustesAtivos(),
+      listarVinculos(),
     ]);
     if (!respPosicoes.ok) {
       setErro(respPosicoes.erro);
@@ -122,8 +148,20 @@ function PosicoesManuaisContent() {
       setFase("erro");
       return;
     }
+    if (!respAjustes.ok) {
+      setErro(respAjustes.erro);
+      setFase("erro");
+      return;
+    }
+    if (!respVinculos.ok) {
+      setErro(respVinculos.erro);
+      setFase("erro");
+      return;
+    }
     setPosicoes(respPosicoes.data);
     setAlvos(respAlvos.data);
+    setAjustes(respAjustes.data);
+    setVinculados(respVinculos.data.vinculados);
     setFase("pronto");
   }, []);
 
@@ -150,6 +188,72 @@ function PosicoesManuaisContent() {
     valorInvestidoCentavos: (p) => p.valorInvestidoCentavos ?? 0,
     valorAtualCentavos: (p) => p.valorAtualCentavos ?? 0,
   });
+
+  const ajustesOrdenados = useSortableRows(ajustes, {
+    chaveExport: (a) => a.chaveExport,
+    nomeAlvo: (a) => a.nomeAlvo ?? "",
+    valorInvestidoCentavosCorrigido: (a) => a.valorInvestidoCentavosCorrigido ?? -1,
+  });
+
+  /** chave_export vinculados ainda sem nenhum ajuste cadastrado — evita repetir no dropdown quem já está na tabela abaixo (a edição de quem já tem ajuste é feita pelo botão "Editar" da linha). */
+  const chavesSemAjusteAinda = vinculados.filter(
+    (v) => !ajustes.some((a) => a.chaveExport === v.chaveExport),
+  );
+
+  function limparFormularioAjuste() {
+    setChaveExportSelecionada("");
+    setValorAjusteTexto("");
+    setErroFormAjuste(null);
+    setMostrarFormAjuste(false);
+  }
+
+  function handleEditarAjuste(ajuste: AjusteAtivoListItem) {
+    setChaveExportSelecionada(ajuste.chaveExport);
+    setValorAjusteTexto(
+      ajuste.valorInvestidoCentavosCorrigido !== null
+        ? (ajuste.valorInvestidoCentavosCorrigido / 100).toFixed(2).replace(".", ",")
+        : "",
+    );
+    setErroFormAjuste(null);
+    setMostrarFormAjuste(true);
+  }
+
+  async function handleSalvarAjuste() {
+    if (!chaveExportSelecionada) {
+      setErroFormAjuste("Selecione o ativo (chave do export) a ajustar.");
+      return;
+    }
+
+    let valorInvestidoCentavosCorrigido: number;
+    try {
+      valorInvestidoCentavosCorrigido = parseDecimalParaCentavos(valorAjusteTexto);
+    } catch {
+      setErroFormAjuste("Valor corrigido inválido — use um decimal (ex.: 1000,00).");
+      return;
+    }
+    if (valorInvestidoCentavosCorrigido < 0) {
+      setErroFormAjuste("Valor não pode ser negativo.");
+      return;
+    }
+
+    setSalvandoAjuste(true);
+    setErroFormAjuste(null);
+    try {
+      const resp = await criarOuAtualizarAjuste({
+        chaveExport: chaveExportSelecionada,
+        valorInvestidoCentavosCorrigido,
+      });
+      if (!resp.ok) {
+        setErroFormAjuste(resp.erro);
+        return;
+      }
+      toast.success(`Ajuste de "${resp.data.chaveExport}" salvo.`);
+      limparFormularioAjuste();
+      await carregar();
+    } finally {
+      setSalvandoAjuste(false);
+    }
+  }
 
   function limparFormulario() {
     setChaveManualTexto("");
@@ -447,6 +551,133 @@ function PosicoesManuaisContent() {
                         onClick={() => setPosicaoParaEncerrar(p)}
                       >
                         Encerrar
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Ajustes de fundos</CardTitle>
+          <CardDescription>
+            Corrige o valor investido de um ativo que continua vindo do CSV (ex.: um fundo) —
+            o valor atual e o cálculo de déficit nunca mudam por causa deste ajuste (FR-006).
+          </CardDescription>
+        </CardHeader>
+        {!mostrarFormAjuste ? (
+          <CardContent>
+            <Button onClick={() => setMostrarFormAjuste(true)}>+ Novo ajuste</Button>
+          </CardContent>
+        ) : (
+          <>
+            <CardContent className="flex flex-col gap-4">
+              <div className="flex flex-wrap gap-4">
+                <Field className="w-64">
+                  <FieldLabel htmlFor="aj-chave-export">Ativo (chave do export)</FieldLabel>
+                  <select
+                    id="aj-chave-export"
+                    className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
+                    value={chaveExportSelecionada}
+                    onChange={(e) => setChaveExportSelecionada(e.target.value)}
+                  >
+                    <option value="">Selecione…</option>
+                    {chaveExportSelecionada &&
+                      !chavesSemAjusteAinda.some((v) => v.chaveExport === chaveExportSelecionada) && (
+                        <option value={chaveExportSelecionada}>{chaveExportSelecionada}</option>
+                      )}
+                    {chavesSemAjusteAinda.map((v) => (
+                      <option key={v.chaveExport} value={v.chaveExport}>
+                        {v.chaveExport} ({v.nomeAlvo})
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field className="w-36">
+                  <FieldLabel htmlFor="aj-valor">Valor investido corrigido</FieldLabel>
+                  <Input
+                    id="aj-valor"
+                    inputMode="decimal"
+                    placeholder="1000,00"
+                    value={valorAjusteTexto}
+                    onChange={(e) => setValorAjusteTexto(e.target.value)}
+                  />
+                </Field>
+              </div>
+              {chaveExportSelecionada &&
+                !ajustes.some((a) => a.chaveExport === chaveExportSelecionada) && (
+                  <div className="rounded-lg border border-amber-400/60 bg-amber-400/10 p-3 text-sm">
+                    Primeira vez ajustando &quot;{chaveExportSelecionada}&quot; — não há valor
+                    anterior cadastrado para este ativo (FR-009).
+                  </div>
+                )}
+              <div className="flex gap-2">
+                <Button onClick={() => void handleSalvarAjuste()} disabled={salvandoAjuste}>
+                  {salvandoAjuste ? "Salvando…" : "Salvar ajuste"}
+                </Button>
+                <Button variant="outline" onClick={limparFormularioAjuste} disabled={salvandoAjuste}>
+                  Cancelar
+                </Button>
+              </div>
+            </CardContent>
+            {erroFormAjuste && (
+              <CardContent className="pt-0">
+                <FieldError>{erroFormAjuste}</FieldError>
+              </CardContent>
+            )}
+          </>
+        )}
+        <CardContent>
+          {ajustes.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Nenhum ajuste cadastrado ainda.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <SortableTableHead
+                    sortDirection={ajustesOrdenados.sortDirectionFor("chaveExport")}
+                    onSort={() => ajustesOrdenados.toggleSort("chaveExport")}
+                  >
+                    Chave do export
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={ajustesOrdenados.sortDirectionFor("nomeAlvo")}
+                    onSort={() => ajustesOrdenados.toggleSort("nomeAlvo")}
+                  >
+                    Alvo
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={ajustesOrdenados.sortDirectionFor("valorInvestidoCentavosCorrigido")}
+                    onSort={() => ajustesOrdenados.toggleSort("valorInvestidoCentavosCorrigido")}
+                  >
+                    Valor investido corrigido
+                  </SortableTableHead>
+                  <TableHead>Ações</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {ajustesOrdenados.sortedRows.map((a) => (
+                  <TableRow key={a.chaveExport}>
+                    <TableCell className="max-w-56 whitespace-normal break-words">
+                      {a.chaveExport}
+                    </TableCell>
+                    <TableCell>{a.nomeAlvo ?? "—"}</TableCell>
+                    <TableCell>
+                      {a.valorInvestidoCentavosCorrigido !== null ? (
+                        formatCentavosParaReais(a.valorInvestidoCentavosCorrigido)
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded border border-amber-400/60 bg-amber-400/10 px-1.5 py-0.5 text-xs">
+                          Primeira vez — ainda sem valor corrigido
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Button size="sm" variant="outline" onClick={() => handleEditarAjuste(a)}>
+                        {a.valorInvestidoCentavosCorrigido !== null ? "Editar" : "Preencher"}
                       </Button>
                     </TableCell>
                   </TableRow>
