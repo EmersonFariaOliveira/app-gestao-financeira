@@ -475,11 +475,98 @@ export async function calcular(input: CalcularInput): Promise<CalcularOutput> {
   };
 }
 
+/** Tipo mínimo do client de transação usado por `gerarIncrementosPendentes` (evita depender do tipo `Prisma.TransactionClient` só para esta assinatura). */
+type ClienteTransacao = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
+/**
+ * Gera `incremento_valor_investido_pendente` para uma linha de `executado`
+ * (contracts/motor-integracao.md §3, algoritmo de "mapeamento exclusivo").
+ * Roda inteiramente dentro da transação (`tx`) de `registrarAporte` —
+ * nenhuma query aqui usa o `prisma` global, para garantir atomicidade real
+ * (se qualquer `create` abaixo falhar, o `aporte` inteiro reverte).
+ *
+ * Conjunto de elegíveis, avaliado no estado ATUAL do banco (§3.1):
+ *   (a) posicao_manual WHERE alvo_id = X AND ativo = true
+ *   (b) chave_export WHERE ativo_mapeado.alvo_id = X
+ *         AND fora_da_carteira = false AND ignorar_no_import = false
+ *         AND EXISTS ajuste_valor_investido histórico para essa chave
+ *
+ * n=0 → nada é criado. n=1 → incremento exclusivo (FK correspondente
+ * preenchido). n>=2 → incremento ambíguo de alvo (ambos FKs null, FR-012).
+ */
+async function gerarIncrementosPendentes(
+  tx: ClienteTransacao,
+  alvoId: string,
+  valorIncrementoCentavos: number,
+  aporteId: string,
+): Promise<void> {
+  const [posicoesManuaisElegiveis, ativosMapeadosDoAlvo] = await Promise.all([
+    tx.posicao_manual.findMany({
+      where: { alvo_id: alvoId, ativo: true },
+      select: { id: true },
+    }),
+    tx.ativo_mapeado.findMany({
+      where: { alvo_id: alvoId, fora_da_carteira: false, ignorar_no_import: false },
+      select: { chave_export: true },
+    }),
+  ]);
+
+  let ajustesElegiveis: { chave_export: string }[] = [];
+  if (ativosMapeadosDoAlvo.length > 0) {
+    const chaves = ativosMapeadosDoAlvo.map((a) => a.chave_export);
+    // "Ajuste ativo" (§3.1-b, decisão de julgamento §5.1): exige EXISTS de
+    // ao menos 1 ajuste_valor_investido histórico para a chave — não
+    // precisa ser da sessão vigente, só existir alguma vez.
+    const chavesComHistorico = await tx.ajuste_valor_investido.findMany({
+      where: { chave_export: { in: chaves } },
+      select: { chave_export: true },
+      distinct: ["chave_export"],
+    });
+    ajustesElegiveis = chavesComHistorico;
+  }
+
+  const n = posicoesManuaisElegiveis.length + ajustesElegiveis.length;
+  if (n === 0) return;
+
+  if (n === 1) {
+    const dadosBase = {
+      alvo_id: alvoId,
+      aporte_id: aporteId,
+      valor_incremento_centavos: valorIncrementoCentavos,
+      aplicado: false,
+    };
+    if (posicoesManuaisElegiveis.length === 1) {
+      await tx.incremento_valor_investido_pendente.create({
+        data: { ...dadosBase, posicao_manual_id: posicoesManuaisElegiveis[0].id, chave_export: null },
+      });
+    } else {
+      await tx.incremento_valor_investido_pendente.create({
+        data: { ...dadosBase, chave_export: ajustesElegiveis[0].chave_export, posicao_manual_id: null },
+      });
+    }
+    return;
+  }
+
+  // n >= 2: pendência ambígua, nível do alvo (FR-012) — nenhum dos dois FKs.
+  await tx.incremento_valor_investido_pendente.create({
+    data: {
+      alvo_id: alvoId,
+      chave_export: null,
+      posicao_manual_id: null,
+      aporte_id: aporteId,
+      valor_incremento_centavos: valorIncrementoCentavos,
+      aplicado: false,
+    },
+  });
+}
+
 /**
  * Registra o cálculo + execução declarada em transação: cria `aporte`
  * amarrado à sessão informada (permanente — NUNCA re-derivada/re-vinculada
- * aqui, mesmo que ela já não seja mais a vigente no momento do registro) e
- * marca os dividendos incluídos como utilizados.
+ * aqui, mesmo que ela já não seja mais a vigente no momento do registro),
+ * marca os dividendos incluídos como utilizados e gera
+ * `incremento_valor_investido_pendente` para cada linha de `executado` com
+ * valor > 0 (contracts/motor-integracao.md §3).
  *
  * REGRA 9 (inviolável, data-model.md): esta função NUNCA escreve em
  * `posicao` — nenhuma linha de código abaixo faz update/create/delete em
@@ -529,6 +616,15 @@ export async function registrarAporte(
         where: { id: { in: input.dividendosIncluidosIds }, aporte_id: null },
         data: { aporte_id: aporte.id },
       });
+    }
+
+    // contracts/motor-integracao.md §3: para cada linha de executado com
+    // valor > 0 (linhas com 0 ou ausentes não geram pendência), gera o(s)
+    // incremento_valor_investido_pendente correspondente, na MESMA
+    // transação — se qualquer create falhar, o aporte inteiro reverte.
+    for (const linha of input.executado) {
+      if (linha.valor_centavos <= 0) continue;
+      await gerarIncrementosPendentes(tx, linha.alvo_id, linha.valor_centavos, aporte.id);
     }
 
     return aporte.id;

@@ -131,6 +131,37 @@ async function criarCenarioSemPendencia() {
   return { alvoAcoes, alvoRendaFixa, sessao };
 }
 
+/**
+ * Sessão VIGENTE mínima, sem posições — suficiente para satisfazer a FK
+ * `aporte.sessao_import_id`. Os testes do algoritmo de elegibilidade
+ * (T023) chamam `registrarAporte` diretamente com um `executado[]`
+ * sintético; eles não passam por `montarContextoEntradaMotor` (que exige
+ * posições/vínculos completos), porque a geração de
+ * `incremento_valor_investido_pendente` é resolvida inteiramente a partir
+ * de `posicao_manual`/`ativo_mapeado`/`ajuste_valor_investido`, no estado
+ * ATUAL do banco (motor-integracao.md §3.1) — não depende de posições.
+ */
+async function criarSessaoMinima(mesReferencia = "2026-07") {
+  return prisma.sessao_import.create({
+    data: {
+      mes_referencia: mesReferencia,
+      data_export: new Date("2026-07-28"),
+      status: "VIGENTE",
+      instituicoes: JSON.stringify(["Itaú"]),
+    },
+  });
+}
+
+/** `LinhaAporte` sintética mínima para os testes de elegibilidade. */
+function linhaAporteExecutada(alvoId: string, nomeAlvo: string, valorCentavos: number) {
+  return {
+    alvo_id: alvoId,
+    nome_alvo: nomeAlvo,
+    valor_centavos: valorCentavos,
+    origem: "DEFICIT" as const,
+  };
+}
+
 describe("aporte-service", () => {
   describe("bloqueio por pendência (FR-015)", () => {
     it("prepararCalculadora retorna bloqueada=true com a chave pendente listada", async () => {
@@ -874,4 +905,517 @@ describe("aporte-service", () => {
       expect(calculoDepois.resultado.patrimonioBaseCentavos).not.toBe(999_999_999);
     });
   });
+
+  describe(
+    "incremento_valor_investido_pendente — algoritmo de mapeamento exclusivo " +
+      "(T023, US4, contracts/motor-integracao.md §3; TDD: registrarAporte ainda " +
+      "NÃO gera incrementos — as falhas abaixo são esperadas até T025)",
+    () => {
+      it("0 elegíveis: nenhum incremento_valor_investido_pendente é criado para o alvo (§3.2, decisão de julgamento §5.2)", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Multimercado", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        const sessao = await criarSessaoMinima();
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 50_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 50_000)],
+          valorTotalCentavos: 50_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(0);
+      });
+
+      it("1 elegível via posição manual ativa: cria 1 incremento com posicao_manual_id preenchido e chave_export null (§3.2)", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Pós-fixado", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        const posicaoManual = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-UNICO-2029",
+            instituicao: "Itaú",
+            alvo_id: alvo.id,
+            descricao: "CDB Itaú único elegível",
+          },
+        });
+        const sessao = await criarSessaoMinima();
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 75_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 75_000)],
+          valorTotalCentavos: 75_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(1);
+        expect(incrementos[0]).toMatchObject({
+          alvo_id: alvo.id,
+          chave_export: null,
+          posicao_manual_id: posicaoManual.id,
+          valor_incremento_centavos: 75_000,
+          aplicado: false,
+        });
+      });
+
+      it("1 elegível via ajuste ativo (chave_export com ajuste_valor_investido histórico): cria 1 incremento com chave_export preenchido e posicao_manual_id null (§3.2)", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Fundos", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        await prisma.ativo_mapeado.create({
+          data: {
+            chave_export: "FUNDO-UNICO-X",
+            alvo_id: alvo.id,
+            fora_da_carteira: false,
+            ignorar_no_import: false,
+          },
+        });
+        const sessaoHistorica = await criarSessaoMinima("2026-06");
+        // "Ajuste ativo" exige apenas que o histórico exista — não precisa
+        // ser da sessão vigente no momento do aporte (motor-integracao.md
+        // §3.1: "não precisa ser da sessão vigente, só existir historicamente").
+        await prisma.ajuste_valor_investido.create({
+          data: {
+            chave_export: "FUNDO-UNICO-X",
+            sessao_import_id: sessaoHistorica.id,
+            valor_investido_corrigido_centavos: 100_000,
+          },
+        });
+        const sessao = await criarSessaoMinima("2026-07");
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 60_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 60_000)],
+          valorTotalCentavos: 60_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(1);
+        expect(incrementos[0]).toMatchObject({
+          alvo_id: alvo.id,
+          chave_export: "FUNDO-UNICO-X",
+          posicao_manual_id: null,
+          valor_incremento_centavos: 60_000,
+          aplicado: false,
+        });
+      });
+
+      it("chave_export vinculado ao alvo mas SEM nenhum ajuste_valor_investido histórico não é elegível (decisão de julgamento §5.1) — 0 elegíveis", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Fundos sem ajuste", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        // Vinculado ao alvo, mas NUNCA "promovido" a ajuste — não é elegível.
+        await prisma.ativo_mapeado.create({
+          data: {
+            chave_export: "FUNDO-SEM-AJUSTE",
+            alvo_id: alvo.id,
+            fora_da_carteira: false,
+            ignorar_no_import: false,
+          },
+        });
+        const sessao = await criarSessaoMinima();
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 30_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 30_000)],
+          valorTotalCentavos: 30_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(0);
+      });
+
+      it("≥2 elegíveis (2 posições manuais ativas no mesmo alvo): cria 1 incremento ambíguo com alvo_id só, chave_export e posicao_manual_id ambos null (FR-012, §3.2)", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Multimercado ambíguo", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-AMBIGUO-1",
+            instituicao: "Itaú",
+            alvo_id: alvo.id,
+            descricao: "CDB A",
+          },
+        });
+        await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-AMBIGUO-2",
+            instituicao: "Nubank",
+            alvo_id: alvo.id,
+            descricao: "CDB B",
+          },
+        });
+        const sessao = await criarSessaoMinima();
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 90_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 90_000)],
+          valorTotalCentavos: 90_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(1);
+        expect(incrementos[0]).toMatchObject({
+          alvo_id: alvo.id,
+          chave_export: null,
+          posicao_manual_id: null,
+          valor_incremento_centavos: 90_000,
+          aplicado: false,
+        });
+      });
+
+      it("≥2 elegíveis mistos (1 posição manual + 1 ajuste ativo no mesmo alvo): também gera incremento ambíguo, não escolhe um dos dois (§3.2, união a+b)", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Misto ambíguo", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-MISTO-1",
+            instituicao: "Itaú",
+            alvo_id: alvo.id,
+            descricao: "CDB misto",
+          },
+        });
+        await prisma.ativo_mapeado.create({
+          data: {
+            chave_export: "FUNDO-MISTO-1",
+            alvo_id: alvo.id,
+            fora_da_carteira: false,
+            ignorar_no_import: false,
+          },
+        });
+        const sessaoHistorica = await criarSessaoMinima("2026-06");
+        await prisma.ajuste_valor_investido.create({
+          data: {
+            chave_export: "FUNDO-MISTO-1",
+            sessao_import_id: sessaoHistorica.id,
+            valor_investido_corrigido_centavos: 50_000,
+          },
+        });
+        const sessao = await criarSessaoMinima("2026-07");
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 120_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 120_000)],
+          valorTotalCentavos: 120_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(1);
+        expect(incrementos[0]).toMatchObject({
+          alvo_id: alvo.id,
+          chave_export: null,
+          posicao_manual_id: null,
+          valor_incremento_centavos: 120_000,
+          aplicado: false,
+        });
+      });
+
+      it("FR-015: posição manual ENCERRADA (ativo=false) nunca entra em elegíveis — sozinha, produz 0 elegíveis", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "CDB encerrado", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-ENCERRADO",
+            instituicao: "Itaú",
+            alvo_id: alvo.id,
+            descricao: "CDB vencido",
+            ativo: false,
+          },
+        });
+        const sessao = await criarSessaoMinima();
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 40_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 40_000)],
+          valorTotalCentavos: 40_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(0);
+      });
+
+      it("FR-015: posição manual ENCERRADA não conta na contagem — 1 encerrada + 1 ativa no mesmo alvo ainda é n=1 (exclusiva), não ambígua", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "CDB parcialmente encerrado", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-ENCERRADO-2",
+            instituicao: "Itaú",
+            alvo_id: alvo.id,
+            descricao: "CDB vencido",
+            ativo: false,
+          },
+        });
+        const posicaoAtiva = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-AINDA-ATIVO",
+            instituicao: "Itaú",
+            alvo_id: alvo.id,
+            descricao: "CDB vigente",
+          },
+        });
+        const sessao = await criarSessaoMinima();
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 45_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 45_000)],
+          valorTotalCentavos: 45_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(1);
+        expect(incrementos[0]).toMatchObject({
+          alvo_id: alvo.id,
+          chave_export: null,
+          posicao_manual_id: posicaoAtiva.id,
+          valor_incremento_centavos: 45_000,
+          aplicado: false,
+        });
+      });
+
+      it("FR-015: ajuste cujo chave_export foi DESVINCULADO do alvo (alvo_id mudou) não entra em elegíveis para o alvo original — 0 elegíveis", async () => {
+        const alvoOriginal = await prisma.alvo.create({
+          data: { nome: "Alvo original", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        const alvoNovo = await prisma.alvo.create({
+          data: { nome: "Alvo novo (desvinculado para cá)", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        // Vínculo ATUAL aponta para alvoNovo — o ajuste histórico não muda
+        // o fato de que hoje o ativo pertence a outro alvo (§3.1: "usa o
+        // vínculo ATUAL, não o vínculo no momento em que o ajuste foi criado").
+        await prisma.ativo_mapeado.create({
+          data: {
+            chave_export: "FUNDO-DESVINCULADO",
+            alvo_id: alvoNovo.id,
+            fora_da_carteira: false,
+            ignorar_no_import: false,
+          },
+        });
+        const sessaoHistorica = await criarSessaoMinima("2026-06");
+        await prisma.ajuste_valor_investido.create({
+          data: {
+            chave_export: "FUNDO-DESVINCULADO",
+            sessao_import_id: sessaoHistorica.id,
+            valor_investido_corrigido_centavos: 70_000,
+          },
+        });
+        const sessao = await criarSessaoMinima("2026-07");
+
+        // Aporte executado no alvo ORIGINAL — o ajuste não deveria contar
+        // para ele, já que hoje o vínculo do chave_export é com alvoNovo.
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvoOriginal.id, alvoOriginal.nome, 20_000)],
+          executado: [linhaAporteExecutada(alvoOriginal.id, alvoOriginal.nome, 20_000)],
+          valorTotalCentavos: 20_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(0);
+      });
+
+      it("FR-015: ajuste cujo chave_export está fora_da_carteira=true não entra em elegíveis, mesmo com alvo_id e histórico de ajuste corretos", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Alvo com fundo fora da carteira", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        await prisma.ativo_mapeado.create({
+          data: {
+            chave_export: "FUNDO-FORA-CARTEIRA",
+            alvo_id: alvo.id,
+            fora_da_carteira: true,
+            ignorar_no_import: false,
+          },
+        });
+        const sessaoHistorica = await criarSessaoMinima("2026-06");
+        await prisma.ajuste_valor_investido.create({
+          data: {
+            chave_export: "FUNDO-FORA-CARTEIRA",
+            sessao_import_id: sessaoHistorica.id,
+            valor_investido_corrigido_centavos: 80_000,
+          },
+        });
+        const sessao = await criarSessaoMinima("2026-07");
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 25_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 25_000)],
+          valorTotalCentavos: 25_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(0);
+      });
+
+      it("FR-015: ajuste cujo chave_export está ignorar_no_import=true não entra em elegíveis (a posição manual substituta é que conta, não o ajuste do CSV ignorado)", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Alvo com CSV ignorado", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        await prisma.ativo_mapeado.create({
+          data: {
+            chave_export: "CDB-IGNORADO-NO-IMPORT",
+            alvo_id: alvo.id,
+            fora_da_carteira: false,
+            ignorar_no_import: true,
+          },
+        });
+        const sessaoHistorica = await criarSessaoMinima("2026-06");
+        await prisma.ajuste_valor_investido.create({
+          data: {
+            chave_export: "CDB-IGNORADO-NO-IMPORT",
+            sessao_import_id: sessaoHistorica.id,
+            valor_investido_corrigido_centavos: 90_000,
+          },
+        });
+        const sessao = await criarSessaoMinima("2026-07");
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 35_000)],
+          executado: [linhaAporteExecutada(alvo.id, alvo.nome, 35_000)],
+          valorTotalCentavos: 35_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        expect(incrementos).toHaveLength(0);
+      });
+
+      it("linhas de executado com valor_centavos = 0 não geram incremento, mesmo com 1 elegível (§3, gatilho: 'valor_centavos > 0')", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Alvo sem execução", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-SEM-EXECUCAO",
+            instituicao: "Itaú",
+            alvo_id: alvo.id,
+            descricao: "CDB elegível, mas não recebeu aporte",
+          },
+        });
+        const outroAlvo = await prisma.alvo.create({
+          data: { nome: "Alvo com execução", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        const sessao = await criarSessaoMinima();
+
+        const { aporteId } = await aporteService.registrarAporte({
+          sessaoImportId: sessao.id,
+          sugestao: [
+            linhaAporteExecutada(alvo.id, alvo.nome, 0),
+            linhaAporteExecutada(outroAlvo.id, outroAlvo.nome, 100_000),
+          ],
+          executado: [
+            linhaAporteExecutada(alvo.id, alvo.nome, 0),
+            linhaAporteExecutada(outroAlvo.id, outroAlvo.nome, 100_000),
+          ],
+          valorTotalCentavos: 100_000,
+          valorDividendosCentavos: 0,
+          trocoCentavos: 0,
+        });
+
+        const incrementos = await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aporte_id: aporteId },
+        });
+        // Nenhuma linha para `alvo` (valor_centavos=0), nenhuma para
+        // `outroAlvo` (0 elegíveis lá) — total 0.
+        expect(incrementos).toHaveLength(0);
+      });
+
+      it("atomicidade: toda a geração de incrementos roda na mesma transação de registrarAporte — se a transação falhar, nem o aporte nem nenhum incremento persistem", async () => {
+        const { sessao } = await criarCenarioSemPendencia();
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Alvo elegível numa transação que vai falhar", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-TRANSACAO-FALHA",
+            instituicao: "Itaú",
+            alvo_id: alvo.id,
+            descricao: "CDB único elegível, mas o aporte vai falhar por outro motivo",
+          },
+        });
+
+        const aportesAntes = await prisma.aporte.count();
+        const incrementosAntes = await prisma.incremento_valor_investido_pendente.count();
+
+        // Força falha da transação por um motivo já validado hoje
+        // (dividendosIncluidosIds apontando para um id inexistente/já
+        // utilizado — mesma guarda "Falhar Alto, Nunca em Silêncio" já
+        // testada em "dividendos — controle de utilização"): a transação
+        // inteira deve reverter, inclusive qualquer incremento que teria
+        // sido gerado para `alvo` (1 elegível, geraria incremento se a
+        // transação tivesse sucesso).
+        await expect(
+          aporteService.registrarAporte({
+            sessaoImportId: sessao.id,
+            sugestao: [linhaAporteExecutada(alvo.id, alvo.nome, 55_000)],
+            executado: [linhaAporteExecutada(alvo.id, alvo.nome, 55_000)],
+            valorTotalCentavos: 55_000,
+            valorDividendosCentavos: 0,
+            trocoCentavos: 0,
+            dividendosIncluidosIds: ["id-de-dividendo-inexistente"],
+          }),
+        ).rejects.toThrow(/dividendo/i);
+
+        const aportesDepois = await prisma.aporte.count();
+        const incrementosDepois = await prisma.incremento_valor_investido_pendente.count();
+        expect(aportesDepois).toBe(aportesAntes);
+        expect(incrementosDepois).toBe(incrementosAntes);
+      });
+    },
+  );
 });
