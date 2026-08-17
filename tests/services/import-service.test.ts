@@ -101,10 +101,14 @@ afterAll(async () => {
 
 /** Limpa todas as tabelas (ordem respeita FKs, igual a prisma/seed.ts). */
 async function resetDb() {
+  await prisma.incremento_valor_investido_pendente.deleteMany();
   await prisma.dividendo.deleteMany();
+  await prisma.posicao_manual_valor.deleteMany();
+  await prisma.ajuste_valor_investido.deleteMany();
   await prisma.aporte.deleteMany();
   await prisma.posicao.deleteMany();
   await prisma.ativo_mapeado.deleteMany();
+  await prisma.posicao_manual.deleteMany();
   await prisma.sessao_import.deleteMany();
   await prisma.alvo.deleteMany();
   await prisma.config.deleteMany();
@@ -629,6 +633,366 @@ describe("import-service", () => {
       expect(posicoes.every((p) => p.chave_export === "PRIO3" && p.instituicao === "Itaú")).toBe(true);
       const totalConsolidado = posicoes.reduce((acc, p) => acc + p.patrimonio_hoje_centavos, 0);
       expect(totalConsolidado).toBe(200_000); // 2x 1000.00 — dobrado, não deduplicado.
+    });
+  });
+
+  describe("posições manuais e ajustes na revisão de import (T020, US3)", () => {
+    async function criarAlvo(nome: string, percentualBps: number) {
+      return prisma.alvo.create({
+        data: { nome, percentual_alvo_bps: percentualBps, vigencia_inicio: new Date("2026-01-01") },
+      });
+    }
+
+    it("previewImport retorna posicoesManuaisRevisao/ajustesRevisao com carry-forward da sessão VIGENTE mais recente", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+
+      // Vincula PRIO3 a um alvo e cria um ajuste sobre ele.
+      await prisma.ativo_mapeado.update({
+        where: { chave_export: "PRIO3" },
+        data: { alvo_id: alvo.id },
+      });
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "PRIO3",
+          sessao_import_id: r1.sessaoId,
+          valor_investido_corrigido_centavos: 90_000,
+        },
+      });
+
+      // Cria uma posição manual com snapshot na sessão de junho.
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú 120% CDI 2029",
+          alvo_id: alvo.id,
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManual.id,
+          sessao_import_id: r1.sessaoId,
+          valor_investido_centavos: 500_000,
+          valor_atual_centavos: 520_000,
+        },
+      });
+
+      const preview = await importService.previewImport([
+        arquivoInstituicao("Itaú", [linha({ acao: "PRIO3", patrimonioHoje: "2000.00" })]),
+      ]);
+
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+
+      expect(preview.incrementosAmbiguosPendentes).toEqual([]);
+
+      expect(preview.posicoesManuaisRevisao).toHaveLength(1);
+      expect(preview.posicoesManuaisRevisao[0]).toMatchObject({
+        posicaoManualId: posicaoManual.id,
+        chaveManual: "CDB-ITAU-2029",
+        alvoId: alvo.id,
+        valorInvestidoCentavosAnterior: 500_000,
+        incrementoPendenteCentavos: 0,
+        valorInvestidoCentavosSugerido: 500_000,
+        valorAtualCentavosSugerido: 520_000,
+      });
+
+      expect(preview.ajustesRevisao).toHaveLength(1);
+      expect(preview.ajustesRevisao[0]).toMatchObject({
+        chaveExport: "PRIO3",
+        alvoId: alvo.id,
+        primeiraVez: false,
+        valorInvestidoCentavosAnterior: 90_000,
+        valorInvestidoCentavosSugerido: 90_000,
+      });
+    });
+
+    it("previewImport sem nenhuma posição manual/ajuste cadastrado retorna arrays vazios (compatibilidade)", async () => {
+      const preview = await importService.previewImport([
+        arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })]),
+      ]);
+
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+      expect(preview.posicoesManuaisRevisao).toEqual([]);
+      expect(preview.ajustesRevisao).toEqual([]);
+      expect(preview.incrementosAmbiguosPendentes).toEqual([]);
+    });
+
+    it("previewImport chamado múltiplas vezes seguidas sem NUNCA confirmar não persiste nada e devolve os mesmos valores sugeridos (data-model.md, 'Fluxo técnico' passo 5 — robustez a reimport antes de confirmar)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+
+      await prisma.ativo_mapeado.update({
+        where: { chave_export: "PRIO3" },
+        data: { alvo_id: alvo.id },
+      });
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "PRIO3",
+          sessao_import_id: r1.sessaoId,
+          valor_investido_corrigido_centavos: 90_000,
+        },
+      });
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú 120% CDI 2029",
+          alvo_id: alvo.id,
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManual.id,
+          sessao_import_id: r1.sessaoId,
+          valor_investido_centavos: 500_000,
+          valor_atual_centavos: 520_000,
+        },
+      });
+
+      const arquivoParaPreview = arquivoInstituicao("Itaú", [
+        linha({ acao: "PRIO3", patrimonioHoje: "2000.00" }),
+      ]);
+
+      const preview1 = await importService.previewImport([arquivoParaPreview]);
+      const preview2 = await importService.previewImport([arquivoParaPreview]);
+      const preview3 = await importService.previewImport([arquivoParaPreview]);
+
+      expect(preview1.ok && preview2.ok && preview3.ok).toBe(true);
+      if (!preview1.ok || !preview2.ok || !preview3.ok) return;
+
+      // Mesmo carry-forward nas 3 chamadas — nada foi persistido entre elas
+      // que pudesse alterar o "último valor conhecido".
+      expect(preview2.posicoesManuaisRevisao).toEqual(preview1.posicoesManuaisRevisao);
+      expect(preview3.posicoesManuaisRevisao).toEqual(preview1.posicoesManuaisRevisao);
+      expect(preview2.ajustesRevisao).toEqual(preview1.ajustesRevisao);
+      expect(preview3.ajustesRevisao).toEqual(preview1.ajustesRevisao);
+
+      // E continua batendo com o snapshot mais recente já persistido (sessão
+      // r1), não com nenhum valor "fantasma" de uma chamada anterior de preview.
+      expect(preview1.posicoesManuaisRevisao[0]).toMatchObject({
+        valorInvestidoCentavosSugerido: 500_000,
+        valorAtualCentavosSugerido: 520_000,
+      });
+      expect(preview1.ajustesRevisao[0]).toMatchObject({
+        valorInvestidoCentavosSugerido: 90_000,
+      });
+
+      // Nenhuma linha nova de sessão/snapshot/ajuste foi criada por causa
+      // das 3 chamadas de preview — continua só a sessão/linhas de r1.
+      expect(await prisma.sessao_import.count()).toBe(1);
+      expect(await prisma.posicao_manual_valor.count()).toBe(1);
+      expect(await prisma.ajuste_valor_investido.count()).toBe(1);
+    });
+
+    it("confirmarImport com posicoesManuaisConfirmadas/ajustesConfirmados cria as linhas vinculadas à NOVA sessão, na mesma transação", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+
+      await prisma.ativo_mapeado.update({
+        where: { chave_export: "PRIO3" },
+        data: { alvo_id: alvo.id },
+      });
+
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú 120% CDI 2029",
+          alvo_id: alvo.id,
+        },
+      });
+
+      const r2 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3", patrimonioHoje: "2000.00" })])],
+        mesReferencia: "2026-07",
+        posicoesManuaisConfirmadas: [
+          {
+            posicaoManualId: posicaoManual.id,
+            valorInvestidoCentavos: 550_000,
+            valorAtualCentavos: 560_000,
+          },
+        ],
+        ajustesConfirmados: [
+          { chaveExport: "PRIO3", valorInvestidoCentavosCorrigido: 95_000 },
+        ],
+      });
+
+      expect(r2.ok).toBe(true);
+      if (!r2.ok) return;
+      expect(r2.incrementosAmbiguosNaoAlocadosCentavos).toBe(0);
+
+      const snapshot = await prisma.posicao_manual_valor.findUniqueOrThrow({
+        where: {
+          posicao_manual_id_sessao_import_id: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: r2.sessaoId,
+          },
+        },
+      });
+      expect(snapshot.valor_investido_centavos).toBe(550_000);
+      expect(snapshot.valor_atual_centavos).toBe(560_000);
+      expect(await prisma.posicao_manual_valor.count()).toBe(1);
+
+      const ajuste = await prisma.ajuste_valor_investido.findUniqueOrThrow({
+        where: {
+          chave_export_sessao_import_id: {
+            chave_export: "PRIO3",
+            sessao_import_id: r2.sessaoId,
+          },
+        },
+      });
+      expect(ajuste.valor_investido_corrigido_centavos).toBe(95_000);
+      expect(await prisma.ajuste_valor_investido.count()).toBe(1);
+    });
+
+    it("confirmarImport SEM posicoesManuaisConfirmadas/ajustesConfirmados (undefined) não quebra — comportamento atual preservado", async () => {
+      const resultado = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-07",
+      });
+
+      expect(resultado.ok).toBe(true);
+      if (!resultado.ok) return;
+      expect(resultado.incrementosAmbiguosNaoAlocadosCentavos).toBe(0);
+      expect(await prisma.posicao_manual_valor.count()).toBe(0);
+      expect(await prisma.ajuste_valor_investido.count()).toBe(0);
+    });
+
+    it("ajustesConfirmados com chaveExport em branco/whitespace é tratado como 'não preenchido' (FR-009): confirmarImport resolve ok:true sem criar ajuste_valor_investido, sem PrismaClientKnownRequestError", async () => {
+      // Comportamento CORRIGIDO (bug real encontrado em revisão
+      // pós-implementação, ver relatório do engenheiro-testes): um item de
+      // `ajustesConfirmados` com `chaveExport` vazio/whitespace não
+      // corresponde a nenhum `ativo_mapeado` real — em vez de deixar isso
+      // vazar como um `PrismaClientKnownRequestError` de violação de FK, o
+      // serviço filtra o item (mesmo padrão "aviso, não bloqueio" já usado
+      // para uma chave ausente do array inteiro).
+      const resultado = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-07",
+        ajustesConfirmados: [{ chaveExport: "   ", valorInvestidoCentavosCorrigido: 1_000 }],
+      });
+
+      expect(resultado.ok).toBe(true);
+      if (!resultado.ok) return;
+
+      // A sessão e as posições persistem normalmente — só o item inválido
+      // de ajustesConfirmados foi ignorado.
+      expect(await prisma.sessao_import.count()).toBe(1);
+      expect(await prisma.posicao.count()).toBe(1);
+      expect(await prisma.ajuste_valor_investido.count()).toBe(0);
+    });
+
+    it("re-import do mesmo mês com nova revisão não altera/duplica as linhas de posicao_manual_valor/ajuste_valor_investido da sessão anterior", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+
+      await prisma.ativo_mapeado.update({
+        where: { chave_export: "PRIO3" },
+        data: { alvo_id: alvo.id },
+      });
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú 120% CDI 2029",
+          alvo_id: alvo.id,
+        },
+      });
+
+      const r1b = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-07",
+        posicoesManuaisConfirmadas: [
+          { posicaoManualId: posicaoManual.id, valorInvestidoCentavos: 100_000, valorAtualCentavos: 110_000 },
+        ],
+        ajustesConfirmados: [{ chaveExport: "PRIO3", valorInvestidoCentavosCorrigido: 10_000 }],
+      });
+      expect(r1b.ok).toBe(true);
+      if (!r1b.ok) return;
+
+      const snapshotAntesCriadoEm = (
+        await prisma.posicao_manual_valor.findUniqueOrThrow({
+          where: {
+            posicao_manual_id_sessao_import_id: {
+              posicao_manual_id: posicaoManual.id,
+              sessao_import_id: r1b.sessaoId,
+            },
+          },
+        })
+      ).criado_em;
+
+      const r2 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3", patrimonioHoje: "2000.00" })])],
+        mesReferencia: "2026-07",
+        posicoesManuaisConfirmadas: [
+          { posicaoManualId: posicaoManual.id, valorInvestidoCentavos: 200_000, valorAtualCentavos: 210_000 },
+        ],
+        ajustesConfirmados: [{ chaveExport: "PRIO3", valorInvestidoCentavosCorrigido: 20_000 }],
+      });
+      expect(r2.ok).toBe(true);
+      if (!r2.ok) return;
+      expect(r2.sessaoId).not.toBe(r1b.sessaoId);
+
+      // A linha da sessão anterior (r1b) permanece intocada.
+      const snapshotAnteriorDepois = await prisma.posicao_manual_valor.findUniqueOrThrow({
+        where: {
+          posicao_manual_id_sessao_import_id: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: r1b.sessaoId,
+          },
+        },
+      });
+      expect(snapshotAnteriorDepois.valor_investido_centavos).toBe(100_000);
+      expect(snapshotAnteriorDepois.valor_atual_centavos).toBe(110_000);
+      expect(snapshotAnteriorDepois.criado_em).toEqual(snapshotAntesCriadoEm);
+
+      const ajusteAnteriorDepois = await prisma.ajuste_valor_investido.findUniqueOrThrow({
+        where: {
+          chave_export_sessao_import_id: { chave_export: "PRIO3", sessao_import_id: r1b.sessaoId },
+        },
+      });
+      expect(ajusteAnteriorDepois.valor_investido_corrigido_centavos).toBe(10_000);
+
+      // Uma nova linha foi criada para a nova sessão (r2), sem duplicar/sobrescrever a antiga.
+      expect(await prisma.posicao_manual_valor.count()).toBe(2);
+      expect(await prisma.ajuste_valor_investido.count()).toBe(2);
+
+      const snapshotNovo = await prisma.posicao_manual_valor.findUniqueOrThrow({
+        where: {
+          posicao_manual_id_sessao_import_id: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: r2.sessaoId,
+          },
+        },
+      });
+      expect(snapshotNovo.valor_investido_centavos).toBe(200_000);
     });
   });
 });

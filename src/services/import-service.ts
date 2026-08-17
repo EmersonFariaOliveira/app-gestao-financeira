@@ -2,6 +2,11 @@ import { prisma } from "@/db/client";
 import { parseArquivoMyCapital } from "@/parser/mycapital";
 import type { ArquivoImport, ArquivoParseado, ErroParse } from "@/parser/types";
 import { executarBackupComRetencao } from "@/services/backup-service";
+import {
+  montarRevisaoImport,
+  type AjusteRevisaoItem,
+  type PosicaoManualRevisaoItem,
+} from "@/services/posicao-manual-service";
 
 // Serviço de import mensal (T036): orquestra o parse em memória (preview,
 // sem persistir nada) e a confirmação (backup + transação Prisma) de uma
@@ -50,6 +55,14 @@ export interface DiffPosicoes {
   variacoesGrandes: VariacaoGrande[];
 }
 
+/** Incrementos ambíguos por alvo — sempre `[]` nesta fase (placeholder, US4/T023-T026). */
+export interface IncrementoAmbiguoPendente {
+  alvoId: string;
+  nomeAlvo: string;
+  valorPendenteCentavos: number;
+  elegiveis: { tipo: "posicaoManual" | "ajuste"; id: string; rotulo: string }[];
+}
+
 export type PreviewImportResultado =
   | {
       ok: true;
@@ -59,6 +72,12 @@ export type PreviewImportResultado =
       avisoSubstituicao?: AvisoSubstituicao;
       instituicoesFaltantes?: string[];
       diff?: DiffPosicoes;
+      /** Carry-forward de posições manuais para a revisão dentro do import (contracts/server-actions.md §import.ts, US3). */
+      posicoesManuaisRevisao: PosicaoManualRevisaoItem[];
+      /** Carry-forward de ajustes de valor investido para a revisão dentro do import (idem). */
+      ajustesRevisao: AjusteRevisaoItem[];
+      /** Placeholder fixo `[]` nesta fase — US4/T023-T026 preenche a lógica de incrementos ambíguos. */
+      incrementosAmbiguosPendentes: IncrementoAmbiguoPendente[];
     }
   | { ok: false; erros: ErroParse[] };
 
@@ -68,10 +87,35 @@ export interface ConfirmarImportInput {
   mesReferencia: string;
   /** Exigido explicitamente (`=== true`) quando há instituição faltante vs. a sessão anterior (seção 6.2). */
   confirmouInstituicoesFaltantes?: boolean;
+  /**
+   * Snapshots de posição manual confirmados na revisão (US3, contracts/server-actions.md
+   * §import.ts). Opcional — ausente/vazio é compatível com imports sem nenhuma posição
+   * manual cadastrada ainda (cenário comum, sem quebra).
+   */
+  posicoesManuaisConfirmadas?: {
+    posicaoManualId: string;
+    valorInvestidoCentavos: number;
+    valorAtualCentavos: number;
+  }[];
+  /**
+   * Ajustes de valor investido confirmados na revisão (US3, idem). Uma chave ausente aqui =
+   * usuário deixou vazio — nenhum `ajuste_valor_investido` é criado para ela nesta sessão
+   * (aviso, não bloqueio — FR-009).
+   */
+  ajustesConfirmados?: {
+    chaveExport: string;
+    valorInvestidoCentavosCorrigido: number;
+  }[];
 }
 
 export type ConfirmarImportResultado =
-  | { ok: true; sessaoId: string; pendenciasVinculo: string[] }
+  | {
+      ok: true;
+      sessaoId: string;
+      pendenciasVinculo: string[];
+      /** Placeholder fixo `0` nesta fase — US4/T023-T026 passa a calcular resíduo real. */
+      incrementosAmbiguosNaoAlocadosCentavos: number;
+    }
   | { ok: false; erro: string; erros?: ErroParse[]; instituicoesFaltantes?: string[] };
 
 /**
@@ -284,6 +328,13 @@ export async function previewImport(arquivos: ArquivoImport[]): Promise<PreviewI
     diff = calcularDiff(novoConsolidado, anteriorConsolidado);
   }
 
+  // Carry-forward de posições manuais/ajustes (US3, data-model.md "Fluxo
+  // técnico" passos 1-2) — leitura pura, resolvida a partir da sessão
+  // VIGENTE mais recente já persistida (a sessão deste import ainda não
+  // existe). `incrementosAmbiguosPendentes` é placeholder fixo `[]` nesta
+  // fase (US4/T023-T026 ainda não implementada).
+  const { posicoesManuaisRevisao, ajustesRevisao } = await montarRevisaoImport();
+
   return {
     ok: true,
     arquivos: resumoPorInstituicao,
@@ -292,6 +343,9 @@ export async function previewImport(arquivos: ArquivoImport[]): Promise<PreviewI
     avisoSubstituicao,
     instituicoesFaltantes,
     diff,
+    posicoesManuaisRevisao,
+    ajustesRevisao,
+    incrementosAmbiguosPendentes: [],
   };
 }
 
@@ -417,6 +471,52 @@ export async function confirmarImport(
       }
     }
 
+    // Persistência da revisão de posições manuais/ajustes (US3,
+    // data-model.md "Fluxo técnico" passo 4) — dentro da MESMA transação,
+    // vinculada à NOVA sessão. Ambos os campos são opcionais: ausência não
+    // quebra nada (compatibilidade com imports sem nenhuma posição
+    // manual/ajuste cadastrado ainda). Nenhuma linha de sessão anterior é
+    // tocada — só CREATE de linhas novas nesta sessão.
+    //
+    // Validação defensiva (bug real encontrado em revisão pós-implementação):
+    // um item com `posicaoManualId`/`chaveExport` vazio ou só espaços não
+    // corresponde a nenhum registro real, e persisti-lo faria o Prisma
+    // lançar um `PrismaClientKnownRequestError` de violação de FK — erro
+    // técnico cru, não uma mensagem amigável (viola "falhar alto, nunca em
+    // silêncio" da forma errada: falha baixo/opaco). Em vez disso, tratamos
+    // como "usuário deixou vazio": o item é simplesmente ignorado, mesmo
+    // padrão de "aviso, não bloqueio" (FR-009) já usado para uma chave
+    // ausente do array inteiro.
+    const posicoesManuaisPreenchidas = (input.posicoesManuaisConfirmadas ?? []).filter(
+      (item) => typeof item.posicaoManualId === "string" && item.posicaoManualId.trim().length > 0,
+    );
+    if (posicoesManuaisPreenchidas.length > 0) {
+      await tx.posicao_manual_valor.createMany({
+        data: posicoesManuaisPreenchidas.map((item) => ({
+          posicao_manual_id: item.posicaoManualId,
+          sessao_import_id: novaSessao.id,
+          valor_investido_centavos: item.valorInvestidoCentavos,
+          valor_atual_centavos: item.valorAtualCentavos,
+        })),
+      });
+    }
+
+    const ajustesPreenchidos = (input.ajustesConfirmados ?? []).filter(
+      (item) => typeof item.chaveExport === "string" && item.chaveExport.trim().length > 0,
+    );
+    if (ajustesPreenchidos.length > 0) {
+      // `create` simples (não upsert): a sessão é sempre nova, então o
+      // `@@unique([chave_export, sessao_import_id])` nunca pode colidir
+      // aqui (data-model.md).
+      await tx.ajuste_valor_investido.createMany({
+        data: ajustesPreenchidos.map((item) => ({
+          chave_export: item.chaveExport.trim(),
+          sessao_import_id: novaSessao.id,
+          valor_investido_corrigido_centavos: item.valorInvestidoCentavosCorrigido,
+        })),
+      });
+    }
+
     // Transição de estado (data-model.md): a sessão VIGENTE anterior do
     // MESMO mes_referencia (se houver) vira SUBSTITUIDO — nunca DELETE,
     // nunca UPDATE de conteúdo além do campo `status`.
@@ -432,5 +532,10 @@ export async function confirmarImport(
 
   const pendenciasVinculo = await listarPendenciasDaSessao(sessaoId);
 
-  return { ok: true, sessaoId, pendenciasVinculo };
+  return {
+    ok: true,
+    sessaoId,
+    pendenciasVinculo,
+    incrementosAmbiguosNaoAlocadosCentavos: 0,
+  };
 }
