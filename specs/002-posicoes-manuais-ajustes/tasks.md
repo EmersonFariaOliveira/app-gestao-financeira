@@ -70,14 +70,14 @@
 
 ### Tests for User Story 2 (escrever PRIMEIRO — devem FALHAR antes da implementação)
 
-- [ ] T013 [P] [US2] [arquiteto-dados] Testes de `criarOuAtualizarAjuste` em `tests/services/posicao-manual-service.test.ts`: cria/atualiza `ajuste_valor_investido` associado à sessão vigente; `valor_atual` nunca é tocado por esta função; primeira vez retorna `valorInvestidoCorrigido: null` (FR-009)
-- [ ] T014 [P] [US2] [calculista-aporte] Teste em `tests/services/aporte-service.test.ts`: resultado de `calcular()` idêntico antes e depois de aplicar um `ajuste_valor_investido` sobre a mesma posição (SC-004) — `valor_investido_corrigido` nunca lido por `montarContextoEntradaMotor`
+- [X] T013 [P] [US2] [arquiteto-dados] Testes de `criarOuAtualizarAjuste` em `tests/services/posicao-manual-service.test.ts`: cria/atualiza `ajuste_valor_investido` associado à sessão vigente; `valor_atual` nunca é tocado por esta função; primeira vez retorna `valorInvestidoCorrigido: null` (FR-009)
+- [X] T014 [P] [US2] [calculista-aporte] Teste em `tests/services/aporte-service.test.ts`: resultado de `calcular()` idêntico antes e depois de aplicar um `ajuste_valor_investido` sobre a mesma posição (SC-004) — `valor_investido_corrigido` nunca lido por `montarContextoEntradaMotor`
 
 ### Implementation for User Story 2
 
-- [ ] T015 [US2] [arquiteto-dados] Implementar `criarOuAtualizarAjuste` em `src/services/posicao-manual-service.ts`: grava `ajuste_valor_investido` associado à sessão VIGENTE mais recente, sem tocar `posicao.patrimonio_hoje_centavos` — depende de T007 (mesmo arquivo)
-- [ ] T016 [US2] [desenvolvedor-ui] Implementar `criarOuAtualizarAjuste` em `src/app/actions/posicoes-manuais.ts` conforme `contracts/server-actions.md` — depende de T015, T011 (mesmo arquivo)
-- [ ] T017 [US2] [desenvolvedor-ui] Adicionar seção "Ajustes de fundos" em `src/app/posicoes-manuais/page.tsx`: lista de `chave_export` sob ajuste, criação/edição do valor corrigido, aviso visual de "primeira vez" quando vazio (FR-009) — depende de T016, T012 (mesmo arquivo)
+- [X] T015 [US2] [arquiteto-dados] Implementar `criarOuAtualizarAjuste` em `src/services/posicao-manual-service.ts`: grava `ajuste_valor_investido` associado à sessão VIGENTE mais recente, sem tocar `posicao.patrimonio_hoje_centavos` — depende de T007 (mesmo arquivo)
+- [X] T016 [US2] [desenvolvedor-ui] Implementar `criarOuAtualizarAjuste` em `src/app/actions/posicoes-manuais.ts` conforme `contracts/server-actions.md` — depende de T015, T011 (mesmo arquivo)
+- [X] T017 [US2] [desenvolvedor-ui] Adicionar seção "Ajustes de fundos" em `src/app/posicoes-manuais/page.tsx`: lista de `chave_export` sob ajuste, criação/edição do valor corrigido, aviso visual de "primeira vez" quando vazio (FR-009) — depende de T016, T012 (mesmo arquivo)
 
 **Checkpoint**: User Stories 1 e 2 funcionais e independentes entre si
 
