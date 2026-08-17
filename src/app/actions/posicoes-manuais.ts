@@ -15,17 +15,22 @@
  * Formato de retorno padrão (contracts/server-actions.md):
  * `{ ok: true, data } | { ok: false, erro: string, detalhes?: unknown }`.
  *
- * Nota de escopo (T011): apenas `criarPosicaoManual`/`editarPosicaoManual`/
- * `encerrarPosicaoManual` (User Story 1). `criarOuAtualizarAjuste` (User
- * Story 2, T016) e `listarPosicoesManuaisEAjustes` (User Story 3, T019) NÃO
- * fazem parte desta task — ficam para as fases 4/5, quando os serviços
- * correspondentes existirem.
+ * Nota de escopo (T011): `criarPosicaoManual`/`editarPosicaoManual`/
+ * `encerrarPosicaoManual` (User Story 1). `criarOuAtualizarAjuste` e
+ * `listarAjustesAtivos` (User Story 2, T016) foram adicionadas nesta task.
+ * `listarPosicoesManuaisEAjustes` (User Story 3, T019, com carry-forward de
+ * revisão de import) NÃO faz parte desta task — fica para a fase 5.
  */
 import {
+  criarOuAtualizarAjuste as criarOuAtualizarAjusteService,
   criarPosicaoManual as criarPosicaoManualService,
   editarPosicaoManual as editarPosicaoManualService,
   encerrarPosicaoManual as encerrarPosicaoManualService,
+  listarAjustesAtivos as listarAjustesAtivosService,
   listarPosicoesManuaisAtivas as listarPosicoesManuaisAtivasService,
+  type AjusteAtivoListItem,
+  type AjusteValorInvestidoOutput,
+  type CriarOuAtualizarAjusteInput,
   type CriarPosicaoManualInput,
   type EditarPosicaoManualInput,
   type EncerrarPosicaoManualInput,
@@ -148,6 +153,47 @@ export async function listarPosicoesManuaisAtivas(): Promise<
 > {
   try {
     const data = await listarPosicoesManuaisAtivasService();
+    return { ok: true, data };
+  } catch (erro) {
+    return { ok: false, erro: mensagemDeErro(erro) };
+  }
+}
+
+/**
+ * Cria/atualiza (upsert) o ajuste de valor investido de um `chaveExport`
+ * (T016, User Story 2, FR-005). Action fina: valida o shape do input e
+ * delega a `posicaoManualService.criarOuAtualizarAjuste` (T015) — nenhuma
+ * regra de sessão-vigente/upsert é reimplementada aqui.
+ */
+export async function criarOuAtualizarAjuste(
+  input: CriarOuAtualizarAjusteInput,
+): Promise<ActionResult<AjusteValorInvestidoOutput>> {
+  if (!input || typeof input.chaveExport !== "string" || !input.chaveExport.trim()) {
+    return { ok: false, erro: "chaveExport é obrigatório." };
+  }
+  if (!ehCentavosValido(input.valorInvestidoCentavosCorrigido)) {
+    return { ok: false, erro: "valorInvestidoCentavosCorrigido deve ser um inteiro em centavos ≥ 0." };
+  }
+
+  try {
+    const data = await criarOuAtualizarAjusteService({
+      chaveExport: input.chaveExport.trim(),
+      valorInvestidoCentavosCorrigido: input.valorInvestidoCentavosCorrigido,
+    });
+    return { ok: true, data };
+  } catch (erro) {
+    return { ok: false, erro: mensagemDeErro(erro) };
+  }
+}
+
+/**
+ * Leitura para a seção "Ajustes de fundos" da tela 6.9 (T017, fora do fluxo
+ * de import) — mesma nota de escopo de `listarPosicoesManuaisAtivas`: não é
+ * `listarPosicoesManuaisEAjustes` (T019/User Story 3, com carry-forward).
+ */
+export async function listarAjustesAtivos(): Promise<ActionResult<AjusteAtivoListItem[]>> {
+  try {
+    const data = await listarAjustesAtivosService();
     return { ok: true, data };
   } catch (erro) {
     return { ok: false, erro: mensagemDeErro(erro) };

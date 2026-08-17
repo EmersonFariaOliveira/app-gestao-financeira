@@ -24,12 +24,16 @@ const criarPosicaoManualMock = vi.fn();
 const editarPosicaoManualMock = vi.fn();
 const encerrarPosicaoManualMock = vi.fn();
 const listarPosicoesManuaisAtivasMock = vi.fn();
+const criarOuAtualizarAjusteMock = vi.fn();
+const listarAjustesAtivosMock = vi.fn();
 
 vi.mock("@/services/posicao-manual-service", () => ({
   criarPosicaoManual: criarPosicaoManualMock,
   editarPosicaoManual: editarPosicaoManualMock,
   encerrarPosicaoManual: encerrarPosicaoManualMock,
   listarPosicoesManuaisAtivas: listarPosicoesManuaisAtivasMock,
+  criarOuAtualizarAjuste: criarOuAtualizarAjusteMock,
+  listarAjustesAtivos: listarAjustesAtivosMock,
 }));
 
 const {
@@ -37,6 +41,8 @@ const {
   editarPosicaoManual,
   encerrarPosicaoManual,
   listarPosicoesManuaisAtivas,
+  criarOuAtualizarAjuste,
+  listarAjustesAtivos,
 } = await import("@/app/actions/posicoes-manuais");
 
 beforeEach(() => {
@@ -248,6 +254,136 @@ describe("actions/posicoes-manuais", () => {
       listarPosicoesManuaisAtivasMock.mockRejectedValue(new Error("falha ao consultar"));
 
       const resultado = await listarPosicoesManuaisAtivas();
+
+      expect(resultado).toEqual({ ok: false, erro: "falha ao consultar" });
+    });
+  });
+
+  // T016 (User Story 2, FR-005): criarOuAtualizarAjuste — action fina que
+  // valida shape e delega ao serviço (upsert), sem regra de negócio própria.
+  describe("criarOuAtualizarAjuste", () => {
+    const inputValido = {
+      chaveExport: "FUNDO-XPTO",
+      valorInvestidoCentavosCorrigido: 300_000,
+    };
+
+    it("delega ao serviço e retorna {ok:true, data} com input válido", async () => {
+      criarOuAtualizarAjusteMock.mockResolvedValue({
+        chaveExport: "FUNDO-XPTO",
+        valorInvestidoCentavosCorrigido: 300_000,
+      });
+
+      const resultado = await criarOuAtualizarAjuste(inputValido);
+
+      expect(criarOuAtualizarAjusteMock).toHaveBeenCalledWith(inputValido);
+      expect(resultado).toEqual({
+        ok: true,
+        data: { chaveExport: "FUNDO-XPTO", valorInvestidoCentavosCorrigido: 300_000 },
+      });
+    });
+
+    it("rejeita chaveExport vazia/whitespace sem chamar o serviço", async () => {
+      const resultado = await criarOuAtualizarAjuste({ ...inputValido, chaveExport: "   " });
+
+      expect(resultado.ok).toBe(false);
+      if (!resultado.ok) expect(resultado.erro).toMatch(/chaveExport/);
+      expect(criarOuAtualizarAjusteMock).not.toHaveBeenCalled();
+    });
+
+    it("rejeita valorInvestidoCentavosCorrigido não-inteiro (float) — regra de centavos inteiros (CLAUDE.md)", async () => {
+      const resultado = await criarOuAtualizarAjuste({
+        ...inputValido,
+        valorInvestidoCentavosCorrigido: 300_000.5,
+      });
+
+      expect(resultado.ok).toBe(false);
+      if (!resultado.ok) expect(resultado.erro).toMatch(/valorInvestidoCentavosCorrigido/);
+      expect(criarOuAtualizarAjusteMock).not.toHaveBeenCalled();
+    });
+
+    it("rejeita valorInvestidoCentavosCorrigido negativo", async () => {
+      const resultado = await criarOuAtualizarAjuste({
+        ...inputValido,
+        valorInvestidoCentavosCorrigido: -1,
+      });
+
+      expect(resultado.ok).toBe(false);
+      expect(criarOuAtualizarAjusteMock).not.toHaveBeenCalled();
+    });
+
+    it("faz trim() do chaveExport antes de delegar ao serviço", async () => {
+      criarOuAtualizarAjusteMock.mockResolvedValue({
+        chaveExport: "FUNDO-XPTO",
+        valorInvestidoCentavosCorrigido: 300_000,
+      });
+
+      await criarOuAtualizarAjuste({ ...inputValido, chaveExport: "  FUNDO-XPTO  " });
+
+      expect(criarOuAtualizarAjusteMock).toHaveBeenCalledWith(
+        expect.objectContaining({ chaveExport: "FUNDO-XPTO" }),
+      );
+    });
+
+    it("traduz exceção do serviço (ex.: sem sessão VIGENTE) em {ok:false, erro}, sem vazar stack", async () => {
+      criarOuAtualizarAjusteMock.mockRejectedValue(
+        new Error(
+          "Nenhuma sessão de import VIGENTE encontrada — realize um import antes de calcular o aporte.",
+        ),
+      );
+
+      const resultado = await criarOuAtualizarAjuste(inputValido);
+
+      expect(resultado).toEqual({
+        ok: false,
+        erro:
+          "Nenhuma sessão de import VIGENTE encontrada — realize um import antes de calcular o aporte.",
+      });
+    });
+
+    it("erro não-Error do serviço vira mensagem genérica amigável, sem vazar o valor bruto", async () => {
+      criarOuAtualizarAjusteMock.mockRejectedValue("boom");
+
+      const resultado = await criarOuAtualizarAjuste(inputValido);
+
+      expect(resultado).toEqual({
+        ok: false,
+        erro: "Erro inesperado ao processar a solicitação.",
+      });
+    });
+  });
+
+  // T016/T017 (User Story 2): listarAjustesAtivos — action de leitura fina,
+  // sem validação de input.
+  describe("listarAjustesAtivos", () => {
+    it("delega ao serviço e retorna {ok:true, data} com a lista", async () => {
+      listarAjustesAtivosMock.mockResolvedValue([
+        {
+          chaveExport: "FUNDO-XPTO",
+          alvoId: "alvo-1",
+          nomeAlvo: "Fundos",
+          valorInvestidoCentavosCorrigido: 300_000,
+        },
+      ]);
+
+      const resultado = await listarAjustesAtivos();
+
+      expect(resultado).toEqual({
+        ok: true,
+        data: [
+          {
+            chaveExport: "FUNDO-XPTO",
+            alvoId: "alvo-1",
+            nomeAlvo: "Fundos",
+            valorInvestidoCentavosCorrigido: 300_000,
+          },
+        ],
+      });
+    });
+
+    it("traduz exceção do serviço em {ok:false, erro}", async () => {
+      listarAjustesAtivosMock.mockRejectedValue(new Error("falha ao consultar"));
+
+      const resultado = await listarAjustesAtivos();
 
       expect(resultado).toEqual({ ok: false, erro: "falha ao consultar" });
     });
