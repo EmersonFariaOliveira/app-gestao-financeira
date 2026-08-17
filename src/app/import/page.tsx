@@ -34,6 +34,25 @@
  * padrão de `src/app/posicoes-manuais/page.tsx`). Some inteiramente quando
  * não há nenhuma posição manual/ajuste ativo — não quebra o fluxo de import
  * que não usa posições manuais.
+ *
+ * Destaque de incrementos ambíguos (T027, motor-integracao.md §4.2,
+ * server-actions.md §import.ts campo `incrementosAmbiguosPendentes`): um
+ * banner âmbar por alvo com pendência ambígua (aporte executado sem fundo
+ * específico), listando os destinos elegíveis (`elegiveis`) onde o usuário
+ * deve digitar o valor manualmente nas tabelas de posições
+ * manuais/ajustes abaixo. Decisão de UX (item 3 da tarefa): NÃO calculamos
+ * "quanto já foi distribuído" comparando os valores editados com os
+ * sugeridos originais — a derivação exigiria rastrear, por alvo, quais
+ * campos de `posicoesManuaisTextos`/`ajustesTextos` pertencem a quais
+ * `elegiveis` e qual era o valor sugerido de cada um antes da pendência
+ * ambígua ser somada (o valor sugerido já inclui incrementos EXCLUSIVOS
+ * daquele item, então a diferença "editado − sugerido" não isola limpamente
+ * a fatia ambígua). Optamos pela versão mais simples permitida pela tarefa:
+ * mostrar apenas o valor total pendente do alvo — puramente informativo,
+ * não bloqueia a confirmação. Por isso `distribuicoesIncrementosAmbiguos`
+ * (campo opcional do contrato, só para conferência visual) não é enviado no
+ * `confirmarImport` — o servidor não depende dele (sempre retorna
+ * `incrementosAmbiguosNaoAlocadosCentavos: 0`, ver import-service.ts).
  */
 import Link from "next/link";
 import { useCallback, useMemo, useRef, useState } from "react";
@@ -544,7 +563,8 @@ export default function ImportPage() {
               )}
 
               {(preview.posicoesManuaisRevisao.length > 0 ||
-                preview.ajustesRevisao.length > 0) && (
+                preview.ajustesRevisao.length > 0 ||
+                preview.incrementosAmbiguosPendentes.length > 0) && (
                 <div className="flex flex-col gap-4 border-t pt-4">
                   <div>
                     <p className="font-medium">Revisão de posições manuais e ajustes</p>
@@ -553,6 +573,28 @@ export default function ImportPage() {
                       grava quando você confirmar este import.
                     </p>
                   </div>
+
+                  {preview.incrementosAmbiguosPendentes.length > 0 && (
+                    <div className="flex flex-col gap-2">
+                      {preview.incrementosAmbiguosPendentes.map((item) => (
+                        <div
+                          key={item.alvoId}
+                          className="rounded-lg border border-amber-400/60 bg-amber-400/10 p-3 text-sm"
+                        >
+                          <p className="font-medium">
+                            {formatCentavosParaReais(item.valorPendenteCentavos)} aportados em
+                            &quot;{item.nomeAlvo}&quot; sem fundo específico — distribua abaixo.
+                          </p>
+                          {item.elegiveis.length > 0 && (
+                            <p className="mt-1 text-muted-foreground">
+                              Destinos possíveis:{" "}
+                              {item.elegiveis.map((elegivel) => elegivel.rotulo).join(", ")}.
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   {preview.posicoesManuaisRevisao.length > 0 && (
                     <div className="flex flex-col gap-2">
