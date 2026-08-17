@@ -91,14 +91,14 @@
 
 ### Tests for User Story 3 (escrever PRIMEIRO — devem FALHAR antes da implementação)
 
-- [ ] T018 [P] [US3] [arquiteto-dados] Testes de carry-forward em `tests/services/posicao-manual-service.test.ts`: pré-preenchimento a partir da sessão VIGENTE imediatamente anterior; primeira posição manual/ajuste sem sessão anterior não quebra (valores vazios/iniciais); nenhuma linha de sessão confirmada sofre `UPDATE`
+- [X] T018 [P] [US3] [arquiteto-dados] Testes de carry-forward em `tests/services/posicao-manual-service.test.ts`: pré-preenchimento a partir da sessão VIGENTE imediatamente anterior; primeira posição manual/ajuste sem sessão anterior não quebra (valores vazios/iniciais); nenhuma linha de sessão confirmada sofre `UPDATE`
 
 ### Implementation for User Story 3
 
-- [ ] T019 [US3] [arquiteto-dados] Implementar `listarPosicoesManuaisEAjustes` (leitura fora do import) e a função de montagem de `posicoesManuaisRevisao`/`ajustesRevisao` (carry-forward, sem incremento ainda — Phase 6) em `src/services/posicao-manual-service.ts` — depende de T015 (mesmo arquivo)
-- [ ] T020 [US3] [arquiteto-dados] Estender `src/services/import-service.ts`: `previewImport` ganha `posicoesManuaisRevisao`/`ajustesRevisao` (leitura, em memória); `confirmarImport` grava `posicao_manual_valor[]`/`ajuste_valor_investido[]` da revisão na MESMA transação de confirmação (data-model.md, "Fluxo técnico" passo 4) — depende de T019
-- [ ] T021 [US3] [desenvolvedor-ui] Estender `previewImport`/`confirmarImport` em `src/app/actions/import.ts` conforme `contracts/server-actions.md` — depende de T020
-- [ ] T022 [US3] [desenvolvedor-ui] Adicionar seção de revisão (6.9) ao final do card de preview em `src/app/import/page.tsx`: lista pré-preenchida de posições manuais/ajustes, campos editáveis de `valor_investido`/`valor_atual`, antes do botão "Confirmar import" (research.md R6) — depende de T021
+- [X] T019 [US3] [arquiteto-dados] Implementar `listarPosicoesManuaisEAjustes` (leitura fora do import) e a função de montagem de `posicoesManuaisRevisao`/`ajustesRevisao` (carry-forward, sem incremento ainda — Phase 6) em `src/services/posicao-manual-service.ts` — depende de T015 (mesmo arquivo)
+- [X] T020 [US3] [arquiteto-dados] Estender `src/services/import-service.ts`: `previewImport` ganha `posicoesManuaisRevisao`/`ajustesRevisao` (leitura, em memória); `confirmarImport` grava `posicao_manual_valor[]`/`ajuste_valor_investido[]` da revisão na MESMA transação de confirmação (data-model.md, "Fluxo técnico" passo 4) — depende de T019
+- [X] T021 [US3] [desenvolvedor-ui] Estender `previewImport`/`confirmarImport` em `src/app/actions/import.ts` conforme `contracts/server-actions.md` — depende de T020
+- [X] T022 [US3] [desenvolvedor-ui] Adicionar seção de revisão (6.9) ao final do card de preview em `src/app/import/page.tsx`: lista pré-preenchida de posições manuais/ajustes, campos editáveis de `valor_investido`/`valor_atual`, antes do botão "Confirmar import" (research.md R6) — depende de T021
 
 **Checkpoint**: User Stories 1–3 funcionais; o ritual mensal já cobre carry-forward de posições manuais/ajustes
 
