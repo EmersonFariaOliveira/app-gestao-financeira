@@ -66,6 +66,12 @@ type Fase = "carregando" | "erro" | "pronto";
 // porque será substituído por uma posição manual.
 type ModoResolucao = "existente" | "novo" | "fora" | "ignorar-existente" | "ignorar-novo";
 
+// Reaproveitado no aviso de "ignorar" tanto em Pendentes quanto nas ações de
+// Vinculados/Fora da carteira (feature 002, FR-001) — mesmo texto, sem
+// duplicar a explicação.
+const AVISO_IGNORAR =
+  'Este valor deixa de ser lido do export em imports futuros. Cadastre a posição manual correspondente em seguida, na tela "Posições manuais".';
+
 interface FormPendente {
   modo: ModoResolucao;
   alvoId: string;
@@ -230,6 +236,19 @@ export default function VinculosPage() {
 
   async function handleMarcarForaDaCarteira(chaveExport: string) {
     await executarVinculo(chaveExport, { chaveExport, foraDaCarteira: true });
+  }
+
+  // "Ignorar (substituído por posição manual)" a partir das seções
+  // Vinculados/Fora da carteira (feature 002, FR-001) — mesma chamada usada
+  // no modo "ignorar-existente" de Pendentes, reaproveitando o dropdown de
+  // alvo que já existe na linha.
+  async function handleIgnorar(chaveExport: string) {
+    const alvoId = reatribuirAlvoId[chaveExport];
+    if (!alvoId) {
+      toast.error("Selecione um alvo.");
+      return;
+    }
+    await executarVinculo(chaveExport, { chaveExport, ignorarNoImport: true, alvoId });
   }
 
   // Hooks de ordenação chamados incondicionalmente (regra dos hooks) — usam
@@ -400,11 +419,7 @@ export default function VinculosPage() {
                     </Button>
                   </div>
                   {(form.modo === "ignorar-existente" || form.modo === "ignorar-novo") && (
-                    <p className="text-xs text-muted-foreground">
-                      Este valor deixa de ser lido do export em imports futuros. Cadastre a
-                      posição manual correspondente em seguida, na tela &quot;Posições
-                      manuais&quot;.
-                    </p>
+                    <p className="text-xs text-muted-foreground">{AVISO_IGNORAR}</p>
                   )}
                 </div>
               );
@@ -495,6 +510,15 @@ export default function VinculosPage() {
                           >
                             Marcar fora da carteira
                           </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={salvando || alvos.length === 0}
+                            title={AVISO_IGNORAR}
+                            onClick={() => void handleIgnorar(v.chaveExport)}
+                          >
+                            Ignorar (substituído por posição manual)
+                          </Button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -568,14 +592,25 @@ export default function VinculosPage() {
                         </select>
                       </TableCell>
                       <TableCell>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={salvando || alvos.length === 0}
-                          onClick={() => void handleReatribuir(f.chaveExport)}
-                        >
-                          Vincular
-                        </Button>
+                        <div className="flex flex-wrap gap-1">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={salvando || alvos.length === 0}
+                            onClick={() => void handleReatribuir(f.chaveExport)}
+                          >
+                            Vincular
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={salvando || alvos.length === 0}
+                            title={AVISO_IGNORAR}
+                            onClick={() => void handleIgnorar(f.chaveExport)}
+                          >
+                            Ignorar (substituído por posição manual)
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   );

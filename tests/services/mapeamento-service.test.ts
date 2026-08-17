@@ -617,6 +617,39 @@ describe("mapeamento-service", () => {
       expect(novoAlvo.posicaoManualPendente).toBeUndefined();
     });
 
+    it("ignorar um ativo já marcado fora-da-carteira (não só vinculado) também funciona — troca fora_da_carteira por ignorar_no_import mantendo o alvo escolhido (UI: botão Ignorar na seção 'Fora da carteira alvo')", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await mapeamentoService.vincularAtivo({ chaveExport: "CDB-LEGADO", foraDaCarteira: true });
+
+      const resultado = await mapeamentoService.vincularAtivo({
+        chaveExport: "CDB-LEGADO",
+        ignorarNoImport: true,
+        alvoId: alvo.id,
+      });
+
+      expect(resultado).toEqual({
+        chaveExport: "CDB-LEGADO",
+        alvoId: alvo.id,
+        nomeAlvo: "Pós-fixado",
+        foraDaCarteira: false,
+        ignorarNoImport: true,
+        posicaoManualPendente: true,
+      });
+
+      expect(await prisma.ativo_mapeado.count({ where: { chave_export: "CDB-LEGADO" } })).toBe(1);
+      const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
+        where: { chave_export: "CDB-LEGADO" },
+      });
+      expect(registro.fora_da_carteira).toBe(false);
+      expect(registro.ignorar_no_import).toBe(true);
+      expect(registro.alvo_id).toBe(alvo.id);
+
+      // Some do balde fora-da-carteira; aparece só em ignorados.
+      const vinculos = await mapeamentoService.listarVinculos();
+      expect(vinculos.foraDaCarteira).toEqual([]);
+      expect(vinculos.ignorados.map((i) => i.chaveExport)).toEqual(["CDB-LEGADO"]);
+    });
+
     it("ignorar com alvoId inexistente lança erro, mesma validação da forma {chaveExport, alvoId} simples", async () => {
       await expect(
         mapeamentoService.vincularAtivo({
