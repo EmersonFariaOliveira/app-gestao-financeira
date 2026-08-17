@@ -748,4 +748,324 @@ describe("posicao-manual-service", () => {
       });
     });
   });
+
+  // ---------------------------------------------------------------------
+  // T018 (User Story 3, FR-007/FR-008/FR-009, data-model.md "Fluxo técnico
+  // (carry-forward + consumo de incremento pendente)" passos 1-2,
+  // research.md R6/R7, contracts/server-actions.md §import.ts campos
+  // `posicoesManuaisRevisao`/`ajustesRevisao`).
+  //
+  // `montarRevisaoImport` ainda NÃO existe em
+  // src/services/posicao-manual-service.ts neste ponto (T019 é quem
+  // implementa) — os testes abaixo devem FALHAR agora (TDD), sem quebrar
+  // nenhum dos testes já existentes acima (T005/T007, T013/T015, T017).
+  //
+  // Shape escolhido para T019 implementar EXATAMENTE isso (mesmo nome de
+  // função e mesmo formato de retorno usados nestes testes):
+  //
+  //   async function montarRevisaoImport(): Promise<{
+  //     posicoesManuaisRevisao: {
+  //       posicaoManualId: string;
+  //       chaveManual: string;
+  //       instituicao: string;
+  //       descricao: string;
+  //       alvoId: string;
+  //       nomeAlvo: string;
+  //       valorInvestidoCentavosAnterior: number;    // 0 se não houver snapshot anterior
+  //       incrementoPendenteCentavos: number;         // sempre 0 nesta fase (US4/T023-T026 ainda
+  //                                                     // não implementados); campo mantido no
+  //                                                     // shape só para casar com
+  //                                                     // contracts/server-actions.md sem quebrar
+  //                                                     // quando US4 existir
+  //       valorInvestidoCentavosSugerido: number;     // = Anterior + incrementoPendente (= Anterior, por ora)
+  //       valorAtualCentavosSugerido: number;         // = valor_atual do snapshot anterior; 0 se não houver
+  //     }[];
+  //     ajustesRevisao: {
+  //       chaveExport: string;
+  //       alvoId: string | null;
+  //       nomeAlvo: string | null;
+  //       primeiraVez: boolean;                        // true = nenhum valor preenchido ainda (FR-009)
+  //       valorInvestidoCentavosAnterior: number | null; // null quando primeiraVez
+  //       incrementoPendenteCentavos: number;           // sempre 0 nesta fase (mesmo racional acima)
+  //       valorInvestidoCentavosSugerido: number | null; // null quando primeiraVez
+  //     }[];
+  //   }>
+  //
+  // Decisões de design tomadas para fechar detalhes que o data-model.md/
+  // contracts deixam implícitos ou de leitura (sem inventar regra de negócio
+  // nova — só resolvendo "qual consulta exata roda"):
+  //
+  // 1. SEM argumentos: a "sessão de referência" (data-model.md, Fluxo
+  //    técnico, passo 1) é resolvida internamente, a cada chamada, como a
+  //    sessão VIGENTE mais recente por (data_export DESC, criado_em DESC) —
+  //    mesma query de obterSessaoVigenteMaisRecente() já usada neste
+  //    arquivo. Não recebe "nova sessão" como parâmetro porque a sessão do
+  //    import em andamento ainda NÃO existe no banco no momento em que a
+  //    revisão é montada (tudo em memória até confirmarImport — mesmo
+  //    padrão de previewImport da feature 001).
+  // 2. Carry-forward por ENTIDADE, não estritamente pela sessão de
+  //    referência: para cada posicao_manual/chave_export, usa-se o
+  //    snapshot/ajuste mais recente conhecido (por criado_em), mesmo que não
+  //    exista nenhum snapshot na sessão VIGENTE mais recente em si (ex.:
+  //    import intermediário em que a posição não foi tocada — "mês
+  //    pulado"). Consistente com o comportamento já implementado em
+  //    listarPosicoesManuaisAtivas/listarAjustesAtivos neste mesmo arquivo.
+  // 3. `incrementoPendenteCentavos` sempre 0 nesta fase — a elegibilidade e
+  //    soma de `incremento_valor_investido_pendente` é escopo de US4
+  //    (T023-T026, fora do escopo de T018/T019); o campo já existe no shape
+  //    hoje só para não quebrar o contrato quando US4 for implementada
+  //    (T026 passa a somar um valor != 0 aqui).
+  // 4. `primeiraVez` (ajustesRevisao) reflete o estado do BANCO: `true`
+  //    quando o `ajuste_valor_investido` mais recente daquele chave_export
+  //    tem `valor_investido_corrigido_centavos = null` (schema permite null
+  //    explicitamente para esse caso — data-model.md, FR-009). Uma
+  //    chave_export sem NENHUMA linha `ajuste_valor_investido` não aparece
+  //    em `ajustesRevisao` — não está "sob ajuste" (mesma condição
+  //    derivada já usada por `listarAjustesAtivos`).
+  // ---------------------------------------------------------------------
+  describe("montarRevisaoImport", () => {
+    async function criarAtivoMapeadoComAlvo(chaveExport: string, alvoId: string | null) {
+      return prisma.ativo_mapeado.create({
+        data: { chave_export: chaveExport, alvo_id: alvoId },
+      });
+    }
+
+    async function criarPosicaoManualAtiva(alvoId: string, chaveManual: string, ativo = true) {
+      return prisma.posicao_manual.create({
+        data: {
+          chave_manual: chaveManual,
+          instituicao: "Itaú",
+          descricao: `Descrição ${chaveManual}`,
+          alvo_id: alvoId,
+          ativo,
+        },
+      });
+    }
+
+    async function criarSnapshot(
+      posicaoManualId: string,
+      sessaoId: string,
+      investidoCentavos: number,
+      atualCentavos: number,
+    ) {
+      return prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManualId,
+          sessao_import_id: sessaoId,
+          valor_investido_centavos: investidoCentavos,
+          valor_atual_centavos: atualCentavos,
+        },
+      });
+    }
+
+    async function criarAjuste(
+      chaveExport: string,
+      sessaoId: string,
+      valorCorrigidoCentavos: number | null,
+    ) {
+      return prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: chaveExport,
+          sessao_import_id: sessaoId,
+          valor_investido_corrigido_centavos: valorCorrigidoCentavos,
+        },
+      });
+    }
+
+    it("pré-preenche posicoesManuaisRevisao a partir do snapshot da sessão VIGENTE mais recente (não a mais antiga, não uma SUBSTITUIDO)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const sessaoAntiga = await criarSessao("2026-05", "2026-05-28", "SUBSTITUIDO");
+      const sessaoAtual = await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+      await criarSnapshot(posicaoManual.id, sessaoAntiga.id, 400_000, 410_000);
+      await criarSnapshot(posicaoManual.id, sessaoAtual.id, 500_000, 520_000);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.posicoesManuaisRevisao).toHaveLength(1);
+      expect(revisao.posicoesManuaisRevisao[0]).toMatchObject({
+        posicaoManualId: posicaoManual.id,
+        chaveManual: "CDB-ITAU-2029",
+        alvoId: alvo.id,
+        nomeAlvo: "Pós-fixado",
+        valorInvestidoCentavosAnterior: 500_000,
+        incrementoPendenteCentavos: 0,
+        valorInvestidoCentavosSugerido: 500_000,
+        valorAtualCentavosSugerido: 520_000,
+      });
+    });
+
+    it("pré-preenche ajustesRevisao a partir do ajuste_valor_investido mais recente, não de uma sessão SUBSTITUIDO antiga", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      const sessaoAntiga = await criarSessao("2026-05", "2026-05-28", "SUBSTITUIDO");
+      const sessaoAtual = await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      await criarAtivoMapeadoComAlvo("FUNDO-XPTO", alvo.id);
+      await criarAjuste("FUNDO-XPTO", sessaoAntiga.id, 100_000);
+      await criarAjuste("FUNDO-XPTO", sessaoAtual.id, 350_000);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.ajustesRevisao).toHaveLength(1);
+      expect(revisao.ajustesRevisao[0]).toMatchObject({
+        chaveExport: "FUNDO-XPTO",
+        alvoId: alvo.id,
+        nomeAlvo: "Fundos",
+        primeiraVez: false,
+        valorInvestidoCentavosAnterior: 350_000,
+        incrementoPendenteCentavos: 0,
+        valorInvestidoCentavosSugerido: 350_000,
+      });
+    });
+
+    it("posição manual cujo snapshot mais recente é de uma sessão anterior à VIGENTE mais recente (import pulado) ainda usa o snapshot mais recente disponível", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const sessaoDoisImportsAtras = await criarSessao("2026-04", "2026-04-28", "SUBSTITUIDO");
+      // Sessão do "meio": a posição manual não recebeu snapshot novo nela —
+      // cenário real de "mês pulado"/import em que ninguém revisou esta
+      // posição.
+      await criarSessao("2026-05", "2026-05-28", "SUBSTITUIDO");
+      const sessaoVigenteMaisRecente = await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+      await criarSnapshot(posicaoManual.id, sessaoDoisImportsAtras.id, 300_000, 310_000);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.posicoesManuaisRevisao).toHaveLength(1);
+      expect(revisao.posicoesManuaisRevisao[0]).toMatchObject({
+        valorInvestidoCentavosAnterior: 300_000,
+        valorAtualCentavosSugerido: 310_000,
+      });
+      // A garantia testada aqui é "usa o snapshot mais recente disponível",
+      // não "usa exatamente a sessão vigente mais recente" — confirma que a
+      // sessão vigente mais recente é de fato distinta da sessão de origem
+      // do snapshot usado.
+      expect(sessaoVigenteMaisRecente.id).not.toBe(sessaoDoisImportsAtras.id);
+    });
+
+    it("ajuste cujo valor mais recente é de uma sessão anterior à VIGENTE mais recente (import pulado) ainda usa o valor mais recente disponível", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      const sessaoDoisImportsAtras = await criarSessao("2026-04", "2026-04-28", "SUBSTITUIDO");
+      await criarSessao("2026-05", "2026-05-28", "SUBSTITUIDO");
+      await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      await criarAtivoMapeadoComAlvo("FUNDO-XPTO", alvo.id);
+      await criarAjuste("FUNDO-XPTO", sessaoDoisImportsAtras.id, 275_000);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.ajustesRevisao).toHaveLength(1);
+      expect(revisao.ajustesRevisao[0]).toMatchObject({
+        primeiraVez: false,
+        valorInvestidoCentavosAnterior: 275_000,
+        valorInvestidoCentavosSugerido: 275_000,
+      });
+    });
+
+    it("primeira posição manual, sem NENHUMA sessão anterior (cadastrada fora do fluxo de import, sem posicao_manual_valor ainda) — não lança erro, valores vazios/zero", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      // Cadastro direto no banco, equivalente a `criarPosicaoManual` chamado
+      // ANTES de existir qualquer sessão VIGENTE (Assumption do spec.md;
+      // data-model.md "Fluxo técnico" passo 6): posicao_manual sem NENHUM
+      // posicao_manual_valor associado ainda.
+      const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-NOVO-SEM-SNAPSHOT");
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.posicoesManuaisRevisao).toHaveLength(1);
+      expect(revisao.posicoesManuaisRevisao[0]).toMatchObject({
+        posicaoManualId: posicaoManual.id,
+        valorInvestidoCentavosAnterior: 0,
+        incrementoPendenteCentavos: 0,
+        valorInvestidoCentavosSugerido: 0,
+        valorAtualCentavosSugerido: 0,
+      });
+    });
+
+    it("primeiro ajuste, sem nenhum valor preenchido ainda (ajuste_valor_investido com valor null) — não lança erro, primeiraVez true e valores null", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      const sessao = await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      await criarAtivoMapeadoComAlvo("FUNDO-NOVO", alvo.id);
+      // Linha "sob ajuste" criada sem valor preenchido ainda — estado
+      // suportado explicitamente pelo schema
+      // (valor_investido_corrigido_centavos Int?, data-model.md/FR-009).
+      // Criada direto no banco: `criarOuAtualizarAjuste` (T015) sempre exige
+      // um valor numérico — este é o único jeito hoje de simular o estado
+      // "primeira vez" persistido.
+      await criarAjuste("FUNDO-NOVO", sessao.id, null);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.ajustesRevisao).toHaveLength(1);
+      expect(revisao.ajustesRevisao[0]).toMatchObject({
+        chaveExport: "FUNDO-NOVO",
+        primeiraVez: true,
+        valorInvestidoCentavosAnterior: null,
+        valorInvestidoCentavosSugerido: null,
+      });
+    });
+
+    it("chave_export sem NENHUM ajuste_valor_investido não aparece em ajustesRevisao (não está 'sob ajuste')", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      await criarAtivoMapeadoComAlvo("FUNDO-SEM-AJUSTE", alvo.id);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.ajustesRevisao).toEqual([]);
+    });
+
+    it("posição manual encerrada (ativo=false) não aparece em posicoesManuaisRevisao", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const sessao = await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ENCERRADO", false);
+      await criarSnapshot(posicaoManual.id, sessao.id, 100_000, 110_000);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.posicoesManuaisRevisao).toEqual([]);
+    });
+
+    it("ajuste cujo ativo_mapeado foi desvinculado do alvo (alvo_id null) não aparece mais em ajustesRevisao (FR-015)", async () => {
+      const sessao = await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      await criarAtivoMapeadoComAlvo("FUNDO-DESVINCULADO", null);
+      await criarAjuste("FUNDO-DESVINCULADO", sessao.id, 100_000);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.ajustesRevisao).toEqual([]);
+    });
+
+    it("é puramente de leitura: nenhuma linha de sessao_import/posicao_manual/posicao_manual_valor/ajuste_valor_investido já existente sofre UPDATE, nem é criada linha nova", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const sessaoAntiga = await criarSessao("2026-05", "2026-05-28", "SUBSTITUIDO");
+      const sessaoAtual = await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+      await criarSnapshot(posicaoManual.id, sessaoAntiga.id, 400_000, 410_000);
+      await criarSnapshot(posicaoManual.id, sessaoAtual.id, 500_000, 520_000);
+      await criarAtivoMapeadoComAlvo("FUNDO-XPTO", alvo.id);
+      await criarAjuste("FUNDO-XPTO", sessaoAtual.id, 300_000);
+
+      const snapshotsAntes = await prisma.posicao_manual_valor.findMany({ orderBy: { id: "asc" } });
+      const ajustesAntes = await prisma.ajuste_valor_investido.findMany({ orderBy: { id: "asc" } });
+      const sessoesAntes = await prisma.sessao_import.findMany({ orderBy: { id: "asc" } });
+      const posicoesManuaisAntes = await prisma.posicao_manual.findMany({ orderBy: { id: "asc" } });
+
+      await posicaoManualService.montarRevisaoImport();
+
+      const snapshotsDepois = await prisma.posicao_manual_valor.findMany({ orderBy: { id: "asc" } });
+      const ajustesDepois = await prisma.ajuste_valor_investido.findMany({ orderBy: { id: "asc" } });
+      const sessoesDepois = await prisma.sessao_import.findMany({ orderBy: { id: "asc" } });
+      const posicoesManuaisDepois = await prisma.posicao_manual.findMany({ orderBy: { id: "asc" } });
+
+      expect(snapshotsDepois).toEqual(snapshotsAntes);
+      expect(ajustesDepois).toEqual(ajustesAntes);
+      expect(sessoesDepois).toEqual(sessoesAntes);
+      expect(posicoesManuaisDepois).toEqual(posicoesManuaisAntes);
+      // Nenhuma linha nova criada por uma chamada de leitura.
+      expect(await prisma.sessao_import.count()).toBe(2);
+      expect(await prisma.posicao_manual_valor.count()).toBe(2);
+      expect(await prisma.ajuste_valor_investido.count()).toBe(1);
+      expect(await prisma.posicao_manual.count()).toBe(1);
+    });
+  });
 });

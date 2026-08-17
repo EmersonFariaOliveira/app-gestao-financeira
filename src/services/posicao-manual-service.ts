@@ -329,3 +329,179 @@ export async function listarPosicoesManuaisAtivas(): Promise<PosicaoManualListIt
     };
   });
 }
+
+export interface PosicaoManualRevisaoItem {
+  posicaoManualId: string;
+  chaveManual: string;
+  instituicao: string;
+  descricao: string;
+  alvoId: string;
+  nomeAlvo: string;
+  /** 0 se não houver `posicao_manual_valor` anterior conhecido (posição nova, sem carry-forward). */
+  valorInvestidoCentavosAnterior: number;
+  /** Sempre 0 nesta fase — US4 (T023-T026) passa a somar `incremento_valor_investido_pendente` aqui. */
+  incrementoPendenteCentavos: number;
+  /** = valorInvestidoCentavosAnterior + incrementoPendenteCentavos (= Anterior, por ora). */
+  valorInvestidoCentavosSugerido: number;
+  /** = valor_atual do snapshot anterior; 0 se não houver snapshot anterior. */
+  valorAtualCentavosSugerido: number;
+}
+
+export interface AjusteRevisaoItem {
+  chaveExport: string;
+  alvoId: string | null;
+  nomeAlvo: string | null;
+  /** true = nenhum valor preenchido ainda (FR-009) — ajuste_valor_investido mais recente tem valor null. */
+  primeiraVez: boolean;
+  valorInvestidoCentavosAnterior: number | null;
+  /** Sempre 0 nesta fase — mesmo racional de PosicaoManualRevisaoItem. */
+  incrementoPendenteCentavos: number;
+  valorInvestidoCentavosSugerido: number | null;
+}
+
+export interface RevisaoImportOutput {
+  posicoesManuaisRevisao: PosicaoManualRevisaoItem[];
+  ajustesRevisao: AjusteRevisaoItem[];
+}
+
+/**
+ * Monta o carry-forward de posições manuais/ajustes para a revisão dentro do
+ * import (tela 6.9-dentro-do-import, data-model.md "Fluxo técnico" passos
+ * 1-2; contracts/server-actions.md §import.ts `posicoesManuaisRevisao`/
+ * `ajustesRevisao`). Função PURAMENTE de leitura — nenhuma escrita, nenhum
+ * argumento: a sessão de referência (VIGENTE mais recente) é resolvida
+ * internamente a cada chamada, porque a sessão do import em andamento ainda
+ * não existe no banco no momento em que a revisão é montada (mesmo padrão de
+ * `previewImport` da feature 001, tudo em memória até `confirmarImport`).
+ *
+ * Carry-forward é por ENTIDADE, não estritamente pela sessão VIGENTE mais
+ * recente em si: usa o snapshot/ajuste mais recente conhecido (por
+ * `criado_em`) de cada `posicao_manual`/`chave_export`, mesmo que essa sessão
+ * de origem não seja a VIGENTE mais recente (cenário de "mês pulado", em que
+ * a posição/ajuste não foi tocado num import intermediário) — mesmo critério
+ * já usado por `listarPosicoesManuaisAtivas`/`listarAjustesAtivos` acima.
+ *
+ * `incrementoPendenteCentavos` sempre 0 nesta fase (US4/T023-T026, fora do
+ * escopo desta task) — mantido no shape só para não quebrar o contrato
+ * quando a soma de `incremento_valor_investido_pendente` for implementada.
+ */
+export async function montarRevisaoImport(): Promise<RevisaoImportOutput> {
+  const posicoesManuaisAtivas = await prisma.posicao_manual.findMany({
+    where: { ativo: true },
+    include: { alvo: true },
+    orderBy: { criado_em: "desc" },
+  });
+
+  const snapshotsMaisRecentes =
+    posicoesManuaisAtivas.length === 0
+      ? []
+      : await prisma.posicao_manual_valor.findMany({
+          where: { posicao_manual_id: { in: posicoesManuaisAtivas.map((p) => p.id) } },
+          orderBy: { criado_em: "desc" },
+        });
+
+  const ultimoSnapshotPorPosicao = new Map<
+    string,
+    { valor_investido_centavos: number; valor_atual_centavos: number }
+  >();
+  for (const snapshot of snapshotsMaisRecentes) {
+    if (!ultimoSnapshotPorPosicao.has(snapshot.posicao_manual_id)) {
+      ultimoSnapshotPorPosicao.set(snapshot.posicao_manual_id, snapshot);
+    }
+  }
+
+  const posicoesManuaisRevisao: PosicaoManualRevisaoItem[] = posicoesManuaisAtivas.map(
+    (posicaoManual) => {
+      const snapshot = ultimoSnapshotPorPosicao.get(posicaoManual.id);
+      const valorInvestidoCentavosAnterior = snapshot?.valor_investido_centavos ?? 0;
+      const valorAtualCentavosSugerido = snapshot?.valor_atual_centavos ?? 0;
+      return {
+        posicaoManualId: posicaoManual.id,
+        chaveManual: posicaoManual.chave_manual,
+        instituicao: posicaoManual.instituicao,
+        descricao: posicaoManual.descricao,
+        alvoId: posicaoManual.alvo_id,
+        nomeAlvo: posicaoManual.alvo?.nome ?? posicaoManual.alvo_id,
+        valorInvestidoCentavosAnterior,
+        incrementoPendenteCentavos: 0,
+        valorInvestidoCentavosSugerido: valorInvestidoCentavosAnterior,
+        valorAtualCentavosSugerido,
+      };
+    },
+  );
+
+  const ajustesTodos = await prisma.ajuste_valor_investido.findMany({
+    orderBy: { criado_em: "desc" },
+  });
+
+  let ajustesRevisao: AjusteRevisaoItem[] = [];
+  if (ajustesTodos.length > 0) {
+    const chavesComAjuste = [...new Set(ajustesTodos.map((a) => a.chave_export))];
+    const ativosMapeadosElegiveis = await prisma.ativo_mapeado.findMany({
+      where: {
+        chave_export: { in: chavesComAjuste },
+        alvo_id: { not: null },
+        fora_da_carteira: false,
+        ignorar_no_import: false,
+      },
+      include: { alvo: true },
+    });
+
+    const ultimoAjustePorChave = new Map<string, (typeof ajustesTodos)[number]>();
+    for (const ajuste of ajustesTodos) {
+      if (!ultimoAjustePorChave.has(ajuste.chave_export)) {
+        ultimoAjustePorChave.set(ajuste.chave_export, ajuste);
+      }
+    }
+
+    ajustesRevisao = ativosMapeadosElegiveis.map((ativoMapeado) => {
+      const ultimo = ultimoAjustePorChave.get(ativoMapeado.chave_export);
+      const valorAnterior = ultimo?.valor_investido_corrigido_centavos ?? null;
+      const primeiraVez = valorAnterior === null;
+      return {
+        chaveExport: ativoMapeado.chave_export,
+        alvoId: ativoMapeado.alvo_id,
+        nomeAlvo: ativoMapeado.alvo?.nome ?? ativoMapeado.alvo_id,
+        primeiraVez,
+        valorInvestidoCentavosAnterior: valorAnterior,
+        incrementoPendenteCentavos: 0,
+        valorInvestidoCentavosSugerido: valorAnterior,
+      };
+    });
+  }
+
+  return { posicoesManuaisRevisao, ajustesRevisao };
+}
+
+export interface PosicaoManualEAjustesOutput {
+  posicoesManuais: Omit<PosicaoManualRevisaoItem, "incrementoPendenteCentavos">[];
+  ajustes: Omit<AjusteRevisaoItem, "incrementoPendenteCentavos">[];
+}
+
+/**
+ * Leitura de posições manuais ativas + ajustes ativos para a tela dedicada
+ * (6.9, FR-014), fora do fluxo de import — contracts/server-actions.md
+ * §posicoes-manuais.ts `listarPosicoesManuaisEAjustes`. Reaproveita o mesmo
+ * carry-forward de `montarRevisaoImport` (mesma regra de "snapshot/ajuste
+ * mais recente conhecido"), só que sem o campo `incrementoPendenteCentavos`
+ * (sempre 0 nesta fase, e conceitualmente não faz sentido fora do contexto
+ * de uma revisão de import em andamento).
+ *
+ * Nota (T019): `listarPosicoesManuaisAtivas`/`listarAjustesAtivos` (US1/US2)
+ * permanecem inalteradas neste arquivo — ainda usadas por
+ * `src/app/actions/posicoes-manuais.ts`/`src/app/posicoes-manuais/page.tsx`.
+ * Substituí-las por esta função é uma decisão de UI (arquivos fora da camada
+ * de dados) deixada para uma task futura (T021/T022) — ver relatório desta
+ * task.
+ */
+export async function listarPosicoesManuaisEAjustes(): Promise<PosicaoManualEAjustesOutput> {
+  const { posicoesManuaisRevisao, ajustesRevisao } = await montarRevisaoImport();
+  return {
+    posicoesManuais: posicoesManuaisRevisao.map(
+      ({ incrementoPendenteCentavos: _incrementoPendenteCentavos, ...resto }) => resto,
+    ),
+    ajustes: ajustesRevisao.map(
+      ({ incrementoPendenteCentavos: _incrementoPendenteCentavos, ...resto }) => resto,
+    ),
+  };
+}
