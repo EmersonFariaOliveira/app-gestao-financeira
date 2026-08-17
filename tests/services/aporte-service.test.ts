@@ -831,4 +831,47 @@ describe("aporte-service", () => {
       expect(itemFilaRendaFixa?.valorAtualCentavos ?? 0).toBe(0);
     });
   });
+
+  describe("ajuste_valor_investido — nunca lido por montarContextoEntradaMotor (T014, US2, SC-004/FR-006)", () => {
+    it("calcular() produz resultado IDÊNTICO antes e depois de um ajuste_valor_investido sobre a mesma posição", async () => {
+      const { sessao } = await criarCenarioSemPendencia();
+
+      const input = {
+        valorCentavos: 100_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 50_000,
+      };
+
+      const calculoAntes = await aporteService.calcular(input);
+
+      // ajuste_valor_investido para PRIO3 (chave_export já vinculada e usada
+      // no cenário-base), com valor propositalmente absurdo/diferente de
+      // patrimonio_hoje_centavos (300_000): se fosse lido por engano por
+      // montarContextoEntradaMotor, patrimonioBaseCentavos e a divisão
+      // mudariam de forma óbvia. valor_investido_corrigido_centavos NÃO
+      // existe hoje em nenhuma leitura de aporte-service.ts — este teste é
+      // a prova estrutural de que isso continua assim (análogo a T006 para
+      // posicao_manual.valor_investido_centavos).
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "PRIO3",
+          sessao_import_id: sessao.id,
+          valor_investido_corrigido_centavos: 999_999_999,
+        },
+      });
+
+      const calculoDepois = await aporteService.calcular(input);
+
+      expect(JSON.parse(JSON.stringify(calculoDepois))).toEqual(
+        JSON.parse(JSON.stringify(calculoAntes)),
+      );
+      // Sanity explícita, além do deep-equal acima: o valor absurdo do
+      // ajuste não vazou para a base de cálculo.
+      expect(calculoDepois.resultado.patrimonioBaseCentavos).toBe(
+        calculoAntes.resultado.patrimonioBaseCentavos,
+      );
+      expect(calculoDepois.resultado.patrimonioBaseCentavos).not.toBe(999_999_999);
+    });
+  });
 });
