@@ -102,6 +102,55 @@ async function criarSessao(mesReferencia: string, dataExport: string, status = "
   });
 }
 
+/**
+ * Cria um `aporte` mínimo (T024) — proveniência obrigatória
+ * (`aporte_id`, onDelete Restrict) de `incremento_valor_investido_pendente`.
+ * Conteúdo de `sugestao`/`executado` é irrelevante para estes testes
+ * (T024 não testa o algoritmo de geração — isso é T023, em
+ * tests/services/aporte-service.test.ts); usa-se um JSON vazio de
+ * placeholder.
+ */
+async function criarAporteParaTeste(sessaoId: string, valorTotalCentavos = 100_000) {
+  return prisma.aporte.create({
+    data: {
+      sessao_import_id: sessaoId,
+      valor_total_centavos: valorTotalCentavos,
+      valor_dividendos_centavos: 0,
+      sugestao: "[]",
+      executado: "[]",
+      troco_centavos: 0,
+    },
+  });
+}
+
+/**
+ * Cria uma linha `incremento_valor_investido_pendente` diretamente via
+ * Prisma (T024 é TDD sobre o CONSUMO — a geração, feita por
+ * `registrarAporte`, é T025/T023, ainda não implementada; aqui simulamos o
+ * estado de banco que T025 deveria produzir).
+ */
+async function criarPendenciaIncremento(input: {
+  alvoId: string;
+  aporteId: string;
+  valorIncrementoCentavos: number;
+  chaveExport?: string | null;
+  posicaoManualId?: string | null;
+  aplicado?: boolean;
+  sessaoAplicacaoId?: string | null;
+}) {
+  return prisma.incremento_valor_investido_pendente.create({
+    data: {
+      alvo_id: input.alvoId,
+      aporte_id: input.aporteId,
+      valor_incremento_centavos: input.valorIncrementoCentavos,
+      chave_export: input.chaveExport ?? null,
+      posicao_manual_id: input.posicaoManualId ?? null,
+      aplicado: input.aplicado ?? false,
+      sessao_aplicacao_id: input.sessaoAplicacaoId ?? null,
+    },
+  });
+}
+
 describe("posicao-manual-service", () => {
   describe("criarPosicaoManual", () => {
     it("cria a posicao_manual e anexa um posicao_manual_valor inicial à sessão VIGENTE existente (research.md R7)", async () => {
@@ -1066,6 +1115,694 @@ describe("posicao-manual-service", () => {
       expect(await prisma.posicao_manual_valor.count()).toBe(2);
       expect(await prisma.ajuste_valor_investido.count()).toBe(1);
       expect(await prisma.posicao_manual.count()).toBe(1);
+    });
+
+    // -----------------------------------------------------------------
+    // T024 (User Story 4, FR-008/FR-011/FR-013, contracts/motor-integracao.md
+    // §4.1/§4.4, research.md R4/R5): consumo de
+    // `incremento_valor_investido_pendente` em `montarRevisaoImport`.
+    //
+    // `incrementoPendenteCentavos` é, HOJE (antes de T026), sempre 0 —
+    // hardcoded em src/services/posicao-manual-service.ts. Os testes abaixo
+    // esperam a soma real de pendências não aplicadas e por isso devem
+    // FALHAR até T026 estender `montarRevisaoImport` para consultar
+    // `prisma.incremento_valor_investido_pendente`. TDD: escritos ANTES da
+    // implementação — não implementar aqui (T026, fora do escopo desta task).
+    //
+    // Importante: `montarRevisaoImport` é função de LEITURA — nenhum destes
+    // testes espera que ela marque `aplicado = true`. Essa transição é
+    // escopo da função nova testada no describe
+    // "marcarPendenciasComoAplicadas" logo abaixo (T026 a implementar).
+    // -----------------------------------------------------------------
+    describe("consumo de incremento_valor_investido_pendente (T024)", () => {
+      it("soma 1 pendência não aplicada de posicao_manual ao valorInvestidoCentavosAnterior (motor-integracao.md §4.1)", async () => {
+        const alvo = await criarAlvo("Pós-fixado", 3000);
+        const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+        await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+        const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+        await criarSnapshot(posicaoManual.id, sessaoAnterior.id, 500_000, 520_000);
+        const aporte = await criarAporteParaTeste(sessaoAnterior.id);
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte.id,
+          posicaoManualId: posicaoManual.id,
+          valorIncrementoCentavos: 50_000,
+        });
+
+        const revisao = await posicaoManualService.montarRevisaoImport();
+
+        expect(revisao.posicoesManuaisRevisao).toHaveLength(1);
+        expect(revisao.posicoesManuaisRevisao[0]).toMatchObject({
+          valorInvestidoCentavosAnterior: 500_000,
+          incrementoPendenteCentavos: 50_000,
+          valorInvestidoCentavosSugerido: 550_000,
+        });
+      });
+
+      it("soma 1 pendência não aplicada de ajuste (chave_export) ao valorInvestidoCentavosAnterior (motor-integracao.md §4.1)", async () => {
+        const alvo = await criarAlvo("Fundos", 2000);
+        const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+        await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+        await criarAtivoMapeadoComAlvo("FUNDO-XPTO", alvo.id);
+        await criarAjuste("FUNDO-XPTO", sessaoAnterior.id, 300_000);
+        const aporte = await criarAporteParaTeste(sessaoAnterior.id);
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte.id,
+          chaveExport: "FUNDO-XPTO",
+          valorIncrementoCentavos: 25_000,
+        });
+
+        const revisao = await posicaoManualService.montarRevisaoImport();
+
+        expect(revisao.ajustesRevisao).toHaveLength(1);
+        expect(revisao.ajustesRevisao[0]).toMatchObject({
+          valorInvestidoCentavosAnterior: 300_000,
+          incrementoPendenteCentavos: 25_000,
+          valorInvestidoCentavosSugerido: 325_000,
+        });
+      });
+
+      it("soma MÚLTIPLAS pendências não aplicadas da MESMA posicao_manual juntas — nenhuma é descartada (2 aportes antes do próximo import)", async () => {
+        const alvo = await criarAlvo("Pós-fixado", 3000);
+        const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+        await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+        const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+        await criarSnapshot(posicaoManual.id, sessaoAnterior.id, 500_000, 520_000);
+        const aporte1 = await criarAporteParaTeste(sessaoAnterior.id, 30_000);
+        const aporte2 = await criarAporteParaTeste(sessaoAnterior.id, 40_000);
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte1.id,
+          posicaoManualId: posicaoManual.id,
+          valorIncrementoCentavos: 30_000,
+        });
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte2.id,
+          posicaoManualId: posicaoManual.id,
+          valorIncrementoCentavos: 40_000,
+        });
+
+        const revisao = await posicaoManualService.montarRevisaoImport();
+
+        expect(revisao.posicoesManuaisRevisao).toHaveLength(1);
+        expect(revisao.posicoesManuaisRevisao[0]).toMatchObject({
+          valorInvestidoCentavosAnterior: 500_000,
+          incrementoPendenteCentavos: 70_000,
+          valorInvestidoCentavosSugerido: 570_000,
+        });
+      });
+
+      it("soma MÚLTIPLAS pendências não aplicadas do MESMO ajuste juntas", async () => {
+        const alvo = await criarAlvo("Fundos", 2000);
+        const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+        await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+        await criarAtivoMapeadoComAlvo("FUNDO-XPTO", alvo.id);
+        await criarAjuste("FUNDO-XPTO", sessaoAnterior.id, 300_000);
+        const aporte1 = await criarAporteParaTeste(sessaoAnterior.id, 10_000);
+        const aporte2 = await criarAporteParaTeste(sessaoAnterior.id, 15_000);
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte1.id,
+          chaveExport: "FUNDO-XPTO",
+          valorIncrementoCentavos: 10_000,
+        });
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte2.id,
+          chaveExport: "FUNDO-XPTO",
+          valorIncrementoCentavos: 15_000,
+        });
+
+        const revisao = await posicaoManualService.montarRevisaoImport();
+
+        expect(revisao.ajustesRevisao).toHaveLength(1);
+        expect(revisao.ajustesRevisao[0]).toMatchObject({
+          valorInvestidoCentavosAnterior: 300_000,
+          incrementoPendenteCentavos: 25_000,
+          valorInvestidoCentavosSugerido: 325_000,
+        });
+      });
+
+      it("NÃO soma pendências já aplicadas (aplicado = true) — só o histórico ainda pendente entra na soma", async () => {
+        const alvo = await criarAlvo("Pós-fixado", 3000);
+        const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+        const sessaoQueAplicouAntes = await criarSessao("2026-05", "2026-05-28", "SUBSTITUIDO");
+        await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+        const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+        await criarSnapshot(posicaoManual.id, sessaoAnterior.id, 500_000, 520_000);
+        const aporteJaAplicado = await criarAporteParaTeste(sessaoAnterior.id, 99_000);
+        const aportePendente = await criarAporteParaTeste(sessaoAnterior.id, 20_000);
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporteJaAplicado.id,
+          posicaoManualId: posicaoManual.id,
+          valorIncrementoCentavos: 99_000,
+          aplicado: true,
+          sessaoAplicacaoId: sessaoQueAplicouAntes.id,
+        });
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aportePendente.id,
+          posicaoManualId: posicaoManual.id,
+          valorIncrementoCentavos: 20_000,
+        });
+
+        const revisao = await posicaoManualService.montarRevisaoImport();
+
+        expect(revisao.posicoesManuaisRevisao[0]).toMatchObject({
+          valorInvestidoCentavosAnterior: 500_000,
+          incrementoPendenteCentavos: 20_000,
+          valorInvestidoCentavosSugerido: 520_000,
+        });
+      });
+
+      it("pendência ambígua (chave_export e posicao_manual_id ambos null) NÃO é somada a nenhuma posição/ajuste específico", async () => {
+        const alvo = await criarAlvo("Pós-fixado", 3000);
+        const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+        await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+        const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+        await criarSnapshot(posicaoManual.id, sessaoAnterior.id, 500_000, 520_000);
+        const aporte = await criarAporteParaTeste(sessaoAnterior.id, 80_000);
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte.id,
+          valorIncrementoCentavos: 80_000,
+          // chave_export e posicao_manual_id ambos ausentes = pendência
+          // ambígua de alvo (motor-integracao.md §3.2, n >= 2 histórico).
+        });
+
+        const revisao = await posicaoManualService.montarRevisaoImport();
+
+        expect(revisao.posicoesManuaisRevisao[0]).toMatchObject({
+          valorInvestidoCentavosAnterior: 500_000,
+          incrementoPendenteCentavos: 0,
+          valorInvestidoCentavosSugerido: 500_000,
+        });
+      });
+
+      it("chamar montarRevisaoImport (só pré-visualização) NUNCA marca aplicado = true — a leitura não muda o estado do banco (research.md R4)", async () => {
+        const alvo = await criarAlvo("Pós-fixado", 3000);
+        const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+        await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+        const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+        await criarSnapshot(posicaoManual.id, sessaoAnterior.id, 500_000, 520_000);
+        const aporte = await criarAporteParaTeste(sessaoAnterior.id, 20_000);
+        const pendencia = await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte.id,
+          posicaoManualId: posicaoManual.id,
+          valorIncrementoCentavos: 20_000,
+        });
+
+        await posicaoManualService.montarRevisaoImport();
+
+        const noBanco = await prisma.incremento_valor_investido_pendente.findUniqueOrThrow({
+          where: { id: pendencia.id },
+        });
+        expect(noBanco.aplicado).toBe(false);
+        expect(noBanco.sessao_aplicacao_id).toBeNull();
+      });
+
+      it("reimport abandonado (chamar montarRevisaoImport repetidas vezes, simulando reabrir a tela de revisão) não perde nem duplica pendências — mesmo resultado sempre, idempotência de leitura (research.md R4)", async () => {
+        const alvo = await criarAlvo("Pós-fixado", 3000);
+        const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+        await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+        const posicaoManual = await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+        await criarSnapshot(posicaoManual.id, sessaoAnterior.id, 500_000, 520_000);
+        const aporte1 = await criarAporteParaTeste(sessaoAnterior.id, 30_000);
+        const aporte2 = await criarAporteParaTeste(sessaoAnterior.id, 40_000);
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte1.id,
+          posicaoManualId: posicaoManual.id,
+          valorIncrementoCentavos: 30_000,
+        });
+        await criarPendenciaIncremento({
+          alvoId: alvo.id,
+          aporteId: aporte2.id,
+          posicaoManualId: posicaoManual.id,
+          valorIncrementoCentavos: 40_000,
+        });
+
+        // Simula: usuário abre a tela de revisão de um import (preview 1),
+        // abandona sem confirmar, e reabre com um novo import (preview 2).
+        const primeiraPreVisualizacao = await posicaoManualService.montarRevisaoImport();
+        const segundaPreVisualizacao = await posicaoManualService.montarRevisaoImport();
+
+        expect(primeiraPreVisualizacao).toEqual(segundaPreVisualizacao);
+        expect(primeiraPreVisualizacao.posicoesManuaisRevisao[0]).toMatchObject({
+          incrementoPendenteCentavos: 70_000,
+          valorInvestidoCentavosSugerido: 570_000,
+        });
+        // Nenhuma linha de pendência foi criada/perdida por só pré-visualizar.
+        expect(await prisma.incremento_valor_investido_pendente.count()).toBe(2);
+        expect(
+          await prisma.incremento_valor_investido_pendente.count({ where: { aplicado: false } }),
+        ).toBe(2);
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // T024 (User Story 4, FR-013, contracts/motor-integracao.md §4.3,
+  // data-model.md "Fluxo técnico" passo 4, research.md R4/R5): função de
+  // APLICAÇÃO/CONSUMO real das pendências, chamada pela transação de
+  // `confirmarImport` (T026, escopo de `src/services/import-service.ts` +
+  // extensão deste arquivo — NÃO implementada ainda).
+  //
+  // Shape escolhido para T026 implementar EXATAMENTE isto (nome de função e
+  // formato usados nestes testes — documentado aqui para o agente de T026):
+  //
+  //   export interface MarcarPendenciasComoAplicadasInput {
+  //     pendenciaIds: string[];
+  //     sessaoAplicacaoId: string;
+  //   }
+  //
+  //   export async function marcarPendenciasComoAplicadas(
+  //     input: MarcarPendenciasComoAplicadasInput,
+  //   ): Promise<{ quantidadeAtualizada: number }>
+  //
+  // Racional do shape: recebe a lista JÁ RESOLVIDA de ids (a mesma lista que
+  // `confirmarImport` calcula ao somar `posicoesManuaisRevisao`/
+  // `ajustesRevisao`/pendências ambíguas de alvo antes de persistir os
+  // `posicao_manual_valor`/`ajuste_valor_investido` da nova sessão) — a
+  // função não recalcula elegibilidade nem decide "quais" pendências
+  // marcar, só executa o UPDATE em lote dentro da MESMA transação Prisma de
+  // confirmação (data-model.md, Fluxo técnico, passo 4). Deve ser chamável
+  // com `tx` (cliente de transação) em vez do client global `prisma` — mas
+  // como isso é detalhe de implementação de T026 (import-service.ts passa
+  // `tx.incremento_valor_investido_pendente` ou similar), os testes aqui
+  // usam o client global `prisma` (mesmo padrão dos demais testes deste
+  // arquivo) e não fixam a assinatura de transação.
+  //
+  // `marcarPendenciasComoAplicadas` ainda NÃO existe em
+  // src/services/posicao-manual-service.ts neste ponto — os testes abaixo
+  // devem FALHAR agora (TDD), sem quebrar nenhum teste já existente.
+  // ---------------------------------------------------------------------
+  describe("marcarPendenciasComoAplicadas (T024, futuro T026)", () => {
+    it("marca aplicado = true e grava sessao_aplicacao_id nas pendências informadas", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+      const sessaoNova = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú 120% CDI 2029",
+          alvo_id: alvo.id,
+          ativo: true,
+        },
+      });
+      const aporte = await criarAporteParaTeste(sessaoAnterior.id, 20_000);
+      const pendencia = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        posicaoManualId: posicaoManual.id,
+        valorIncrementoCentavos: 20_000,
+      });
+
+      const resultado = await posicaoManualService.marcarPendenciasComoAplicadas({
+        pendenciaIds: [pendencia.id],
+        sessaoAplicacaoId: sessaoNova.id,
+      });
+
+      expect(resultado.quantidadeAtualizada).toBe(1);
+
+      const noBanco = await prisma.incremento_valor_investido_pendente.findUniqueOrThrow({
+        where: { id: pendencia.id },
+      });
+      expect(noBanco.aplicado).toBe(true);
+      expect(noBanco.sessao_aplicacao_id).toBe(sessaoNova.id);
+    });
+
+    it("marca APENAS as pendências informadas — outras pendências pendentes do mesmo alvo/posição permanecem aplicado = false", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+      const sessaoNova = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú 120% CDI 2029",
+          alvo_id: alvo.id,
+          ativo: true,
+        },
+      });
+      const aporte1 = await criarAporteParaTeste(sessaoAnterior.id, 20_000);
+      const aporte2 = await criarAporteParaTeste(sessaoAnterior.id, 30_000);
+      const pendenciaMarcada = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte1.id,
+        posicaoManualId: posicaoManual.id,
+        valorIncrementoCentavos: 20_000,
+      });
+      const pendenciaNaoMarcada = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte2.id,
+        posicaoManualId: posicaoManual.id,
+        valorIncrementoCentavos: 30_000,
+      });
+
+      await posicaoManualService.marcarPendenciasComoAplicadas({
+        pendenciaIds: [pendenciaMarcada.id],
+        sessaoAplicacaoId: sessaoNova.id,
+      });
+
+      const marcada = await prisma.incremento_valor_investido_pendente.findUniqueOrThrow({
+        where: { id: pendenciaMarcada.id },
+      });
+      const naoMarcada = await prisma.incremento_valor_investido_pendente.findUniqueOrThrow({
+        where: { id: pendenciaNaoMarcada.id },
+      });
+      expect(marcada.aplicado).toBe(true);
+      expect(naoMarcada.aplicado).toBe(false);
+      expect(naoMarcada.sessao_aplicacao_id).toBeNull();
+    });
+
+    it("marca uma pendência AMBÍGUA (chave_export e posicao_manual_id ambos null) integralmente, mesmo sem nenhuma validação de distribuição/fechamento 100% (research.md R5, decisão binária)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+      const sessaoNova = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      const aporte = await criarAporteParaTeste(sessaoAnterior.id, 80_000);
+      // Pendência ambígua de alvo (n >= 2 histórico, motor-integracao.md
+      // §3.2) — o usuário, na tela de revisão, pode ter distribuído só
+      // PARTE dos R$ 800,00 entre os campos de valor_investido do alvo (ex.:
+      // só R$ 500,00 alocados manualmente). Não há campo de "valor
+      // distribuído" no schema para validar — a marcação é binária e
+      // integral por decisão de research.md R5.
+      const pendenciaAmbigua = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        valorIncrementoCentavos: 80_000,
+      });
+
+      const resultado = await posicaoManualService.marcarPendenciasComoAplicadas({
+        pendenciaIds: [pendenciaAmbigua.id],
+        sessaoAplicacaoId: sessaoNova.id,
+      });
+
+      expect(resultado.quantidadeAtualizada).toBe(1);
+      const noBanco = await prisma.incremento_valor_investido_pendente.findUniqueOrThrow({
+        where: { id: pendenciaAmbigua.id },
+      });
+      expect(noBanco.aplicado).toBe(true);
+      expect(noBanco.sessao_aplicacao_id).toBe(sessaoNova.id);
+      // Nenhuma reconciliação de valor é feita/exigida — a linha some da
+      // fila de pendências independentemente de "resto não alocado".
+    });
+
+    it("uma pendência marcada aplicado = true NÃO é reoferecida — chamar montarRevisaoImport depois já não soma mais essa pendência (FR-013, mesmo padrão de dividendo.aporte_id)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+      const sessaoNova = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú 120% CDI 2029",
+          alvo_id: alvo.id,
+          ativo: true,
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManual.id,
+          sessao_import_id: sessaoAnterior.id,
+          valor_investido_centavos: 500_000,
+          valor_atual_centavos: 520_000,
+        },
+      });
+      const aporte = await criarAporteParaTeste(sessaoAnterior.id, 20_000);
+      const pendencia = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        posicaoManualId: posicaoManual.id,
+        valorIncrementoCentavos: 20_000,
+      });
+
+      await posicaoManualService.marcarPendenciasComoAplicadas({
+        pendenciaIds: [pendencia.id],
+        sessaoAplicacaoId: sessaoNova.id,
+      });
+
+      const revisaoAposAplicar = await posicaoManualService.montarRevisaoImport();
+      // Depois de aplicada, a soma deve ser 0 outra vez (pendência
+      // consumida) — este teste depende da extensão de montarRevisaoImport
+      // testada acima (T026 implementa ambas juntas para este teste passar).
+      expect(revisaoAposAplicar.posicoesManuaisRevisao[0]).toMatchObject({
+        incrementoPendenteCentavos: 0,
+      });
+    });
+
+    it("não valida FKs mutuamente exclusivos nem qualquer regra de negócio — só faz o UPDATE em lote pelos ids informados (função utilitária pura de escrita)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const sessaoAnterior = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+      const sessaoNova = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú 120% CDI 2029",
+          alvo_id: alvo.id,
+          ativo: true,
+        },
+      });
+      const aporte1 = await criarAporteParaTeste(sessaoAnterior.id, 20_000);
+      const aporte2 = await criarAporteParaTeste(sessaoAnterior.id, 80_000);
+      const pendenciaExclusiva = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte1.id,
+        posicaoManualId: posicaoManual.id,
+        valorIncrementoCentavos: 20_000,
+      });
+      const pendenciaAmbigua = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte2.id,
+        valorIncrementoCentavos: 80_000,
+      });
+
+      const resultado = await posicaoManualService.marcarPendenciasComoAplicadas({
+        pendenciaIds: [pendenciaExclusiva.id, pendenciaAmbigua.id],
+        sessaoAplicacaoId: sessaoNova.id,
+      });
+
+      expect(resultado.quantidadeAtualizada).toBe(2);
+      expect(
+        await prisma.incremento_valor_investido_pendente.count({
+          where: { aplicado: true, sessao_aplicacao_id: sessaoNova.id },
+        }),
+      ).toBe(2);
+    });
+  });
+
+  describe("montarIncrementosAmbiguosPendentes (T026, motor-integracao.md §4.2)", () => {
+    it("retorna [] quando não há nenhuma pendência ambígua (nenhuma linha com chave_export e posicao_manual_id ambos null)", async () => {
+      const resultado = await posicaoManualService.montarIncrementosAmbiguosPendentes();
+      expect(resultado).toEqual([]);
+    });
+
+    it("agrega, por alvo_id, a soma de MÚLTIPLAS pendências ambíguas ainda não aplicadas do mesmo alvo", async () => {
+      const alvo = await criarAlvo("Multimercado ambíguo", 5000);
+      const sessao = await criarSessao("2026-06", "2026-06-28");
+      const aporte1 = await criarAporteParaTeste(sessao.id, 30_000);
+      const aporte2 = await criarAporteParaTeste(sessao.id, 50_000);
+      await criarPendenciaIncremento({ alvoId: alvo.id, aporteId: aporte1.id, valorIncrementoCentavos: 30_000 });
+      await criarPendenciaIncremento({ alvoId: alvo.id, aporteId: aporte2.id, valorIncrementoCentavos: 50_000 });
+
+      const resultado = await posicaoManualService.montarIncrementosAmbiguosPendentes();
+
+      expect(resultado).toHaveLength(1);
+      expect(resultado[0]).toMatchObject({
+        alvoId: alvo.id,
+        nomeAlvo: "Multimercado ambíguo",
+        valorPendenteCentavos: 80_000,
+      });
+    });
+
+    it("NÃO soma pendências não-ambíguas (com chave_export OU posicao_manual_id preenchido) à agregação", async () => {
+      const alvo = await criarAlvo("Alvo misto", 5000);
+      const sessao = await criarSessao("2026-06", "2026-06-28");
+      const aporte = await criarAporteParaTeste(sessao.id, 100_000);
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-X", instituicao: "Itaú", descricao: "CDB X", alvo_id: alvo.id },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PRIO3", alvo_id: alvo.id, fora_da_carteira: false },
+      });
+      await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        posicaoManualId: posicaoManual.id,
+        valorIncrementoCentavos: 20_000,
+      });
+      await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        chaveExport: "PRIO3",
+        valorIncrementoCentavos: 30_000,
+      });
+      await criarPendenciaIncremento({ alvoId: alvo.id, aporteId: aporte.id, valorIncrementoCentavos: 40_000 });
+
+      const resultado = await posicaoManualService.montarIncrementosAmbiguosPendentes();
+
+      expect(resultado).toHaveLength(1);
+      expect(resultado[0].valorPendenteCentavos).toBe(40_000);
+    });
+
+    it("NÃO soma pendências ambíguas já aplicadas (aplicado = true)", async () => {
+      const alvo = await criarAlvo("Alvo já consumido", 5000);
+      const sessao = await criarSessao("2026-06", "2026-06-28");
+      const sessaoAplicacao = await criarSessao("2026-07", "2026-07-28");
+      const aporte = await criarAporteParaTeste(sessao.id, 60_000);
+      await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        valorIncrementoCentavos: 60_000,
+        aplicado: true,
+        sessaoAplicacaoId: sessaoAplicacao.id,
+      });
+
+      const resultado = await posicaoManualService.montarIncrementosAmbiguosPendentes();
+      expect(resultado).toEqual([]);
+    });
+
+    it("elegiveis inclui posicao_manual ATIVA vinculada ao alvo e EXCLUI posicao_manual encerrada (ativo=false)", async () => {
+      const alvo = await criarAlvo("Alvo elegiveis", 5000);
+      const sessao = await criarSessao("2026-06", "2026-06-28");
+      const aporte = await criarAporteParaTeste(sessao.id, 50_000);
+      await criarPendenciaIncremento({ alvoId: alvo.id, aporteId: aporte.id, valorIncrementoCentavos: 50_000 });
+
+      const posicaoAtiva = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ATIVA",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú Ativo",
+          alvo_id: alvo.id,
+          ativo: true,
+        },
+      });
+      await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ENCERRADA",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú Encerrado",
+          alvo_id: alvo.id,
+          ativo: false,
+        },
+      });
+
+      const resultado = await posicaoManualService.montarIncrementosAmbiguosPendentes();
+
+      expect(resultado).toHaveLength(1);
+      expect(resultado[0].elegiveis).toEqual([
+        { tipo: "posicaoManual", id: posicaoAtiva.id, rotulo: "CDB Itaú Ativo (Itaú)" },
+      ]);
+    });
+
+    it("elegiveis inclui chave_export vinculada ao alvo com histórico de ajuste_valor_investido e EXCLUI chave_export sem histórico", async () => {
+      const alvo = await criarAlvo("Alvo elegiveis ajuste", 5000);
+      const sessao = await criarSessao("2026-06", "2026-06-28");
+      const aporte = await criarAporteParaTeste(sessao.id, 50_000);
+      await criarPendenciaIncremento({ alvoId: alvo.id, aporteId: aporte.id, valorIncrementoCentavos: 50_000 });
+
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PRIO3", alvo_id: alvo.id, fora_da_carteira: false },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "VALE3", alvo_id: alvo.id, fora_da_carteira: false },
+      });
+      // Só PRIO3 tem histórico de ajuste — VALE3 está vinculado ao alvo mas
+      // nunca teve um ajuste_valor_investido criado.
+      await prisma.ajuste_valor_investido.create({
+        data: { chave_export: "PRIO3", sessao_import_id: sessao.id, valor_investido_corrigido_centavos: 90_000 },
+      });
+
+      const resultado = await posicaoManualService.montarIncrementosAmbiguosPendentes();
+
+      expect(resultado).toHaveLength(1);
+      expect(resultado[0].elegiveis).toEqual([{ tipo: "ajuste", id: "PRIO3", rotulo: "PRIO3" }]);
+    });
+
+    it("elegiveis EXCLUI chave_export fora_da_carteira ou ignorar_no_import, mesmo com histórico de ajuste", async () => {
+      const alvo = await criarAlvo("Alvo elegiveis excluidos", 5000);
+      const sessao = await criarSessao("2026-06", "2026-06-28");
+      const aporte = await criarAporteParaTeste(sessao.id, 50_000);
+      await criarPendenciaIncremento({ alvoId: alvo.id, aporteId: aporte.id, valorIncrementoCentavos: 50_000 });
+
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "FORA3", alvo_id: alvo.id, fora_da_carteira: true },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "IGNORADA3", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: true },
+      });
+      await prisma.ajuste_valor_investido.createMany({
+        data: [
+          { chave_export: "FORA3", sessao_import_id: sessao.id, valor_investido_corrigido_centavos: 10_000 },
+          { chave_export: "IGNORADA3", sessao_import_id: sessao.id, valor_investido_corrigido_centavos: 10_000 },
+        ],
+      });
+
+      const resultado = await posicaoManualService.montarIncrementosAmbiguosPendentes();
+
+      expect(resultado).toHaveLength(1);
+      expect(resultado[0].elegiveis).toEqual([]);
+    });
+
+    it("elegiveis mistos: uma posicao_manual ativa + um chave_export com histórico, ambos do mesmo alvo, aparecem juntos", async () => {
+      const alvo = await criarAlvo("Alvo elegiveis mistos", 5000);
+      const sessao = await criarSessao("2026-06", "2026-06-28");
+      const aporte = await criarAporteParaTeste(sessao.id, 80_000);
+      await criarPendenciaIncremento({ alvoId: alvo.id, aporteId: aporte.id, valorIncrementoCentavos: 80_000 });
+
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-MISTO", instituicao: "Itaú", descricao: "CDB Misto", alvo_id: alvo.id, ativo: true },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PRIO3", alvo_id: alvo.id, fora_da_carteira: false },
+      });
+      await prisma.ajuste_valor_investido.create({
+        data: { chave_export: "PRIO3", sessao_import_id: sessao.id, valor_investido_corrigido_centavos: 90_000 },
+      });
+
+      const resultado = await posicaoManualService.montarIncrementosAmbiguosPendentes();
+
+      expect(resultado).toHaveLength(1);
+      expect(resultado[0].elegiveis).toEqual(
+        expect.arrayContaining([
+          { tipo: "posicaoManual", id: posicaoManual.id, rotulo: "CDB Misto (Itaú)" },
+          { tipo: "ajuste", id: "PRIO3", rotulo: "PRIO3" },
+        ]),
+      );
+      expect(resultado[0].elegiveis).toHaveLength(2);
+    });
+
+    it("múltiplos alvos com pendência ambígua retornam itens separados, cada um com sua própria agregação e lista de elegiveis", async () => {
+      const alvo1 = await criarAlvo("Alvo 1", 3000);
+      const alvo2 = await criarAlvo("Alvo 2", 3000);
+      const sessao = await criarSessao("2026-06", "2026-06-28");
+      const aporte = await criarAporteParaTeste(sessao.id, 100_000);
+      await criarPendenciaIncremento({ alvoId: alvo1.id, aporteId: aporte.id, valorIncrementoCentavos: 25_000 });
+      await criarPendenciaIncremento({ alvoId: alvo2.id, aporteId: aporte.id, valorIncrementoCentavos: 75_000 });
+      const posicaoManual1 = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-1", instituicao: "Itaú", descricao: "CDB Alvo 1", alvo_id: alvo1.id, ativo: true },
+      });
+
+      const resultado = await posicaoManualService.montarIncrementosAmbiguosPendentes();
+
+      expect(resultado).toHaveLength(2);
+      const porAlvoId = new Map(resultado.map((r) => [r.alvoId, r]));
+      expect(porAlvoId.get(alvo1.id)).toMatchObject({
+        nomeAlvo: "Alvo 1",
+        valorPendenteCentavos: 25_000,
+        elegiveis: [{ tipo: "posicaoManual", id: posicaoManual1.id, rotulo: "CDB Alvo 1 (Itaú)" }],
+      });
+      expect(porAlvoId.get(alvo2.id)).toMatchObject({
+        nomeAlvo: "Alvo 2",
+        valorPendenteCentavos: 75_000,
+        elegiveis: [],
+      });
     });
   });
 });

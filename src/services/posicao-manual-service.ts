@@ -339,9 +339,15 @@ export interface PosicaoManualRevisaoItem {
   nomeAlvo: string;
   /** 0 se não houver `posicao_manual_valor` anterior conhecido (posição nova, sem carry-forward). */
   valorInvestidoCentavosAnterior: number;
-  /** Sempre 0 nesta fase — US4 (T023-T026) passa a somar `incremento_valor_investido_pendente` aqui. */
+  /**
+   * Soma de TODAS as linhas `incremento_valor_investido_pendente` ainda não
+   * aplicadas (`aplicado = false`) vinculadas a esta `posicao_manual_id`
+   * (T026, motor-integracao.md §4.1) — nunca só a mais recente; se dois
+   * aportes foram registrados antes deste import, ambos se acumulam aqui.
+   * 0 se não houver nenhuma pendência aplicável.
+   */
   incrementoPendenteCentavos: number;
-  /** = valorInvestidoCentavosAnterior + incrementoPendenteCentavos (= Anterior, por ora). */
+  /** = valorInvestidoCentavosAnterior + incrementoPendenteCentavos. */
   valorInvestidoCentavosSugerido: number;
   /** = valor_atual do snapshot anterior; 0 se não houver snapshot anterior. */
   valorAtualCentavosSugerido: number;
@@ -354,8 +360,23 @@ export interface AjusteRevisaoItem {
   /** true = nenhum valor preenchido ainda (FR-009) — ajuste_valor_investido mais recente tem valor null. */
   primeiraVez: boolean;
   valorInvestidoCentavosAnterior: number | null;
-  /** Sempre 0 nesta fase — mesmo racional de PosicaoManualRevisaoItem. */
+  /**
+   * Soma de TODAS as linhas `incremento_valor_investido_pendente` ainda não
+   * aplicadas (`aplicado = false`) vinculadas a este `chave_export` (T026,
+   * motor-integracao.md §4.1) — mesmo racional de `PosicaoManualRevisaoItem`.
+   * 0 se não houver nenhuma pendência aplicável.
+   */
   incrementoPendenteCentavos: number;
+  /**
+   * `valorInvestidoCentavosAnterior + incrementoPendenteCentavos` quando
+   * `valorInvestidoCentavosAnterior` não é null. Quando `primeiraVez` (anterior
+   * null) e existe incremento pendente > 0, o campo é pré-preenchido com o
+   * próprio incremento (o "anterior" implícito de um ajuste nunca preenchido
+   * é 0) — decisão de leitura de spec (motor-integracao.md §4.1 não cobre
+   * este cruzamento explicitamente); continua null só quando não há
+   * NENHUMA pendência aplicável, preservando o aviso visual de "vazio"
+   * (FR-009) nesse caso.
+   */
   valorInvestidoCentavosSugerido: number | null;
 }
 
@@ -381,9 +402,13 @@ export interface RevisaoImportOutput {
  * a posição/ajuste não foi tocado num import intermediário) — mesmo critério
  * já usado por `listarPosicoesManuaisAtivas`/`listarAjustesAtivos` acima.
  *
- * `incrementoPendenteCentavos` sempre 0 nesta fase (US4/T023-T026, fora do
- * escopo desta task) — mantido no shape só para não quebrar o contrato
- * quando a soma de `incremento_valor_investido_pendente` for implementada.
+ * `incrementoPendenteCentavos` (T026, motor-integracao.md §4.1) soma TODAS
+ * as linhas `incremento_valor_investido_pendente` com `aplicado = false`
+ * vinculadas à `posicao_manual_id`/`chave_export` correspondente — nunca só
+ * a mais recente. A marcação `aplicado = true` (consumo) NÃO acontece aqui
+ * (função puramente de leitura) — é responsabilidade de
+ * `marcarPendenciasComoAplicadas`, chamada por `confirmarImport` na mesma
+ * transação que persiste a revisão (motor-integracao.md §4.3/§4.4).
  */
 export async function montarRevisaoImport(): Promise<RevisaoImportOutput> {
   const posicoesManuaisAtivas = await prisma.posicao_manual.findMany({
@@ -410,11 +435,30 @@ export async function montarRevisaoImport(): Promise<RevisaoImportOutput> {
     }
   }
 
+  // T026 (motor-integracao.md §4.1): soma de TODAS as pendências não
+  // aplicadas por posicao_manual_id — nunca só a mais recente.
+  const idsPosicoesManuais = posicoesManuaisAtivas.map((p) => p.id);
+  const pendentesPosicoesManuais =
+    idsPosicoesManuais.length === 0
+      ? []
+      : await prisma.incremento_valor_investido_pendente.findMany({
+          where: { aplicado: false, posicao_manual_id: { in: idsPosicoesManuais } },
+        });
+  const incrementoPorPosicaoManualId = new Map<string, number>();
+  for (const pendente of pendentesPosicoesManuais) {
+    const chave = pendente.posicao_manual_id as string;
+    incrementoPorPosicaoManualId.set(
+      chave,
+      (incrementoPorPosicaoManualId.get(chave) ?? 0) + pendente.valor_incremento_centavos,
+    );
+  }
+
   const posicoesManuaisRevisao: PosicaoManualRevisaoItem[] = posicoesManuaisAtivas.map(
     (posicaoManual) => {
       const snapshot = ultimoSnapshotPorPosicao.get(posicaoManual.id);
       const valorInvestidoCentavosAnterior = snapshot?.valor_investido_centavos ?? 0;
       const valorAtualCentavosSugerido = snapshot?.valor_atual_centavos ?? 0;
+      const incrementoPendenteCentavos = incrementoPorPosicaoManualId.get(posicaoManual.id) ?? 0;
       return {
         posicaoManualId: posicaoManual.id,
         chaveManual: posicaoManual.chave_manual,
@@ -423,8 +467,8 @@ export async function montarRevisaoImport(): Promise<RevisaoImportOutput> {
         alvoId: posicaoManual.alvo_id,
         nomeAlvo: posicaoManual.alvo?.nome ?? posicaoManual.alvo_id,
         valorInvestidoCentavosAnterior,
-        incrementoPendenteCentavos: 0,
-        valorInvestidoCentavosSugerido: valorInvestidoCentavosAnterior,
+        incrementoPendenteCentavos,
+        valorInvestidoCentavosSugerido: valorInvestidoCentavosAnterior + incrementoPendenteCentavos,
         valorAtualCentavosSugerido,
       };
     },
@@ -454,18 +498,44 @@ export async function montarRevisaoImport(): Promise<RevisaoImportOutput> {
       }
     }
 
+    // T026 (motor-integracao.md §4.1): soma de TODAS as pendências não
+    // aplicadas por chave_export — nunca só a mais recente.
+    const chavesElegiveis = ativosMapeadosElegiveis.map((a) => a.chave_export);
+    const pendentesAjustes =
+      chavesElegiveis.length === 0
+        ? []
+        : await prisma.incremento_valor_investido_pendente.findMany({
+            where: { aplicado: false, chave_export: { in: chavesElegiveis } },
+          });
+    const incrementoPorChaveExport = new Map<string, number>();
+    for (const pendente of pendentesAjustes) {
+      const chave = pendente.chave_export as string;
+      incrementoPorChaveExport.set(
+        chave,
+        (incrementoPorChaveExport.get(chave) ?? 0) + pendente.valor_incremento_centavos,
+      );
+    }
+
     ajustesRevisao = ativosMapeadosElegiveis.map((ativoMapeado) => {
       const ultimo = ultimoAjustePorChave.get(ativoMapeado.chave_export);
       const valorAnterior = ultimo?.valor_investido_corrigido_centavos ?? null;
       const primeiraVez = valorAnterior === null;
+      const incrementoPendenteCentavos =
+        incrementoPorChaveExport.get(ativoMapeado.chave_export) ?? 0;
+      const valorInvestidoCentavosSugerido =
+        valorAnterior !== null
+          ? valorAnterior + incrementoPendenteCentavos
+          : incrementoPendenteCentavos > 0
+            ? incrementoPendenteCentavos
+            : null;
       return {
         chaveExport: ativoMapeado.chave_export,
         alvoId: ativoMapeado.alvo_id,
         nomeAlvo: ativoMapeado.alvo?.nome ?? ativoMapeado.alvo_id,
         primeiraVez,
         valorInvestidoCentavosAnterior: valorAnterior,
-        incrementoPendenteCentavos: 0,
-        valorInvestidoCentavosSugerido: valorAnterior,
+        incrementoPendenteCentavos,
+        valorInvestidoCentavosSugerido,
       };
     });
   }
@@ -484,8 +554,8 @@ export interface PosicaoManualEAjustesOutput {
  * §posicoes-manuais.ts `listarPosicoesManuaisEAjustes`. Reaproveita o mesmo
  * carry-forward de `montarRevisaoImport` (mesma regra de "snapshot/ajuste
  * mais recente conhecido"), só que sem o campo `incrementoPendenteCentavos`
- * (sempre 0 nesta fase, e conceitualmente não faz sentido fora do contexto
- * de uma revisão de import em andamento).
+ * (não faz sentido fora do contexto de uma revisão de import em andamento —
+ * essa listagem é "o que existe agora", não uma pré-visualização de import).
  *
  * Nota (T019): `listarPosicoesManuaisAtivas`/`listarAjustesAtivos` (US1/US2)
  * permanecem inalteradas neste arquivo — ainda usadas por
@@ -497,11 +567,178 @@ export interface PosicaoManualEAjustesOutput {
 export async function listarPosicoesManuaisEAjustes(): Promise<PosicaoManualEAjustesOutput> {
   const { posicoesManuaisRevisao, ajustesRevisao } = await montarRevisaoImport();
   return {
-    posicoesManuais: posicoesManuaisRevisao.map(
-      ({ incrementoPendenteCentavos: _incrementoPendenteCentavos, ...resto }) => resto,
-    ),
-    ajustes: ajustesRevisao.map(
-      ({ incrementoPendenteCentavos: _incrementoPendenteCentavos, ...resto }) => resto,
-    ),
+    posicoesManuais: posicoesManuaisRevisao.map((item) => ({
+      posicaoManualId: item.posicaoManualId,
+      chaveManual: item.chaveManual,
+      instituicao: item.instituicao,
+      descricao: item.descricao,
+      alvoId: item.alvoId,
+      nomeAlvo: item.nomeAlvo,
+      valorInvestidoCentavosAnterior: item.valorInvestidoCentavosAnterior,
+      valorInvestidoCentavosSugerido: item.valorInvestidoCentavosSugerido,
+      valorAtualCentavosSugerido: item.valorAtualCentavosSugerido,
+    })),
+    ajustes: ajustesRevisao.map((item) => ({
+      chaveExport: item.chaveExport,
+      alvoId: item.alvoId,
+      nomeAlvo: item.nomeAlvo,
+      primeiraVez: item.primeiraVez,
+      valorInvestidoCentavosAnterior: item.valorInvestidoCentavosAnterior,
+      valorInvestidoCentavosSugerido: item.valorInvestidoCentavosSugerido,
+    })),
   };
+}
+
+export interface IncrementoAmbiguoPendenteItem {
+  alvoId: string;
+  nomeAlvo: string;
+  /** Soma de TODAS as pendências ambíguas não aplicadas deste alvo (motor-integracao.md §4.2). */
+  valorPendenteCentavos: number;
+  /** Destinos possíveis de distribuição manual pela UI (contracts/server-actions.md, campo `elegiveis`). */
+  elegiveis: { tipo: "posicaoManual" | "ajuste"; id: string; rotulo: string }[];
+}
+
+/**
+ * Agregação de `incremento_valor_investido_pendente` AMBÍGUOS (`chave_export
+ * IS NULL AND posicao_manual_id IS NULL`, `aplicado = false`) por `alvo_id`,
+ * para a seção "destaque de pendência ambígua" da revisão de import (T026,
+ * motor-integracao.md §4.2, contracts/server-actions.md §import.ts campo
+ * `incrementosAmbiguosPendentes`). Função de leitura pura, sem argumentos —
+ * mesmo padrão de `montarRevisaoImport`.
+ *
+ * `elegiveis` reaproveita a MESMA definição de "ativo elegível" de
+ * `src/services/aporte-service.ts` (`gerarIncrementosPendentes`, §3.1 do
+ * contrato): (a) `posicao_manual` ativas vinculadas ao alvo; (b)
+ * `chave_export` vinculado ao alvo (não fora-da-carteira, não ignorado) com
+ * ao menos um `ajuste_valor_investido` histórico. A QUERY é duplicada aqui
+ * (não importada de `aporte-service.ts`) porque são camadas de leitura
+ * distintas — `aporte-service.ts` calcula elegibilidade DENTRO da transação
+ * de `registrarAporte` (usa o client `tx`, roda para 1 alvo por vez, no
+ * momento em que o incremento é GERADO); esta função é leitura pura fora de
+ * qualquer transação (usa o client `prisma` global, roda para TODOS os
+ * alvos com pendência ambígua de uma vez, no momento em que o incremento é
+ * CONSUMIDO/exibido). Extrair uma função compartilhada exigiria um client
+ * genérico (`tx | typeof prisma`) atravessando as duas camadas de serviço
+ * para uma query pequena (2 `findMany` + 1 `distinct`) — mais complexidade
+ * de acoplamento entre os dois serviços do que a duplicação em si. Se a
+ * regra de elegibilidade mudar no futuro, os dois lugares precisam ser
+ * atualizados juntos (documentado aqui como o custo aceito desta decisão).
+ */
+export async function montarIncrementosAmbiguosPendentes(): Promise<IncrementoAmbiguoPendenteItem[]> {
+  const pendentesAmbiguos = await prisma.incremento_valor_investido_pendente.findMany({
+    where: { aplicado: false, chave_export: null, posicao_manual_id: null },
+  });
+  if (pendentesAmbiguos.length === 0) return [];
+
+  const valorPendentePorAlvoId = new Map<string, number>();
+  for (const pendente of pendentesAmbiguos) {
+    valorPendentePorAlvoId.set(
+      pendente.alvo_id,
+      (valorPendentePorAlvoId.get(pendente.alvo_id) ?? 0) + pendente.valor_incremento_centavos,
+    );
+  }
+  const alvoIds = [...valorPendentePorAlvoId.keys()];
+
+  const [alvos, posicoesManuaisElegiveis, ativosMapeadosDoAlvo] = await Promise.all([
+    prisma.alvo.findMany({ where: { id: { in: alvoIds } } }),
+    prisma.posicao_manual.findMany({
+      where: { alvo_id: { in: alvoIds }, ativo: true },
+    }),
+    prisma.ativo_mapeado.findMany({
+      where: { alvo_id: { in: alvoIds }, fora_da_carteira: false, ignorar_no_import: false },
+    }),
+  ]);
+  const nomePorAlvoId = new Map(alvos.map((a) => [a.id, a.nome]));
+
+  // "Ajuste ativo" (mesma decisão de §3.1-b/§5.1 do contrato): exige EXISTS
+  // de ao menos 1 ajuste_valor_investido histórico para a chave.
+  let chavesComHistorico = new Set<string>();
+  if (ativosMapeadosDoAlvo.length > 0) {
+    const chavesComHistoricoRows = await prisma.ajuste_valor_investido.findMany({
+      where: { chave_export: { in: ativosMapeadosDoAlvo.map((a) => a.chave_export) } },
+      select: { chave_export: true },
+      distinct: ["chave_export"],
+    });
+    chavesComHistorico = new Set(chavesComHistoricoRows.map((r) => r.chave_export));
+  }
+
+  const posicoesManuaisPorAlvoId = new Map<string, typeof posicoesManuaisElegiveis>();
+  for (const posicaoManual of posicoesManuaisElegiveis) {
+    const lista = posicoesManuaisPorAlvoId.get(posicaoManual.alvo_id) ?? [];
+    lista.push(posicaoManual);
+    posicoesManuaisPorAlvoId.set(posicaoManual.alvo_id, lista);
+  }
+  const ajustesElegiveisPorAlvoId = new Map<string, typeof ativosMapeadosDoAlvo>();
+  for (const ativoMapeado of ativosMapeadosDoAlvo) {
+    if (!ativoMapeado.alvo_id || !chavesComHistorico.has(ativoMapeado.chave_export)) continue;
+    const lista = ajustesElegiveisPorAlvoId.get(ativoMapeado.alvo_id) ?? [];
+    lista.push(ativoMapeado);
+    ajustesElegiveisPorAlvoId.set(ativoMapeado.alvo_id, lista);
+  }
+
+  return alvoIds.map((alvoId) => {
+    const posicoesManuaisDoAlvo = posicoesManuaisPorAlvoId.get(alvoId) ?? [];
+    const ajustesDoAlvo = ajustesElegiveisPorAlvoId.get(alvoId) ?? [];
+    const elegiveis: IncrementoAmbiguoPendenteItem["elegiveis"] = [
+      ...posicoesManuaisDoAlvo.map((posicaoManual) => ({
+        tipo: "posicaoManual" as const,
+        id: posicaoManual.id,
+        rotulo: `${posicaoManual.descricao} (${posicaoManual.instituicao})`,
+      })),
+      ...ajustesDoAlvo.map((ativoMapeado) => ({
+        tipo: "ajuste" as const,
+        id: ativoMapeado.chave_export,
+        rotulo: ativoMapeado.chave_export,
+      })),
+    ];
+    return {
+      alvoId,
+      nomeAlvo: nomePorAlvoId.get(alvoId) ?? alvoId,
+      valorPendenteCentavos: valorPendentePorAlvoId.get(alvoId) ?? 0,
+      elegiveis,
+    };
+  });
+}
+
+/** Tipo mínimo do client (global `prisma` OU `tx` de transação) exigido por `marcarPendenciasComoAplicadas`. */
+type ClientePendencias = Pick<typeof prisma, "incremento_valor_investido_pendente">;
+
+export interface MarcarPendenciasComoAplicadasInput {
+  pendenciaIds: string[];
+  sessaoAplicacaoId: string;
+}
+
+/**
+ * Marca `aplicado = true` + grava `sessao_aplicacao_id` em lote para os ids
+ * informados (T026, motor-integracao.md §4.3/§5.3, FR-013). Função
+ * utilitária pura de escrita — não recalcula elegibilidade nem valida FKs
+ * mutuamente exclusivos (exclusiva vs. ambígua); recebe a lista JÁ RESOLVIDA
+ * de ids a marcar (o chamador — `confirmarImport` — decide quais).
+ *
+ * Aceita um segundo parâmetro OPCIONAL `cliente` (default: o `prisma`
+ * global deste módulo) tipado estruturalmente como
+ * `Pick<typeof prisma, "incremento_valor_investido_pendente">` — o `tx` de
+ * `prisma.$transaction(async (tx) => ...)` satisfaz esse tipo (mesmo
+ * delegate `incremento_valor_investido_pendente`, gerado do mesmo schema).
+ * Isso permite `confirmarImport` (import-service.ts) chamar esta função
+ * PASSANDO `tx`, garantindo que a marcação ocorra na MESMA transação que
+ * persiste `posicao_manual_valor`/`ajuste_valor_investido` da nova sessão
+ * (requisito de atomicidade do contrato) — e permite que os testes deste
+ * arquivo chamem a função sem segundo argumento, contra o client global.
+ * Duas variantes de função (uma "core" + um wrapper) foram consideradas e
+ * rejeitadas: um único parâmetro opcional com default é mais simples e não
+ * duplica a assinatura pública.
+ */
+export async function marcarPendenciasComoAplicadas(
+  input: MarcarPendenciasComoAplicadasInput,
+  cliente: ClientePendencias = prisma,
+): Promise<{ quantidadeAtualizada: number }> {
+  if (input.pendenciaIds.length === 0) return { quantidadeAtualizada: 0 };
+
+  const resultado = await cliente.incremento_valor_investido_pendente.updateMany({
+    where: { id: { in: input.pendenciaIds } },
+    data: { aplicado: true, sessao_aplicacao_id: input.sessaoAplicacaoId },
+  });
+
+  return { quantidadeAtualizada: resultado.count };
 }
