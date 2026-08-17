@@ -726,6 +726,61 @@ describe("import-service", () => {
       expect(preview.incrementosAmbiguosPendentes).toEqual([]);
     });
 
+    it("previewImport retorna incrementosAmbiguosPendentes agregado por alvo, com elegiveis, quando há pendência AMBÍGUA não aplicada (T026, motor-integracao.md §4.2)", async () => {
+      const alvo = await criarAlvo("Multimercado ambíguo", 5000);
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+
+      // 2 posições manuais ativas vinculadas ao mesmo alvo (≥2 elegíveis ⇒
+      // ambíguo, mesmo cenário de aporte-service.test.ts §3.2).
+      const posicaoManual1 = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-1", instituicao: "Itaú", descricao: "CDB Um", alvo_id: alvo.id },
+      });
+      const posicaoManual2 = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-2", instituicao: "Itaú", descricao: "CDB Dois", alvo_id: alvo.id },
+      });
+
+      const aporte = await prisma.aporte.create({
+        data: {
+          sessao_import_id: r1.sessaoId,
+          valor_total_centavos: 80_000,
+          valor_dividendos_centavos: 0,
+          sugestao: "[]",
+          executado: "[]",
+          troco_centavos: 0,
+        },
+      });
+      await prisma.incremento_valor_investido_pendente.create({
+        data: { alvo_id: alvo.id, aporte_id: aporte.id, valor_incremento_centavos: 80_000 },
+      });
+
+      const preview = await importService.previewImport([
+        arquivoInstituicao("Itaú", [linha({ acao: "PRIO3", patrimonioHoje: "2000.00" })]),
+      ]);
+
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+
+      expect(preview.incrementosAmbiguosPendentes).toHaveLength(1);
+      expect(preview.incrementosAmbiguosPendentes[0]).toMatchObject({
+        alvoId: alvo.id,
+        nomeAlvo: "Multimercado ambíguo",
+        valorPendenteCentavos: 80_000,
+      });
+      expect(preview.incrementosAmbiguosPendentes[0].elegiveis).toEqual(
+        expect.arrayContaining([
+          { tipo: "posicaoManual", id: posicaoManual1.id, rotulo: "CDB Um (Itaú)" },
+          { tipo: "posicaoManual", id: posicaoManual2.id, rotulo: "CDB Dois (Itaú)" },
+        ]),
+      );
+      expect(preview.incrementosAmbiguosPendentes[0].elegiveis).toHaveLength(2);
+    });
+
     it("previewImport chamado múltiplas vezes seguidas sem NUNCA confirmar não persiste nada e devolve os mesmos valores sugeridos (data-model.md, 'Fluxo técnico' passo 5 — robustez a reimport antes de confirmar)", async () => {
       const alvo = await criarAlvo("Pós-fixado", 3000);
 
@@ -993,6 +1048,209 @@ describe("import-service", () => {
         },
       });
       expect(snapshotNovo.valor_investido_centavos).toBe(200_000);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // T026 (User Story 4, FR-013, contracts/motor-integracao.md §4.3/§4.4,
+  // research.md R4/R5): consumo de `incremento_valor_investido_pendente`
+  // dentro da MESMA transação de `confirmarImport` — marcação
+  // `aplicado = true` (+ `sessao_aplicacao_id`) via
+  // `posicao-manual-service.marcarPendenciasComoAplicadas`.
+  // -------------------------------------------------------------------
+  describe("consumo de incremento_valor_investido_pendente na confirmação (T026, US4)", () => {
+    async function criarAlvo(nome: string, percentualBps: number) {
+      return prisma.alvo.create({
+        data: { nome, percentual_alvo_bps: percentualBps, vigencia_inicio: new Date("2026-01-01") },
+      });
+    }
+
+    /** `aporte` mínimo — proveniência obrigatória (`aporte_id`, onDelete Restrict) de `incremento_valor_investido_pendente`. */
+    async function criarAporteParaTeste(sessaoId: string, valorTotalCentavos = 100_000) {
+      return prisma.aporte.create({
+        data: {
+          sessao_import_id: sessaoId,
+          valor_total_centavos: valorTotalCentavos,
+          valor_dividendos_centavos: 0,
+          sugestao: "[]",
+          executado: "[]",
+          troco_centavos: 0,
+        },
+      });
+    }
+
+    async function criarPendenciaIncremento(input: {
+      alvoId: string;
+      aporteId: string;
+      valorIncrementoCentavos: number;
+      chaveExport?: string | null;
+      posicaoManualId?: string | null;
+    }) {
+      return prisma.incremento_valor_investido_pendente.create({
+        data: {
+          alvo_id: input.alvoId,
+          aporte_id: input.aporteId,
+          valor_incremento_centavos: input.valorIncrementoCentavos,
+          chave_export: input.chaveExport ?? null,
+          posicao_manual_id: input.posicaoManualId ?? null,
+          aplicado: false,
+        },
+      });
+    }
+
+    it("confirmação marca pendências ESPECÍFICAS (posicao_manual e ajuste) como aplicadas, com sessao_aplicacao_id apontando para a nova sessão", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+
+      await prisma.ativo_mapeado.update({
+        where: { chave_export: "PRIO3" },
+        data: { alvo_id: alvo.id },
+      });
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "PRIO3",
+          sessao_import_id: r1.sessaoId,
+          valor_investido_corrigido_centavos: 90_000,
+        },
+      });
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-ITAU-2029",
+          instituicao: "Itaú",
+          descricao: "CDB Itaú 120% CDI 2029",
+          alvo_id: alvo.id,
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManual.id,
+          sessao_import_id: r1.sessaoId,
+          valor_investido_centavos: 500_000,
+          valor_atual_centavos: 520_000,
+        },
+      });
+
+      const aporte = await criarAporteParaTeste(r1.sessaoId, 50_000);
+      const pendenciaPosicaoManual = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        posicaoManualId: posicaoManual.id,
+        valorIncrementoCentavos: 20_000,
+      });
+      const pendenciaAjuste = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        chaveExport: "PRIO3",
+        valorIncrementoCentavos: 30_000,
+      });
+
+      const r2 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3", patrimonioHoje: "2000.00" })])],
+        mesReferencia: "2026-07",
+        posicoesManuaisConfirmadas: [
+          { posicaoManualId: posicaoManual.id, valorInvestidoCentavos: 520_000, valorAtualCentavos: 560_000 },
+        ],
+        ajustesConfirmados: [{ chaveExport: "PRIO3", valorInvestidoCentavosCorrigido: 120_000 }],
+      });
+      expect(r2.ok).toBe(true);
+      if (!r2.ok) return;
+
+      const posicaoManualPendenciaDepois = await prisma.incremento_valor_investido_pendente.findUniqueOrThrow(
+        { where: { id: pendenciaPosicaoManual.id } },
+      );
+      const ajustePendenciaDepois = await prisma.incremento_valor_investido_pendente.findUniqueOrThrow({
+        where: { id: pendenciaAjuste.id },
+      });
+
+      expect(posicaoManualPendenciaDepois.aplicado).toBe(true);
+      expect(posicaoManualPendenciaDepois.sessao_aplicacao_id).toBe(r2.sessaoId);
+      expect(ajustePendenciaDepois.aplicado).toBe(true);
+      expect(ajustePendenciaDepois.sessao_aplicacao_id).toBe(r2.sessaoId);
+    });
+
+    it("confirmação marca pendência AMBÍGUA como aplicada integralmente, mesmo com distribuição parcial pelo usuário (research.md R5, decisão binária)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+
+      const aporte = await criarAporteParaTeste(r1.sessaoId, 80_000);
+      const pendenciaAmbigua = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        valorIncrementoCentavos: 80_000,
+        // chave_export e posicao_manual_id ambos ausentes = pendência
+        // ambígua de alvo (n >= 2 histórico, motor-integracao.md §3.2).
+      });
+
+      // Usuário confirma o import SEM distribuir nenhum valor específico
+      // (nenhuma posicao_manual/ajuste vinculada a este alvo neste teste) —
+      // "distribuição parcial" no sentido de que nada é rastreado/exigido.
+      const r2 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3", patrimonioHoje: "2000.00" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r2.ok).toBe(true);
+      if (!r2.ok) return;
+
+      const noBanco = await prisma.incremento_valor_investido_pendente.findUniqueOrThrow({
+        where: { id: pendenciaAmbigua.id },
+      });
+      expect(noBanco.aplicado).toBe(true);
+      expect(noBanco.sessao_aplicacao_id).toBe(r2.sessaoId);
+    });
+
+    it("reimport abandonado (chamar previewImport várias vezes sem NUNCA confirmar) não marca nenhuma pendência como aplicada", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "PRIO3" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+
+      await prisma.ativo_mapeado.update({
+        where: { chave_export: "PRIO3" },
+        data: { alvo_id: alvo.id },
+      });
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "PRIO3",
+          sessao_import_id: r1.sessaoId,
+          valor_investido_corrigido_centavos: 90_000,
+        },
+      });
+      const aporte = await criarAporteParaTeste(r1.sessaoId, 30_000);
+      const pendencia = await criarPendenciaIncremento({
+        alvoId: alvo.id,
+        aporteId: aporte.id,
+        chaveExport: "PRIO3",
+        valorIncrementoCentavos: 30_000,
+      });
+
+      const arquivoParaPreview = arquivoInstituicao("Itaú", [
+        linha({ acao: "PRIO3", patrimonioHoje: "2000.00" }),
+      ]);
+      await importService.previewImport([arquivoParaPreview]);
+      await importService.previewImport([arquivoParaPreview]);
+      await importService.previewImport([arquivoParaPreview]);
+
+      const noBanco = await prisma.incremento_valor_investido_pendente.findUniqueOrThrow({
+        where: { id: pendencia.id },
+      });
+      expect(noBanco.aplicado).toBe(false);
+      expect(noBanco.sessao_aplicacao_id).toBeNull();
     });
   });
 });

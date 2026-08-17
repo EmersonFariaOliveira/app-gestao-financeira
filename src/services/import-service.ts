@@ -3,8 +3,11 @@ import { parseArquivoMyCapital } from "@/parser/mycapital";
 import type { ArquivoImport, ArquivoParseado, ErroParse } from "@/parser/types";
 import { executarBackupComRetencao } from "@/services/backup-service";
 import {
+  marcarPendenciasComoAplicadas,
+  montarIncrementosAmbiguosPendentes,
   montarRevisaoImport,
   type AjusteRevisaoItem,
+  type IncrementoAmbiguoPendenteItem,
   type PosicaoManualRevisaoItem,
 } from "@/services/posicao-manual-service";
 
@@ -55,13 +58,14 @@ export interface DiffPosicoes {
   variacoesGrandes: VariacaoGrande[];
 }
 
-/** Incrementos ambíguos por alvo — sempre `[]` nesta fase (placeholder, US4/T023-T026). */
-export interface IncrementoAmbiguoPendente {
-  alvoId: string;
-  nomeAlvo: string;
-  valorPendenteCentavos: number;
-  elegiveis: { tipo: "posicaoManual" | "ajuste"; id: string; rotulo: string }[];
-}
+/**
+ * Incrementos ambíguos por alvo (T026) — alias do tipo produzido por
+ * `posicao-manual-service.montarIncrementosAmbiguosPendentes`. Mantido como
+ * um tipo próprio deste módulo (em vez de reexportar o tipo importado
+ * diretamente) para preservar o nome já usado por `PreviewImportResultado`
+ * desde a fase anterior (placeholder), sem quebrar quem já depende dele.
+ */
+export type IncrementoAmbiguoPendente = IncrementoAmbiguoPendenteItem;
 
 export type PreviewImportResultado =
   | {
@@ -76,7 +80,7 @@ export type PreviewImportResultado =
       posicoesManuaisRevisao: PosicaoManualRevisaoItem[];
       /** Carry-forward de ajustes de valor investido para a revisão dentro do import (idem). */
       ajustesRevisao: AjusteRevisaoItem[];
-      /** Placeholder fixo `[]` nesta fase — US4/T023-T026 preenche a lógica de incrementos ambíguos. */
+      /** Pendências ambíguas de alvo agregadas (T026, motor-integracao.md §4.2). */
       incrementosAmbiguosPendentes: IncrementoAmbiguoPendente[];
     }
   | { ok: false; erros: ErroParse[] };
@@ -113,7 +117,15 @@ export type ConfirmarImportResultado =
       ok: true;
       sessaoId: string;
       pendenciasVinculo: string[];
-      /** Placeholder fixo `0` nesta fase — US4/T023-T026 passa a calcular resíduo real. */
+      /**
+       * Sempre `0` — server-actions.md §import.ts documenta este campo como
+       * "cosmético", calculado no CLIENT a partir de
+       * `distribuicoesIncrementosAmbiguos` vs. `incrementosAmbiguosPendentes`
+       * do preview (não persiste, não afeta a confirmação). O servidor não
+       * tem como calcular esse resíduo — `distribuicoesIncrementosAmbiguos`
+       * é só uma anotação da UI, não uma fonte de verdade de alocação
+       * (research.md R5).
+       */
       incrementosAmbiguosNaoAlocadosCentavos: number;
     }
   | { ok: false; erro: string; erros?: ErroParse[]; instituicoesFaltantes?: string[] };
@@ -329,11 +341,13 @@ export async function previewImport(arquivos: ArquivoImport[]): Promise<PreviewI
   }
 
   // Carry-forward de posições manuais/ajustes (US3, data-model.md "Fluxo
-  // técnico" passos 1-2) — leitura pura, resolvida a partir da sessão
-  // VIGENTE mais recente já persistida (a sessão deste import ainda não
-  // existe). `incrementosAmbiguosPendentes` é placeholder fixo `[]` nesta
-  // fase (US4/T023-T026 ainda não implementada).
-  const { posicoesManuaisRevisao, ajustesRevisao } = await montarRevisaoImport();
+  // técnico" passos 1-2) e agregação de pendências ambíguas por alvo (T026,
+  // US4, motor-integracao.md §4.2) — leitura pura, resolvida a partir do
+  // estado ATUAL do banco (a sessão deste import ainda não existe).
+  const [{ posicoesManuaisRevisao, ajustesRevisao }, incrementosAmbiguosPendentes] = await Promise.all([
+    montarRevisaoImport(),
+    montarIncrementosAmbiguosPendentes(),
+  ]);
 
   return {
     ok: true,
@@ -345,7 +359,7 @@ export async function previewImport(arquivos: ArquivoImport[]): Promise<PreviewI
     diff,
     posicoesManuaisRevisao,
     ajustesRevisao,
-    incrementosAmbiguosPendentes: [],
+    incrementosAmbiguosPendentes,
   };
 }
 
@@ -515,6 +529,53 @@ export async function confirmarImport(
           valor_investido_corrigido_centavos: item.valorInvestidoCentavosCorrigido,
         })),
       });
+    }
+
+    // Consumo das pendências (T026, motor-integracao.md §4.3/§4.4, FR-013,
+    // MESMA transação): marca `aplicado = true` em TODA pendência
+    // `incremento_valor_investido_pendente` ainda não aplicada que foi
+    // "exibida nesta revisão" — na prática, o mesmo conjunto que
+    // `montarRevisaoImport`/`montarIncrementosAmbiguosPendentes` (chamadas
+    // por `previewImport` imediatamente antes desta confirmação, sobre o
+    // MESMO estado do banco) somam:
+    //   (a) TODAS as pendências exclusivas (posicao_manual_id/chave_export)
+    //       de cada posição/ajuste efetivamente persistido nesta sessão
+    //       (posicoesManuaisPreenchidas/ajustesPreenchidos acima) — mesmo
+    //       critério "TODAS, não só a mais recente" usado na soma exibida
+    //       (§4.1);
+    //   (b) TODAS as pendências ambíguas de alvo ainda não aplicadas
+    //       (chave_export IS NULL AND posicao_manual_id IS NULL) — research.md
+    //       R5: marcadas integralmente na confirmação, mesmo com
+    //       distribuição parcial pelo usuário; `incrementosAmbiguosPendentes`
+    //       não restringe por alvo tocado nesta sessão (todo alvo com
+    //       pendência ambígua aparece na revisão, então toda confirmação as
+    //       consome — mesma leitura "sem filtro adicional" usada no preview).
+    const posicaoManualIdsTocados = posicoesManuaisPreenchidas.map((item) => item.posicaoManualId);
+    const chavesExportTocadas = ajustesPreenchidos.map((item) => item.chaveExport.trim());
+
+    const pendenciasParaMarcar = await tx.incremento_valor_investido_pendente.findMany({
+      where: {
+        aplicado: false,
+        OR: [
+          { chave_export: null, posicao_manual_id: null },
+          ...(posicaoManualIdsTocados.length > 0
+            ? [{ posicao_manual_id: { in: posicaoManualIdsTocados } }]
+            : []),
+          ...(chavesExportTocadas.length > 0
+            ? [{ chave_export: { in: chavesExportTocadas } }]
+            : []),
+        ],
+      },
+      select: { id: true },
+    });
+    if (pendenciasParaMarcar.length > 0) {
+      await marcarPendenciasComoAplicadas(
+        {
+          pendenciaIds: pendenciasParaMarcar.map((p) => p.id),
+          sessaoAplicacaoId: novaSessao.id,
+        },
+        tx,
+      );
     }
 
     // Transição de estado (data-model.md): a sessão VIGENTE anterior do
