@@ -25,6 +25,15 @@
  *   operação em si — apenas exige o reconhecimento do usuário).
  * - Aviso de substituição de sessão do mesmo mês: exibido claramente antes
  *   de confirmar.
+ *
+ * Seção de revisão (6.9, T022, User Story 3 — feature 002): dentro do MESMO
+ * card de preview, depois do diff e antes do botão "Confirmar import"
+ * (research.md R6 — não é um passo de wizard separado). Lista pré-preenchida
+ * (carry-forward, `preview.posicoesManuaisRevisao`/`ajustesRevisao`) com
+ * campos editáveis em reais (conversão para/de centavos só na borda, mesmo
+ * padrão de `src/app/posicoes-manuais/page.tsx`). Some inteiramente quando
+ * não há nenhuma posição manual/ajuste ativo — não quebra o fluxo de import
+ * que não usa posições manuais.
  */
 import Link from "next/link";
 import { useCallback, useMemo, useRef, useState } from "react";
@@ -52,10 +61,11 @@ import {
   Table,
   TableBody,
   TableCell,
+  TableHead,
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { formatCentavosParaReais } from "@/core/money";
+import { formatCentavosParaReais, parseDecimalParaCentavos } from "@/core/money";
 import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { ErroParse } from "@/parser/types";
 
@@ -64,6 +74,12 @@ function formatDataIsoParaBr(iso: string): string {
   const [ano, mes, dia] = iso.slice(0, 10).split("-");
   if (!ano || !mes || !dia) return iso;
   return `${dia}/${mes}/${ano}`;
+}
+
+/** Centavos → texto decimal em reais editável (mesmo padrão de posicoes-manuais/page.tsx); `null` vira campo vazio (FR-009). */
+function centavosParaTexto(centavos: number | null): string {
+  if (centavos === null) return "";
+  return (centavos / 100).toFixed(2).replace(".", ",");
 }
 
 type FaseAnalise = "idle" | "analisando" | "erro" | "pronto";
@@ -88,6 +104,16 @@ export default function ImportPage() {
   const [resultadoConfirmacao, setResultadoConfirmacao] = useState<ConfirmarImportOutput | null>(
     null,
   );
+
+  // Seção de revisão (6.9, T022, US3): campos editáveis por
+  // `posicaoManualId`/`chaveExport`, pré-preenchidos com o valor sugerido do
+  // carry-forward quando o preview chega. Textos em reais (borda de UI) —
+  // convertidos para centavos só na hora de montar `posicoesManuaisConfirmadas`/
+  // `ajustesConfirmados` (`parseDecimalParaCentavos`).
+  const [posicoesManuaisTextos, setPosicoesManuaisTextos] = useState<
+    Record<string, { valorInvestido: string; valorAtual: string }>
+  >({});
+  const [ajustesTextos, setAjustesTextos] = useState<Record<string, string>>({});
 
   function adicionarArquivos(lista: FileList | File[]) {
     const novos = Array.from(lista).filter((f) => f.name.toLowerCase().endsWith(".csv"));
@@ -165,6 +191,29 @@ export default function ImportPage() {
     setMesReferenciaTexto(resp.data.mesReferenciaProposto);
     setConfirmouInstituicoesFaltantes(false);
     setFaseAnalise("pronto");
+
+    // Pré-preenchimento da seção de revisão (6.9, T022) a partir do
+    // carry-forward retornado pelo preview — o usuário edita a partir daqui,
+    // nada é persistido até "Confirmar import".
+    setPosicoesManuaisTextos(
+      Object.fromEntries(
+        resp.data.posicoesManuaisRevisao.map((item) => [
+          item.posicaoManualId,
+          {
+            valorInvestido: centavosParaTexto(item.valorInvestidoCentavosSugerido),
+            valorAtual: centavosParaTexto(item.valorAtualCentavosSugerido),
+          },
+        ]),
+      ),
+    );
+    setAjustesTextos(
+      Object.fromEntries(
+        resp.data.ajustesRevisao.map((item) => [
+          item.chaveExport,
+          centavosParaTexto(item.valorInvestidoCentavosSugerido),
+        ]),
+      ),
+    );
   }, [arquivos, construirFormData]);
 
   // "Cotação mais recente" pode ser `null` (dataMaisRecente não observada) —
@@ -185,15 +234,61 @@ export default function ImportPage() {
   }, [preview, mesReferenciaTexto, temInstituicoesFaltantes, confirmouInstituicoesFaltantes]);
 
   async function handleConfirmar() {
-    if (!podeConfirmar) return;
+    if (!podeConfirmar || !preview) return;
+
+    setErroConfirmacao(null);
+
+    // Monta os payloads da revisão (6.9, T022) a partir dos valores EDITADOS
+    // pelo usuário (não necessariamente os sugeridos originais) — validação
+    // de formato acontece aqui, na borda, antes de chamar a action.
+    let posicoesManuaisConfirmadas: {
+      posicaoManualId: string;
+      valorInvestidoCentavos: number;
+      valorAtualCentavos: number;
+    }[];
+    let ajustesConfirmados: { chaveExport: string; valorInvestidoCentavosCorrigido: number }[];
+    try {
+      posicoesManuaisConfirmadas = preview.posicoesManuaisRevisao.map((item) => {
+        const textos = posicoesManuaisTextos[item.posicaoManualId] ?? {
+          valorInvestido: "",
+          valorAtual: "",
+        };
+        const valorInvestidoCentavos = parseDecimalParaCentavos(textos.valorInvestido || "0");
+        const valorAtualCentavos = parseDecimalParaCentavos(textos.valorAtual || "0");
+        if (valorInvestidoCentavos < 0 || valorAtualCentavos < 0) {
+          throw new Error(`Valores de "${item.descricao}" não podem ser negativos.`);
+        }
+        return { posicaoManualId: item.posicaoManualId, valorInvestidoCentavos, valorAtualCentavos };
+      });
+
+      // Chave ausente aqui = usuário deixou vazio nesta sessão — nenhum
+      // ajuste_valor_investido é criado para ela (FR-009, "aviso, não bloqueio").
+      ajustesConfirmados = preview.ajustesRevisao.flatMap((item) => {
+        const texto = ajustesTextos[item.chaveExport] ?? "";
+        if (!texto.trim()) return [];
+        const valorInvestidoCentavosCorrigido = parseDecimalParaCentavos(texto);
+        if (valorInvestidoCentavosCorrigido < 0) {
+          throw new Error(`Valor corrigido de "${item.chaveExport}" não pode ser negativo.`);
+        }
+        return [{ chaveExport: item.chaveExport, valorInvestidoCentavosCorrigido }];
+      });
+    } catch (erro) {
+      setErroConfirmacao(
+        erro instanceof Error
+          ? erro.message
+          : "Valor inválido na seção de revisão — use um decimal (ex.: 1000,00).",
+      );
+      return;
+    }
 
     setFaseConfirmacao("confirmando");
-    setErroConfirmacao(null);
 
     const resp = await confirmarImport(
       construirFormData({
         mesReferencia: mesReferenciaTexto.trim(),
         confirmouInstituicoesFaltantes: confirmouInstituicoesFaltantes ? "true" : "false",
+        posicoesManuaisConfirmadas: JSON.stringify(posicoesManuaisConfirmadas),
+        ajustesConfirmados: JSON.stringify(ajustesConfirmados),
       }),
     );
 
@@ -444,6 +539,140 @@ export default function ImportPage() {
                         </ul>
                       )}
                     </>
+                  )}
+                </div>
+              )}
+
+              {(preview.posicoesManuaisRevisao.length > 0 ||
+                preview.ajustesRevisao.length > 0) && (
+                <div className="flex flex-col gap-4 border-t pt-4">
+                  <div>
+                    <p className="font-medium">Revisão de posições manuais e ajustes</p>
+                    <p className="text-sm text-muted-foreground">
+                      Pré-preenchido com o último valor conhecido — edite antes de confirmar. Só
+                      grava quando você confirmar este import.
+                    </p>
+                  </div>
+
+                  {preview.posicoesManuaisRevisao.length > 0 && (
+                    <div className="flex flex-col gap-2">
+                      <p className="text-sm font-medium">Posições manuais</p>
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Descrição</TableHead>
+                            <TableHead>Alvo</TableHead>
+                            <TableHead>Valor investido</TableHead>
+                            <TableHead>Valor atual</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {preview.posicoesManuaisRevisao.map((item) => (
+                            <TableRow key={item.posicaoManualId}>
+                              <TableCell className="max-w-56 whitespace-normal break-words">
+                                {item.descricao}
+                                <div className="text-xs text-muted-foreground">
+                                  {item.instituicao}
+                                </div>
+                                {item.incrementoPendenteCentavos > 0 && (
+                                  <div className="text-xs text-muted-foreground">
+                                    + {formatCentavosParaReais(item.incrementoPendenteCentavos)}{" "}
+                                    de aporte executado já somado ao sugerido.
+                                  </div>
+                                )}
+                              </TableCell>
+                              <TableCell>{item.nomeAlvo}</TableCell>
+                              <TableCell>
+                                <Input
+                                  aria-label={`Valor investido de ${item.descricao}`}
+                                  inputMode="decimal"
+                                  className="w-32"
+                                  value={
+                                    posicoesManuaisTextos[item.posicaoManualId]?.valorInvestido ??
+                                    ""
+                                  }
+                                  onChange={(e) =>
+                                    setPosicoesManuaisTextos((prev) => ({
+                                      ...prev,
+                                      [item.posicaoManualId]: {
+                                        valorInvestido: e.target.value,
+                                        valorAtual: prev[item.posicaoManualId]?.valorAtual ?? "",
+                                      },
+                                    }))
+                                  }
+                                />
+                              </TableCell>
+                              <TableCell>
+                                <Input
+                                  aria-label={`Valor atual de ${item.descricao}`}
+                                  inputMode="decimal"
+                                  className="w-32"
+                                  value={
+                                    posicoesManuaisTextos[item.posicaoManualId]?.valorAtual ?? ""
+                                  }
+                                  onChange={(e) =>
+                                    setPosicoesManuaisTextos((prev) => ({
+                                      ...prev,
+                                      [item.posicaoManualId]: {
+                                        valorInvestido:
+                                          prev[item.posicaoManualId]?.valorInvestido ?? "",
+                                        valorAtual: e.target.value,
+                                      },
+                                    }))
+                                  }
+                                />
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  )}
+
+                  {preview.ajustesRevisao.length > 0 && (
+                    <div className="flex flex-col gap-2">
+                      <p className="text-sm font-medium">Ajustes de fundos</p>
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>Ativo (chave do export)</TableHead>
+                            <TableHead>Alvo</TableHead>
+                            <TableHead>Valor investido corrigido</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {preview.ajustesRevisao.map((item) => (
+                            <TableRow key={item.chaveExport}>
+                              <TableCell className="max-w-56 whitespace-normal break-words">
+                                {item.chaveExport}
+                                {item.primeiraVez && (
+                                  <div className="mt-1 rounded-lg border border-amber-400/60 bg-amber-400/10 px-2 py-1 text-xs">
+                                    Primeira vez ajustando este ativo — não há valor anterior
+                                    (FR-009). Deixe em branco para não corrigir agora.
+                                  </div>
+                                )}
+                              </TableCell>
+                              <TableCell>{item.nomeAlvo ?? "—"}</TableCell>
+                              <TableCell>
+                                <Input
+                                  aria-label={`Valor investido corrigido de ${item.chaveExport}`}
+                                  inputMode="decimal"
+                                  placeholder="1000,00"
+                                  className="w-32"
+                                  value={ajustesTextos[item.chaveExport] ?? ""}
+                                  onChange={(e) =>
+                                    setAjustesTextos((prev) => ({
+                                      ...prev,
+                                      [item.chaveExport]: e.target.value,
+                                    }))
+                                  }
+                                />
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
                   )}
                 </div>
               )}
