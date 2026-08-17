@@ -112,14 +112,14 @@
 
 ### Tests for User Story 4 (escrever PRIMEIRO — devem FALHAR antes da implementação)
 
-- [ ] T023 [P] [US4] [calculista-aporte] Testes do algoritmo de elegibilidade em `tests/services/aporte-service.test.ts`: 0 elegíveis ⇒ nenhum incremento; 1 elegível (posição manual OU ajuste) ⇒ incremento atribuído com o FK correto; ≥2 elegíveis ⇒ incremento ambíguo (`alvo_id` só); toda a operação na mesma transação de `registrarAporte` (motor-integracao.md §3)
-- [ ] T024 [P] [US4] [arquiteto-dados] Testes de consumo em `tests/services/posicao-manual-service.test.ts`: soma de múltiplas pendências não aplicadas no carry-forward; `aplicado = true` só na confirmação (nunca ao só pré-visualizar); reimport abandonado não perde nem duplica pendências; pendência ambígua marcada `aplicado = true` integralmente na confirmação, mesmo com distribuição parcial (research.md R5)
+- [X] T023 [P] [US4] [calculista-aporte] Testes do algoritmo de elegibilidade em `tests/services/aporte-service.test.ts`: 0 elegíveis ⇒ nenhum incremento; 1 elegível (posição manual OU ajuste) ⇒ incremento atribuído com o FK correto; ≥2 elegíveis ⇒ incremento ambíguo (`alvo_id` só); toda a operação na mesma transação de `registrarAporte` (motor-integracao.md §3)
+- [X] T024 [P] [US4] [arquiteto-dados] Testes de consumo em `tests/services/posicao-manual-service.test.ts`: soma de múltiplas pendências não aplicadas no carry-forward; `aplicado = true` só na confirmação (nunca ao só pré-visualizar); reimport abandonado não perde nem duplica pendências; pendência ambígua marcada `aplicado = true` integralmente na confirmação, mesmo com distribuição parcial (research.md R5)
 
 ### Implementation for User Story 4
 
-- [ ] T025 [US4] [calculista-aporte] Implementar geração de `incremento_valor_investido_pendente` dentro de `registrarAporte` em `src/services/aporte-service.ts`, na mesma transação Prisma, conforme algoritmo de `contracts/motor-integracao.md` §3 — depende de T008 (mesmo arquivo)
-- [ ] T026 [US4] [arquiteto-dados] Implementar consumo de pendências (soma em `posicoesManuaisRevisao`/`ajustesRevisao`, agregação `incrementosAmbiguosPendentes` por alvo) em `src/services/posicao-manual-service.ts` + marcação `aplicado = true` na transação de `confirmarImport` em `src/services/import-service.ts` (motor-integracao.md §4) — depende de T019, T020, T025
-- [ ] T027 [US4] [desenvolvedor-ui] Exibir `incrementosAmbiguosPendentes` em destaque na seção de revisão de `src/app/import/page.tsx` ("R$ X aportados em '<alvo>' sem fundo específico — distribua abaixo") e o campo opcional `distribuicoesIncrementosAmbiguos` só para conferência visual da soma — depende de T022, T026
+- [X] T025 [US4] [calculista-aporte] Implementar geração de `incremento_valor_investido_pendente` dentro de `registrarAporte` em `src/services/aporte-service.ts`, na mesma transação Prisma, conforme algoritmo de `contracts/motor-integracao.md` §3 — depende de T008 (mesmo arquivo)
+- [X] T026 [US4] [arquiteto-dados] Implementar consumo de pendências (soma em `posicoesManuaisRevisao`/`ajustesRevisao`, agregação `incrementosAmbiguosPendentes` por alvo) em `src/services/posicao-manual-service.ts` + marcação `aplicado = true` na transação de `confirmarImport` em `src/services/import-service.ts` (motor-integracao.md §4) — depende de T019, T020, T025
+- [X] T027 [US4] [desenvolvedor-ui] Exibir `incrementosAmbiguosPendentes` em destaque na seção de revisão de `src/app/import/page.tsx` ("R$ X aportados em '<alvo>' sem fundo específico — distribua abaixo") e o campo opcional `distribuicoesIncrementosAmbiguos` só para conferência visual da soma — depende de T022, T026
 
 **Checkpoint**: todas as 4 user stories funcionais e independentes
 
@@ -129,9 +129,9 @@
 
 **Purpose**: validação final e conformidade com o desenho da feature 001
 
-- [ ] T028 [P] Rodar a validação manual completa de `quickstart.md` (4 user stories + tabela de comportamentos críticos) e corrigir o que falhar
-- [ ] T029 [P] Confirmar via `git diff --stat src/core/motor` (vazio) que o Motor de Aporte permanece sem nenhuma alteração (research.md R1) — checagem de conformidade com `contracts/motor-integracao.md` §1
-- [ ] T030 Fluxo pós-implementação obrigatório do CLAUDE.md: **engenheiro-testes** (suíte completa + lacunas) → **guardiao-spec** (diff vs. spec: escopo negativo, FR-006/valor_investido nunca no motor, camadas isoladas) → **gerente-release** (propor commits e perguntar antes de commitar)
+- [X] T028 [P] Rodar a validação manual completa de `quickstart.md` (4 user stories + tabela de comportamentos críticos) e corrigir o que falhar
+- [X] T029 [P] Confirmar via `git diff --stat src/core/motor` (vazio) que o Motor de Aporte permanece sem nenhuma alteração (research.md R1) — checagem de conformidade com `contracts/motor-integracao.md` §1
+- [X] T030 Fluxo pós-implementação obrigatório do CLAUDE.md: **engenheiro-testes** (suíte completa + lacunas) → **guardiao-spec** (diff vs. spec: escopo negativo, FR-006/valor_investido nunca no motor, camadas isoladas) → **gerente-release** (propor commits e perguntar antes de commitar)
 
 ---
 
