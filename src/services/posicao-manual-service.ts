@@ -56,6 +56,16 @@ export interface EncerrarPosicaoManualInput {
   posicaoManualId: string;
 }
 
+export interface CriarOuAtualizarAjusteInput {
+  chaveExport: string;
+  valorInvestidoCentavosCorrigido: number;
+}
+
+export interface AjusteValorInvestidoOutput {
+  chaveExport: string;
+  valorInvestidoCentavosCorrigido: number | null;
+}
+
 /**
  * Sessão VIGENTE mais recente (mesmo critério de
  * `aporte-service.obterSessaoVigenteMaisRecente`/
@@ -166,6 +176,108 @@ export async function encerrarPosicaoManual(
   });
 
   return paraOutput(atualizada);
+}
+
+/**
+ * Cria ou atualiza (upsert) o `ajuste_valor_investido` de um `chave_export`
+ * — correção pontual do valor investido de um ativo que continua vindo do
+ * CSV, associado à sessão VIGENTE mais recente (FR-005, mesmo racional de
+ * "efeito imediato" de `criarPosicaoManual`, research.md R7). Fail loud (mesma
+ * mensagem já usada nas outras funções deste arquivo) sem sessão VIGENTE.
+ *
+ * NUNCA toca `posicao.patrimonio_hoje_centavos` (FR-006) — o valor atual
+ * continua vindo exclusivamente do import; este ajuste é só o
+ * "valor investido corrigido" usado fora do cálculo de déficit.
+ *
+ * Upsert por `(chave_export, sessao_import_id)` (`@@unique` no schema):
+ * chamadas repetidas na MESMA sessão vigente atualizam a linha existente —
+ * nunca duplicam.
+ */
+export async function criarOuAtualizarAjuste(
+  input: CriarOuAtualizarAjusteInput,
+): Promise<AjusteValorInvestidoOutput> {
+  const sessao = await obterSessaoVigenteMaisRecente();
+  if (!sessao) {
+    throw new Error(MENSAGEM_SEM_SESSAO_VIGENTE);
+  }
+
+  const ajuste = await prisma.ajuste_valor_investido.upsert({
+    where: {
+      chave_export_sessao_import_id: {
+        chave_export: input.chaveExport,
+        sessao_import_id: sessao.id,
+      },
+    },
+    create: {
+      chave_export: input.chaveExport,
+      sessao_import_id: sessao.id,
+      valor_investido_corrigido_centavos: input.valorInvestidoCentavosCorrigido,
+    },
+    update: {
+      valor_investido_corrigido_centavos: input.valorInvestidoCentavosCorrigido,
+    },
+  });
+
+  return {
+    chaveExport: ajuste.chave_export,
+    valorInvestidoCentavosCorrigido: ajuste.valor_investido_corrigido_centavos,
+  };
+}
+
+export interface AjusteAtivoListItem {
+  chaveExport: string;
+  alvoId: string | null;
+  nomeAlvo: string | null;
+  /** Valor corrigido mais recente conhecido — `null` = "primeira vez" (FR-009), ainda não preenchido. */
+  valorInvestidoCentavosCorrigido: number | null;
+}
+
+/**
+ * Lista de `chave_export` "sob ajuste" para a tela dedicada (6.9, T017/User
+ * Story 2), fora do fluxo de import. "Sob ajuste" aqui é a mesma condição
+ * derivada de data-model.md ("Identidade de 'ativo sob ajuste'"): existe ao
+ * menos um `ajuste_valor_investido` histórico para o `chave_export` E o
+ * `ativo_mapeado` correspondente ainda está vinculado a um alvo ativo
+ * (`alvo_id IS NOT NULL`, `fora_da_carteira = false`, `ignorar_no_import =
+ * false`). Retorna o valor corrigido mais recente conhecido (qualquer
+ * sessão) — NÃO é o mesmo que `listarPosicoesManuaisEAjustes` (T019, User
+ * Story 3), que monta carry-forward/incrementos pendentes para a revisão
+ * dentro do import; aqui é só "o que existe agora", para exibição e
+ * criação/edição do valor corrigido.
+ */
+export async function listarAjustesAtivos(): Promise<AjusteAtivoListItem[]> {
+  const ajustes = await prisma.ajuste_valor_investido.findMany({
+    orderBy: { criado_em: "desc" },
+  });
+  if (ajustes.length === 0) return [];
+
+  const chavesComAjuste = [...new Set(ajustes.map((a) => a.chave_export))];
+  const ativosMapeados = await prisma.ativo_mapeado.findMany({
+    where: {
+      chave_export: { in: chavesComAjuste },
+      alvo_id: { not: null },
+      fora_da_carteira: false,
+      ignorar_no_import: false,
+    },
+    include: { alvo: true },
+  });
+
+  const ultimoAjustePorChave = new Map<string, (typeof ajustes)[number]>();
+  for (const ajuste of ajustes) {
+    if (!ultimoAjustePorChave.has(ajuste.chave_export)) {
+      ultimoAjustePorChave.set(ajuste.chave_export, ajuste);
+    }
+  }
+
+  return ativosMapeados.map((ativoMapeado) => {
+    const ultimo = ultimoAjustePorChave.get(ativoMapeado.chave_export);
+    return {
+      chaveExport: ativoMapeado.chave_export,
+      alvoId: ativoMapeado.alvo_id,
+      nomeAlvo: ativoMapeado.alvo?.nome ?? ativoMapeado.alvo_id,
+      valorInvestidoCentavosCorrigido: ultimo?.valor_investido_corrigido_centavos ?? null,
+    };
+  });
 }
 
 export interface PosicaoManualListItem extends PosicaoManualOutput {

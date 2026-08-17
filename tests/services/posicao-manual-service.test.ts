@@ -408,4 +408,344 @@ describe("posicao-manual-service", () => {
     // montagem de posicoesManuaisRevisao existir. Aqui validamos apenas a
     // transição de estado em si, conforme escopo desta task.
   });
+
+  // T013 (User Story 2, FR-005/FR-009/FR-006): `criarOuAtualizarAjuste` ainda
+  // NÃO existe em src/services/posicao-manual-service.ts neste ponto (T015 é
+  // quem implementa) — os testes abaixo devem FALHAR agora (TDD), sem quebrar
+  // os testes de criarPosicaoManual/editarPosicaoManual/encerrarPosicaoManual
+  // acima (T005/T007, já implementados).
+  describe("criarOuAtualizarAjuste", () => {
+    async function criarAtivoMapeado(chaveExport: string, alvoId: string) {
+      return prisma.ativo_mapeado.create({
+        data: { chave_export: chaveExport, alvo_id: alvoId },
+      });
+    }
+
+    it("cria um ajuste_valor_investido associado à sessão VIGENTE mais recente (FR-005)", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await criarAtivoMapeado("FUNDO-XPTO", alvo.id);
+
+      const resultado = await posicaoManualService.criarOuAtualizarAjuste({
+        chaveExport: "FUNDO-XPTO",
+        valorInvestidoCentavosCorrigido: 300_000,
+      });
+
+      expect(resultado.chaveExport).toBe("FUNDO-XPTO");
+      expect(resultado.valorInvestidoCentavosCorrigido).toBe(300_000);
+
+      const noBanco = await prisma.ajuste_valor_investido.findUnique({
+        where: {
+          chave_export_sessao_import_id: {
+            chave_export: "FUNDO-XPTO",
+            sessao_import_id: sessao.id,
+          },
+        },
+      });
+      expect(noBanco).not.toBeNull();
+      expect(noBanco?.valor_investido_corrigido_centavos).toBe(300_000);
+      expect(Number.isInteger(noBanco?.valor_investido_corrigido_centavos)).toBe(true);
+
+      // Exatamente um snapshot criado — nenhuma linha "fantasma" gerada.
+      expect(await prisma.ajuste_valor_investido.count()).toBe(1);
+    });
+
+    it("chamar de novo para o mesmo chaveExport NA MESMA sessão vigente ATUALIZA (não duplica) — @@unique([chave_export, sessao_import_id])", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await criarAtivoMapeado("FUNDO-XPTO", alvo.id);
+
+      await posicaoManualService.criarOuAtualizarAjuste({
+        chaveExport: "FUNDO-XPTO",
+        valorInvestidoCentavosCorrigido: 300_000,
+      });
+      const segundaChamada = await posicaoManualService.criarOuAtualizarAjuste({
+        chaveExport: "FUNDO-XPTO",
+        valorInvestidoCentavosCorrigido: 350_000,
+      });
+
+      expect(segundaChamada.valorInvestidoCentavosCorrigido).toBe(350_000);
+
+      // Nenhuma duplicata — continua havendo só uma linha para este par
+      // (chave_export, sessao_import_id).
+      expect(
+        await prisma.ajuste_valor_investido.count({
+          where: { chave_export: "FUNDO-XPTO", sessao_import_id: sessao.id },
+        }),
+      ).toBe(1);
+
+      const noBanco = await prisma.ajuste_valor_investido.findUnique({
+        where: {
+          chave_export_sessao_import_id: {
+            chave_export: "FUNDO-XPTO",
+            sessao_import_id: sessao.id,
+          },
+        },
+      });
+      expect(noBanco?.valor_investido_corrigido_centavos).toBe(350_000);
+    });
+
+    it("usa a sessão VIGENTE mais recente, ignorando sessões SUBSTITUIDO", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      const sessaoAntiga = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+      const sessaoAtual = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await criarAtivoMapeado("FUNDO-XPTO", alvo.id);
+
+      await posicaoManualService.criarOuAtualizarAjuste({
+        chaveExport: "FUNDO-XPTO",
+        valorInvestidoCentavosCorrigido: 300_000,
+      });
+
+      const naAtual = await prisma.ajuste_valor_investido.findUnique({
+        where: {
+          chave_export_sessao_import_id: {
+            chave_export: "FUNDO-XPTO",
+            sessao_import_id: sessaoAtual.id,
+          },
+        },
+      });
+      const naAntiga = await prisma.ajuste_valor_investido.findUnique({
+        where: {
+          chave_export_sessao_import_id: {
+            chave_export: "FUNDO-XPTO",
+            sessao_import_id: sessaoAntiga.id,
+          },
+        },
+      });
+
+      expect(naAtual).not.toBeNull();
+      expect(naAntiga).toBeNull();
+    });
+
+    it("NUNCA toca posicao.patrimonio_hoje_centavos (valor_atual) — FR-006", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await criarAtivoMapeado("FUNDO-XPTO", alvo.id);
+      const posicaoCsv = await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessao.id,
+          chave_export: "FUNDO-XPTO",
+          instituicao: "XP",
+          quantidade: "100",
+          patrimonio_hoje_centavos: 400_000,
+          tipo_grupo: "FUNDO",
+        },
+      });
+
+      await posicaoManualService.criarOuAtualizarAjuste({
+        chaveExport: "FUNDO-XPTO",
+        valorInvestidoCentavosCorrigido: 300_000,
+      });
+
+      const posicaoDepois = await prisma.posicao.findUniqueOrThrow({
+        where: { id: posicaoCsv.id },
+      });
+      expect(posicaoDepois.patrimonio_hoje_centavos).toBe(400_000);
+
+      // Chamar novamente com outro valor corrigido — continua sem tocar
+      // valor_atual/patrimonio_hoje_centavos.
+      await posicaoManualService.criarOuAtualizarAjuste({
+        chaveExport: "FUNDO-XPTO",
+        valorInvestidoCentavosCorrigido: 999_999,
+      });
+      const posicaoDepoisDaSegunda = await prisma.posicao.findUniqueOrThrow({
+        where: { id: posicaoCsv.id },
+      });
+      expect(posicaoDepoisDaSegunda.patrimonio_hoje_centavos).toBe(400_000);
+    });
+
+    it("primeira vez (sem chamada ainda): não existe nenhum ajuste_valor_investido para o chave_export — FR-009", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await criarAtivoMapeado("FUNDO-XPTO", alvo.id);
+
+      // Sem chamar criarOuAtualizarAjuste ainda — valida diretamente contra o
+      // banco que "primeira vez" (FR-009) significa "nenhum registro" (o
+      // conceito de valorInvestidoCorrigido: null é responsabilidade de uma
+      // função de LEITURA fora do escopo desta task — T019/listarPosicoesManuaisEAjustes).
+      const existente = await prisma.ajuste_valor_investido.findFirst({
+        where: { chave_export: "FUNDO-XPTO" },
+      });
+      expect(existente).toBeNull();
+    });
+
+    it("falha alto (fail loud) sem NENHUMA sessão de import VIGENTE — mesma mensagem de criarPosicaoManual/aporte-service.ts", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      await criarAtivoMapeado("FUNDO-XPTO", alvo.id);
+
+      await expect(
+        posicaoManualService.criarOuAtualizarAjuste({
+          chaveExport: "FUNDO-XPTO",
+          valorInvestidoCentavosCorrigido: 300_000,
+        }),
+      ).rejects.toThrow(
+        "Nenhuma sessão de import VIGENTE encontrada — realize um import antes de calcular o aporte.",
+      );
+
+      expect(await prisma.ajuste_valor_investido.count()).toBe(0);
+    });
+
+    it("falha alto quando só existem sessões SUBSTITUIDO (nenhuma VIGENTE)", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+      await criarAtivoMapeado("FUNDO-XPTO", alvo.id);
+
+      await expect(
+        posicaoManualService.criarOuAtualizarAjuste({
+          chaveExport: "FUNDO-XPTO",
+          valorInvestidoCentavosCorrigido: 300_000,
+        }),
+      ).rejects.toThrow(
+        "Nenhuma sessão de import VIGENTE encontrada — realize um import antes de calcular o aporte.",
+      );
+
+      expect(await prisma.ajuste_valor_investido.count()).toBe(0);
+    });
+  });
+
+  // T017 (User Story 2, 6.9): listarAjustesAtivos — leitura para a tela
+  // dedicada, fora do fluxo de import. "Sob ajuste" = existe pelo menos um
+  // ajuste_valor_investido histórico E o ativo_mapeado correspondente ainda
+  // está vinculado a um alvo ativo (alvo_id != null, fora_da_carteira=false,
+  // ignorar_no_import=false) — condição derivada de data-model.md.
+  describe("listarAjustesAtivos", () => {
+    async function criarAtivoMapeado(
+      chaveExport: string,
+      overrides: {
+        alvoId?: string | null;
+        foraDaCarteira?: boolean;
+        ignorarNoImport?: boolean;
+      } = {},
+    ) {
+      return prisma.ativo_mapeado.create({
+        data: {
+          chave_export: chaveExport,
+          alvo_id: overrides.alvoId === undefined ? null : overrides.alvoId,
+          fora_da_carteira: overrides.foraDaCarteira ?? false,
+          ignorar_no_import: overrides.ignorarNoImport ?? false,
+        },
+      });
+    }
+
+    it("retorna [] quando não há nenhum ajuste_valor_investido", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      await criarAtivoMapeado("FUNDO-XPTO", { alvoId: alvo.id });
+
+      const resultado = await posicaoManualService.listarAjustesAtivos();
+
+      expect(resultado).toEqual([]);
+    });
+
+    it("agrupa por chave_export mantendo só o valor mais recente quando há múltiplos ajustes em sessões diferentes", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      const sessaoAntiga = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+      const sessaoRecente = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await criarAtivoMapeado("FUNDO-XPTO", { alvoId: alvo.id });
+
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO-XPTO",
+          sessao_import_id: sessaoAntiga.id,
+          valor_investido_corrigido_centavos: 100_000,
+        },
+      });
+      // criado_em depende da ordem de inserção (default now()); o segundo
+      // registro criado é o mais recente, independentemente do status da
+      // sessão a que está associado.
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO-XPTO",
+          sessao_import_id: sessaoRecente.id,
+          valor_investido_corrigido_centavos: 350_000,
+        },
+      });
+
+      const resultado = await posicaoManualService.listarAjustesAtivos();
+
+      expect(resultado).toHaveLength(1);
+      expect(resultado[0]).toMatchObject({
+        chaveExport: "FUNDO-XPTO",
+        alvoId: alvo.id,
+        valorInvestidoCentavosCorrigido: 350_000,
+      });
+    });
+
+    it("exclui chave_export cujo ativo_mapeado tem alvo_id IS NULL", async () => {
+      await criarAtivoMapeado("FUNDO-SEM-ALVO", { alvoId: null });
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO-SEM-ALVO",
+          sessao_import_id: sessao.id,
+          valor_investido_corrigido_centavos: 100_000,
+        },
+      });
+
+      const resultado = await posicaoManualService.listarAjustesAtivos();
+
+      expect(resultado).toEqual([]);
+    });
+
+    it("exclui chave_export cujo ativo_mapeado está fora_da_carteira=true", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      await criarAtivoMapeado("FUNDO-FORA", { alvoId: alvo.id, foraDaCarteira: true });
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO-FORA",
+          sessao_import_id: sessao.id,
+          valor_investido_corrigido_centavos: 100_000,
+        },
+      });
+
+      const resultado = await posicaoManualService.listarAjustesAtivos();
+
+      expect(resultado).toEqual([]);
+    });
+
+    it("exclui chave_export cujo ativo_mapeado está ignorar_no_import=true", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      await criarAtivoMapeado("FUNDO-IGNORADO", { alvoId: alvo.id, ignorarNoImport: true });
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO-IGNORADO",
+          sessao_import_id: sessao.id,
+          valor_investido_corrigido_centavos: 100_000,
+        },
+      });
+
+      const resultado = await posicaoManualService.listarAjustesAtivos();
+
+      expect(resultado).toEqual([]);
+    });
+
+    it("mistura chaves válidas e excluídas, retornando apenas a válida com o nome do alvo", async () => {
+      const alvo = await criarAlvo("Fundos Imobiliários", 1500);
+      await criarAtivoMapeado("FUNDO-VALIDO", { alvoId: alvo.id });
+      await criarAtivoMapeado("FUNDO-FORA-CARTEIRA", { alvoId: alvo.id, foraDaCarteira: true });
+      await criarAtivoMapeado("FUNDO-SEM-ALVO", { alvoId: null });
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+
+      for (const chave of ["FUNDO-VALIDO", "FUNDO-FORA-CARTEIRA", "FUNDO-SEM-ALVO"]) {
+        await prisma.ajuste_valor_investido.create({
+          data: {
+            chave_export: chave,
+            sessao_import_id: sessao.id,
+            valor_investido_corrigido_centavos: 200_000,
+          },
+        });
+      }
+
+      const resultado = await posicaoManualService.listarAjustesAtivos();
+
+      expect(resultado).toHaveLength(1);
+      expect(resultado[0]).toEqual({
+        chaveExport: "FUNDO-VALIDO",
+        alvoId: alvo.id,
+        nomeAlvo: "Fundos Imobiliários",
+        valorInvestidoCentavosCorrigido: 200_000,
+      });
+    });
+  });
 });
