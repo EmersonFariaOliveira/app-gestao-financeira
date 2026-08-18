@@ -76,9 +76,15 @@ export async function getAllConfig(): Promise<Record<ChaveConfig, unknown>> {
 //   - Alvos da vigência ABERTA (o estado "editável" hoje; vigências FECHADAS
 //     são histórico/auditoria, nunca fazem parte de um backup portável de
 //     configuração — reimportar não deve ressuscitar nem duplicar histórico).
-//   - Vínculos RESOLVIDOS de `ativo_mapeado` (apontando para um alvo ou
-//     marcados fora-da-carteira). Vínculos PENDENTES (alvo_id null AND
-//     fora_da_carteira false) são deliberadamente EXCLUÍDOS: são estado
+//   - Vínculos RESOLVIDOS de `ativo_mapeado`, nos 4 estados mutuamente
+//     exclusivos possíveis: (a) vinculado a um alvo (`alvo_id` preenchido,
+//     `ignorar_no_import=false`); (b) fora-da-carteira
+//     (`fora_da_carteira=true`); (c) ignorado no import (`alvo_id`
+//     preenchido E `ignorar_no_import=true` — vínculo cujo ativo foi
+//     substituído por uma posição manual); (d) reserva de emergência
+//     (`reserva_emergencia=true`, sempre com `alvo_id=null`). Vínculos
+//     PENDENTES (alvo_id null AND fora_da_carteira false AND
+//     reserva_emergencia false) são deliberadamente EXCLUÍDOS: são estado
 //     transiente nascido de um import de CSV (import-service), não
 //     "configuração" — um novo import recria as pendências que ainda
 //     existirem, então não há necessidade (nem sentido) de portá-las.
@@ -101,14 +107,24 @@ export interface ConfigExportAlvo {
 
 /**
  * Vínculo portável — referencia o alvo pelo NOME (resolvido para o `id`
- * recém-criado no destino durante o import). `alvoNome` é `null` quando
- * `foraDaCarteira` é `true` (exclusão mútua, igual à invariante de
- * `ativo_mapeado`).
+ * recém-criado no destino durante o import). Representa os 4 estados
+ * mutuamente exclusivos de `ativo_mapeado`:
+ *   - vinculado: `alvoNome` preenchido, `foraDaCarteira=false`,
+ *     `ignorarNoImport=false`, `reservaEmergencia=false`.
+ *   - fora da carteira: `alvoNome=null`, `foraDaCarteira=true`.
+ *   - ignorado no import: `alvoNome` preenchido (exige `alvo_id` no banco),
+ *     `ignorarNoImport=true`.
+ *   - reserva de emergência: `alvoNome=null`, `reservaEmergencia=true`.
+ * `alvoNome` só é uma string quando o vínculo é "vinculado" ou "ignorado"
+ * (ambos exigem `alvo_id`); é `null` quando `foraDaCarteira` ou
+ * `reservaEmergencia`.
  */
 export interface ConfigExportVinculo {
   chaveExport: string;
   alvoNome: string | null;
   foraDaCarteira: boolean;
+  ignorarNoImport: boolean;
+  reservaEmergencia: boolean;
 }
 
 /** Shape do JSON portável produzido por `exportarConfigJson` / consumido por `importarConfigJson`. */
@@ -141,7 +157,11 @@ export async function exportarConfigJson(): Promise<ConfigExportJson> {
     }),
     prisma.ativo_mapeado.findMany({
       where: {
-        OR: [{ alvo_id: { not: null } }, { fora_da_carteira: true }],
+        OR: [
+          { alvo_id: { not: null } },
+          { fora_da_carteira: true },
+          { reserva_emergencia: true },
+        ],
       },
       include: { alvo: true },
       orderBy: { chave_export: "asc" },
@@ -162,8 +182,10 @@ export async function exportarConfigJson(): Promise<ConfigExportJson> {
     })),
     vinculos: vinculosResolvidos.map((v) => ({
       chaveExport: v.chave_export,
-      alvoNome: v.fora_da_carteira ? null : (v.alvo?.nome ?? null),
+      alvoNome: v.fora_da_carteira || v.reserva_emergencia ? null : (v.alvo?.nome ?? null),
       foraDaCarteira: v.fora_da_carteira,
+      ignorarNoImport: v.ignorar_no_import,
+      reservaEmergencia: v.reserva_emergencia,
     })),
   };
 }
@@ -240,14 +262,41 @@ function validarConfigJson(json: unknown): asserts json is ConfigExportJson {
     if (typeof vinculo.foraDaCarteira !== "boolean") {
       throw new ConfigJsonInvalidoError(`vinculos[${i}].foraDaCarteira ausente ou não booleano.`);
     }
-    if (!vinculo.foraDaCarteira && typeof vinculo.alvoNome !== "string") {
+    // Campos novos (ignorarNoImport/reservaEmergencia) — ausentes em JSONs de
+    // versão 1 exportados antes desta correção; default seguro `false` para
+    // compatibilidade retroativa (mesmo espírito do campo `versao`).
+    if (vinculo.ignorarNoImport !== undefined && typeof vinculo.ignorarNoImport !== "boolean") {
+      throw new ConfigJsonInvalidoError(`vinculos[${i}].ignorarNoImport não é booleano.`);
+    }
+    if (vinculo.reservaEmergencia !== undefined && typeof vinculo.reservaEmergencia !== "boolean") {
+      throw new ConfigJsonInvalidoError(`vinculos[${i}].reservaEmergencia não é booleano.`);
+    }
+    const ignorarNoImport = vinculo.ignorarNoImport === true;
+    const reservaEmergencia = vinculo.reservaEmergencia === true;
+
+    if (vinculo.foraDaCarteira && reservaEmergencia) {
       throw new ConfigJsonInvalidoError(
-        `vinculos[${i}] não está fora da carteira, mas "alvoNome" não é uma string.`,
+        `vinculos[${i}] não pode ser "foraDaCarteira" e "reservaEmergencia" ao mesmo tempo (exclusão mútua).`,
       );
     }
-    if (vinculo.foraDaCarteira && vinculo.alvoNome !== null && vinculo.alvoNome !== undefined) {
+
+    // alvoNome só é permitido (e obrigatório) para os estados "vinculado" e
+    // "ignorado" (ambos exigem alvo_id) — null/undefined para "fora da
+    // carteira" e "reserva de emergência".
+    const exigeAlvoNome = !vinculo.foraDaCarteira && !reservaEmergencia;
+    if (exigeAlvoNome && typeof vinculo.alvoNome !== "string") {
       throw new ConfigJsonInvalidoError(
-        `vinculos[${i}] está fora da carteira, mas "alvoNome" deveria ser null (exclusão mútua).`,
+        `vinculos[${i}] não está fora da carteira nem é reserva de emergência, mas "alvoNome" não é uma string.`,
+      );
+    }
+    if (!exigeAlvoNome && vinculo.alvoNome !== null && vinculo.alvoNome !== undefined) {
+      throw new ConfigJsonInvalidoError(
+        `vinculos[${i}] está fora da carteira ou é reserva de emergência, mas "alvoNome" deveria ser null (exclusão mútua).`,
+      );
+    }
+    if (ignorarNoImport && typeof vinculo.alvoNome !== "string") {
+      throw new ConfigJsonInvalidoError(
+        `vinculos[${i}] tem "ignorarNoImport" true, mas "alvoNome" não é uma string (ignorado exige um alvo vinculado).`,
       );
     }
   }
@@ -283,7 +332,10 @@ export interface ImportarConfigResultado {
  * 3. **Vínculos**: para cada vínculo do JSON, o alvo é resolvido pelo NOME
  *    entre os alvos recém-criados (passo 2) e o registro de
  *    `ativo_mapeado` correspondente é criado/atualizado (upsert) por
- *    `chave_export`. Política de mesclagem escolhida: **vínculos existentes
+ *    `chave_export`, recriando os 4 estados mutuamente exclusivos
+ *    (vinculado / fora-da-carteira / ignorado-no-import / reserva de
+ *    emergência) a partir de `alvoNome`/`foraDaCarteira`/`ignorarNoImport`/
+ *    `reservaEmergencia`. Política de mesclagem escolhida: **vínculos existentes
  *    que não aparecem no JSON NÃO são apagados nem alterados** — ficam como
  *    estavam (o que, após o fechamento da vigência no passo 2, tipicamente
  *    significa que continuam apontando para um alvo agora histórico/fechado,
@@ -341,8 +393,12 @@ export async function importarConfigJson(json: unknown): Promise<ImportarConfigR
     let vinculosCriados = 0;
     let vinculosAtualizados = 0;
     for (const v of json.vinculos) {
+      const ignorarNoImport = v.ignorarNoImport === true;
+      const reservaEmergencia = v.reservaEmergencia === true;
+      const exigeAlvoId = !v.foraDaCarteira && !reservaEmergencia; // vinculado ou ignorado
+
       let alvoId: string | null = null;
-      if (!v.foraDaCarteira) {
+      if (exigeAlvoId) {
         const id = idPorNome.get(v.alvoNome ?? "");
         if (!id) {
           throw new ConfigJsonInvalidoError(
@@ -355,8 +411,19 @@ export async function importarConfigJson(json: unknown): Promise<ImportarConfigR
       const existente = await tx.ativo_mapeado.findUnique({ where: { chave_export: v.chaveExport } });
       await tx.ativo_mapeado.upsert({
         where: { chave_export: v.chaveExport },
-        create: { chave_export: v.chaveExport, alvo_id: alvoId, fora_da_carteira: v.foraDaCarteira },
-        update: { alvo_id: alvoId, fora_da_carteira: v.foraDaCarteira },
+        create: {
+          chave_export: v.chaveExport,
+          alvo_id: alvoId,
+          fora_da_carteira: v.foraDaCarteira,
+          ignorar_no_import: ignorarNoImport,
+          reserva_emergencia: reservaEmergencia,
+        },
+        update: {
+          alvo_id: alvoId,
+          fora_da_carteira: v.foraDaCarteira,
+          ignorar_no_import: ignorarNoImport,
+          reserva_emergencia: reservaEmergencia,
+        },
       });
       if (existente) {
         vinculosAtualizados += 1;
