@@ -261,7 +261,8 @@ async function montarContextoEntradaMotor(): Promise<ContextoEntradaMotor> {
     // Regra §2.1 (contracts/motor-integracao.md): chave_export marcado
     // ignorar_no_import é excluída INTEIRAMENTE da consolidação do CSV —
     // nunca entra em posicoes[] com o dado do CSV, é substituída pela
-    // posicao_manual vinculada ao mesmo alvo (bloco abaixo, §2.2).
+    // posicao_manual identificada por chave_export_origem (bloco abaixo,
+    // §2.2) — não pelo mesmo alvo (alvo_id fica null nesse estado).
     if (mapaPorChave.get(p.chave_export)?.ignorar_no_import) continue;
 
     const existente = consolidadoPorChave.get(p.chave_export);

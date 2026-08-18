@@ -79,11 +79,12 @@ export async function getAllConfig(): Promise<Record<ChaveConfig, unknown>> {
 //   - Vínculos RESOLVIDOS de `ativo_mapeado`, nos 4 estados mutuamente
 //     exclusivos possíveis: (a) vinculado a um alvo (`alvo_id` preenchido,
 //     `ignorar_no_import=false`); (b) fora-da-carteira
-//     (`fora_da_carteira=true`); (c) ignorado no import (`alvo_id`
-//     preenchido E `ignorar_no_import=true` — vínculo cujo ativo foi
-//     substituído por uma posição manual); (d) reserva de emergência
-//     (`reserva_emergencia=true`, sempre com `alvo_id=null`). Vínculos
-//     PENDENTES (alvo_id null AND fora_da_carteira false AND
+//     (`fora_da_carteira=true`); (c) ignorado no import
+//     (`ignorar_no_import=true`, sempre com `alvo_id=null` — vínculo cujo
+//     ativo foi substituído por uma posição manual, identificada por
+//     `posicao_manual.chave_export_origem`, não por `ativo_mapeado.alvo_id`);
+//     (d) reserva de emergência (`reserva_emergencia=true`, sempre com
+//     `alvo_id=null`). Vínculos PENDENTES (alvo_id null AND fora_da_carteira false AND
 //     reserva_emergencia false) são deliberadamente EXCLUÍDOS: são estado
 //     transiente nascido de um import de CSV (import-service), não
 //     "configuração" — um novo import recria as pendências que ainda
@@ -112,12 +113,13 @@ export interface ConfigExportAlvo {
  *   - vinculado: `alvoNome` preenchido, `foraDaCarteira=false`,
  *     `ignorarNoImport=false`, `reservaEmergencia=false`.
  *   - fora da carteira: `alvoNome=null`, `foraDaCarteira=true`.
- *   - ignorado no import: `alvoNome` preenchido (exige `alvo_id` no banco),
- *     `ignorarNoImport=true`.
+ *   - ignorado no import: `alvoNome=null`, `ignorarNoImport=true` (não
+ *     carrega alvo — o ativo foi substituído por uma `posicao_manual`, que
+ *     tem seu próprio alvo via `chave_export_origem`; fora do escopo deste
+ *     export/import de configuração).
  *   - reserva de emergência: `alvoNome=null`, `reservaEmergencia=true`.
- * `alvoNome` só é uma string quando o vínculo é "vinculado" ou "ignorado"
- * (ambos exigem `alvo_id`); é `null` quando `foraDaCarteira` ou
- * `reservaEmergencia`.
+ * `alvoNome` só é uma string quando o vínculo é "vinculado" (único estado
+ * que exige `alvo_id`); é `null` nos outros três.
  */
 export interface ConfigExportVinculo {
   chaveExport: string;
@@ -161,6 +163,12 @@ export async function exportarConfigJson(): Promise<ConfigExportJson> {
           { alvo_id: { not: null } },
           { fora_da_carteira: true },
           { reserva_emergencia: true },
+          // Sem isto, nenhum registro "ignorado no import" seria capturado:
+          // desde a reversão da invariante (alvo_id sempre null neste
+          // estado — mapeamento-service.ts), `alvo_id: {not: null}` não
+          // cobre mais este caso, ao contrário de quando ignorar_no_import
+          // ainda preservava alvo_id.
+          { ignorar_no_import: true },
         ],
       },
       include: { alvo: true },
@@ -182,7 +190,10 @@ export async function exportarConfigJson(): Promise<ConfigExportJson> {
     })),
     vinculos: vinculosResolvidos.map((v) => ({
       chaveExport: v.chave_export,
-      alvoNome: v.fora_da_carteira || v.reserva_emergencia ? null : (v.alvo?.nome ?? null),
+      // `v.alvo` já é `null` para fora_da_carteira/reserva_emergencia/
+      // ignorar_no_import (invariante de ativo_mapeado — mapeamento-service.ts)
+      // — `?? null` aqui é só defensivo, não um caso real hoje.
+      alvoNome: v.fora_da_carteira || v.reserva_emergencia || v.ignorar_no_import ? null : (v.alvo?.nome ?? null),
       foraDaCarteira: v.fora_da_carteira,
       ignorarNoImport: v.ignorar_no_import,
       reservaEmergencia: v.reserva_emergencia,
@@ -279,24 +290,34 @@ function validarConfigJson(json: unknown): asserts json is ConfigExportJson {
         `vinculos[${i}] não pode ser "foraDaCarteira" e "reservaEmergencia" ao mesmo tempo (exclusão mútua).`,
       );
     }
+    if (ignorarNoImport && (vinculo.foraDaCarteira || reservaEmergencia)) {
+      throw new ConfigJsonInvalidoError(
+        `vinculos[${i}] não pode ser "ignorarNoImport" e "foraDaCarteira"/"reservaEmergencia" ao mesmo tempo (exclusão mútua).`,
+      );
+    }
 
-    // alvoNome só é permitido (e obrigatório) para os estados "vinculado" e
-    // "ignorado" (ambos exigem alvo_id) — null/undefined para "fora da
-    // carteira" e "reserva de emergência".
-    const exigeAlvoNome = !vinculo.foraDaCarteira && !reservaEmergencia;
+    // alvoNome só é permitido (e obrigatório) para o estado "vinculado"
+    // (único que exige alvo_id) — null/undefined para "fora da carteira" e
+    // "reserva de emergência". "Ignorado no import" também não exige mais
+    // alvoNome (invariante revertida — ativo_mapeado.alvo_id=null neste
+    // estado), mas JSONs exportados ANTES desta correção podem trazer
+    // `alvoNome` como string aqui (quando a exceção antiga ainda existia) —
+    // tolerado por compatibilidade retroativa e simplesmente ignorado no
+    // passo 3 do import (o alvo nunca é aplicado ao registro "ignorado").
+    const exigeAlvoNome = !vinculo.foraDaCarteira && !reservaEmergencia && !ignorarNoImport;
     if (exigeAlvoNome && typeof vinculo.alvoNome !== "string") {
       throw new ConfigJsonInvalidoError(
-        `vinculos[${i}] não está fora da carteira nem é reserva de emergência, mas "alvoNome" não é uma string.`,
+        `vinculos[${i}] não está fora da carteira, não é reserva de emergência nem ignorado no import, mas "alvoNome" não é uma string.`,
       );
     }
-    if (!exigeAlvoNome && vinculo.alvoNome !== null && vinculo.alvoNome !== undefined) {
+    if (
+      !exigeAlvoNome &&
+      !ignorarNoImport &&
+      vinculo.alvoNome !== null &&
+      vinculo.alvoNome !== undefined
+    ) {
       throw new ConfigJsonInvalidoError(
         `vinculos[${i}] está fora da carteira ou é reserva de emergência, mas "alvoNome" deveria ser null (exclusão mútua).`,
-      );
-    }
-    if (ignorarNoImport && typeof vinculo.alvoNome !== "string") {
-      throw new ConfigJsonInvalidoError(
-        `vinculos[${i}] tem "ignorarNoImport" true, mas "alvoNome" não é uma string (ignorado exige um alvo vinculado).`,
       );
     }
   }
@@ -395,7 +416,10 @@ export async function importarConfigJson(json: unknown): Promise<ImportarConfigR
     for (const v of json.vinculos) {
       const ignorarNoImport = v.ignorarNoImport === true;
       const reservaEmergencia = v.reservaEmergencia === true;
-      const exigeAlvoId = !v.foraDaCarteira && !reservaEmergencia; // vinculado ou ignorado
+      // Só "vinculado" exige alvo_id — "ignorado no import" nunca aplica
+      // alvoNome ao registro, mesmo quando presente em JSONs antigos
+      // (tolerados pela validação acima por compatibilidade retroativa).
+      const exigeAlvoId = !v.foraDaCarteira && !reservaEmergencia && !ignorarNoImport;
 
       let alvoId: string | null = null;
       if (exigeAlvoId) {
