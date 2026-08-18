@@ -38,6 +38,14 @@ const COLUNAS_OBRIGATORIAS = [
 const COLUNA_TIPO_ATIVO_INTERNACIONAL = "tipoAtivoInternacional";
 
 /**
+ * Coluna opcional (feature 003 / research.md R2). Ao contrário de
+ * "Patrimônio Hoje", ausência/valor inválido NUNCA gera `ErroParse` nem
+ * invalida o arquivo — vira `null` apenas naquela linha (ou em todas,
+ * quando a coluna falta no cabeçalho).
+ */
+const COLUNA_PATRIMONIO_APLICADO = "Patrimônio Aplicado";
+
+/**
  * Decodifica os bytes crus do upload como UTF-8 e remove o BOM inicial
  * (`EF BB BF`), se presente. Funciona igual sem BOM.
  */
@@ -165,6 +173,7 @@ export function parseArquivoMyCapital(input: ArquivoImport): ResultadoParse {
   const indiceTipoAtivoInternacional = mapaColunas.get(
     COLUNA_TIPO_ATIVO_INTERNACIONAL,
   );
+  const indicePatrimonioAplicado = mapaColunas.get(COLUNA_PATRIMONIO_APLICADO);
 
   const linhasParseadas: PosicaoParseada[] = [];
 
@@ -182,6 +191,24 @@ export function parseArquivoMyCapital(input: ArquivoImport): ResultadoParse {
       indiceTipoAtivoInternacional !== undefined
         ? valorOuNulo(campos[indiceTipoAtivoInternacional])
         : null;
+    const patrimonioAplicadoRaw =
+      indicePatrimonioAplicado !== undefined
+        ? valorOuNulo(campos[indicePatrimonioAplicado])
+        : null;
+
+    // Coluna opcional (research.md R2): valor ausente/"null"/vazio ou
+    // não-numérico vira `null` apenas nesta linha — NUNCA gera `ErroParse`
+    // nem invalida o arquivo, ao contrário de "Patrimônio Hoje".
+    let patrimonioAplicadoCentavos: number | null = null;
+    if (patrimonioAplicadoRaw !== null) {
+      try {
+        patrimonioAplicadoCentavos = parseDecimalParaCentavos(
+          patrimonioAplicadoRaw,
+        );
+      } catch {
+        patrimonioAplicadoCentavos = null;
+      }
+    }
 
     let patrimonioHojeCentavos: number | null = null;
     if (patrimonioHojeRaw === null) {
@@ -228,6 +255,7 @@ export function parseArquivoMyCapital(input: ArquivoImport): ResultadoParse {
       tipoGrupo: tipoGrupo ?? "",
       tipoAtivoInternacional,
       dataUltimaCotacao,
+      patrimonioAplicadoCentavos,
     });
   });
 

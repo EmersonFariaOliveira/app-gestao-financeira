@@ -58,6 +58,15 @@ export interface PosicaoParseada {
    * datetime), ou `null` quando ausente ou literal "null".
    */
   dataUltimaCotacao: string | null;
+  /**
+   * Coluna "Patrimônio Aplicado" do CSV, convertida para centavos inteiros —
+   * mesmo tratamento de parseDecimalParaCentavos já usado para
+   * patrimonioHojeCentavos. `null` quando a coluna está ausente do
+   * cabeçalho, veio "null" literal, veio vazia, ou não é um número válido
+   * naquela linha — NUNCA lança erro nem invalida o arquivo por causa deste
+   * campo (research.md R2: coluna opcional, ao contrário de Patrimônio Hoje).
+   */
+  patrimonioAplicadoCentavos: number | null;
 }
 
 /** Resultado de um parse bem-sucedido (nenhum erro em nenhuma linha). */
