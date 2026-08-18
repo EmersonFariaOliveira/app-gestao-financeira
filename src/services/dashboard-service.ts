@@ -19,9 +19,11 @@ import { contarPendencias } from "@/services/mapeamento-service";
 // ## Decisões de design documentadas (pedidas explicitamente pela task)
 //
 // 1. **"Patrimônio na carteira" vs. "fora da carteira" vs. "pendente"**:
-//    - `patrimonioTotalCentavos` = soma de TODAS as posições consolidadas da
-//      sessão vigente, não importa o estado de vínculo (é o número "quanto eu
-//      tenho, no total, ponto final" do topo do dashboard).
+//    - `patrimonioTotalCentavos` = soma das posições consolidadas da sessão
+//      vigente EXCETO as marcadas `ignorar_no_import = true` (é o número
+//      "quanto eu tenho, no total, ponto final" do topo do dashboard — ver
+//      nota sobre `patrimonioIgnoradoCentavos` abaixo para o porquê da
+//      exclusão).
 //    - `patrimonioNaCarteiraCentavos` = soma apenas das posições VINCULADAS a
 //      um alvo (`alvo_id != null`) e não fora-da-carteira. Esta é
 //      exatamente a mesma base que `src/core/motor/deficit.ts` usa como
@@ -59,13 +61,18 @@ import { contarPendencias } from "@/services/mapeamento-service";
 //      uma `posicao_manual`), checado com a MESMA prioridade de
 //      `mapeamento-service.listarVinculos` (`ignorar_no_import` vem ANTES
 //      de fora_da_carteira/reserva_emergencia/alvo_id). Excluída da base do
-//      motor e de todos os outros baldes — nunca infla
-//      `patrimonioPendenteCentavos` nem `patrimonioNaCarteiraCentavos`.
+//      motor e de TODOS os outros baldes — nunca infla
+//      `patrimonioPendenteCentavos`, `patrimonioNaCarteiraCentavos` NEM
+//      `patrimonioTotalCentavos` ("quanto eu tenho" nunca deveria contar uma
+//      posição que o usuário já declarou substituída por uma
+//      `posicao_manual`; somá-la infla o número do topo do dashboard).
 //      `posicao_manual` não tem campo equivalente (ela É a substituta, não a
-//      ignorada), então este balde só existe do lado de `ativo_mapeado`.
+//      ignorada), então este balde só existe do lado de `ativo_mapeado` e é
+//      retornado à parte (`patrimonioIgnoradoCentavos`) só para quem
+//      precisar auditar o valor ignorado — hoje nenhuma tela o exibe.
 //    - Invariante: `patrimonioTotalCentavos === patrimonioNaCarteiraCentavos +
 //      patrimonioForaDaCarteiraCentavos + patrimonioReservaEmergenciaCentavos +
-//      patrimonioPendenteCentavos + patrimonioIgnoradoCentavos`.
+//      patrimonioPendenteCentavos` (SEM somar `patrimonioIgnoradoCentavos`).
 //    - `posicao_manual` (feature 002-posicoes-manuais-ajustes) participa dos
 //      quatro totais acima com a MESMA máquina de estados e a MESMA
 //      prioridade de classificação de `ativo_mapeado` (foraDaCarteira →
@@ -312,7 +319,6 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
   const pendentes: AtivoComValor[] = [];
 
   for (const [chaveExport, valorCentavos] of valorPorChave) {
-    patrimonioTotalCentavos += valorCentavos;
     const mapeamento = mapaPorChave.get(chaveExport);
     const alvoId = mapeamento?.alvo_id ?? null;
     const ignorarNoImportFlag = mapeamento?.ignorar_no_import ?? false;
@@ -380,8 +386,6 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
       const valorCentavos = snapshot.valor_atual_centavos;
       const chaveExport = posicaoManual.chave_manual;
 
-      patrimonioTotalCentavos += valorCentavos;
-
       if (posicaoManual.fora_da_carteira) {
         patrimonioForaDaCarteiraCentavos += valorCentavos;
         foraDaCarteira.push({ chaveExport, valorCentavos });
@@ -400,6 +404,18 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
       }
     }
   }
+
+  // patrimonioTotalCentavos = soma dos baldes que NÃO excluem a posição da
+  // exibição (na carteira + fora da carteira + reserva de emergência +
+  // pendente) — NUNCA soma patrimonioIgnoradoCentavos, que é um estado
+  // RESOLVIDO excluído de TODAS as somas do sistema (ver nota de design no
+  // topo do arquivo e aporte-service.montarContextoEntradaMotor, que já
+  // exclui `ignorar_no_import` "INTEIRAMENTE da consolidação do CSV").
+  patrimonioTotalCentavos =
+    patrimonioNaCarteiraCentavos +
+    patrimonioForaDaCarteiraCentavos +
+    patrimonioReservaEmergenciaCentavos +
+    patrimonioPendenteCentavos;
 
   return {
     patrimonioTotalCentavos,
@@ -573,6 +589,37 @@ function somarLinhasAporte(json: string): number {
 }
 
 /**
+ * Soma `patrimonio_hoje_centavos` das posições de uma sessão, EXCLUINDO as
+ * marcadas `ignorar_no_import = true` em `ativo_mapeado` — mesma exclusão de
+ * `classificarPosicoesDaSessao` (estado RESOLVIDO, substituído por
+ * `posicao_manual`, nunca deveria inflar nenhuma soma de patrimônio do
+ * sistema, nem aqui na série histórica/auditoria de sessões substituídas).
+ * Cópia deliberada do padrão de consulta a `ativo_mapeado` por
+ * `chave_export` já usado em `classificarPosicoesDaSessao` — não extraída
+ * numa função 100% compartilhada porque as duas já são cópias intencionais
+ * (ver nota da linha ~221-228 sobre duplicação deliberada entre este arquivo
+ * e `aporte-service`); manter o mesmo padrão aqui evita acoplar as duas
+ * funções por uma dependência nova só para uma soma simples.
+ */
+async function somarPatrimonioSemIgnorados(
+  posicoes: Array<{ chave_export: string; patrimonio_hoje_centavos: number }>,
+): Promise<number> {
+  if (posicoes.length === 0) return 0;
+
+  const chaves = Array.from(new Set(posicoes.map((p) => p.chave_export)));
+  const mapeamentos = await prisma.ativo_mapeado.findMany({
+    where: { chave_export: { in: chaves }, ignorar_no_import: true },
+    select: { chave_export: true },
+  });
+  const chavesIgnoradas = new Set(mapeamentos.map((m) => m.chave_export));
+
+  return posicoes.reduce(
+    (acc, p) => (chavesIgnoradas.has(p.chave_export) ? acc : acc + p.patrimonio_hoje_centavos),
+    0,
+  );
+}
+
+/**
  * Dados da tela 6.7 (histórico): série mensal patrimonial (só sessões
  * VIGENTES — nunca as SUBSTITUIDAS, que ficam à parte na auditoria), linha
  * do tempo sugerido vs. executado por aporte registrado, e acesso de
@@ -583,27 +630,26 @@ export async function dadosHistorico(): Promise<DadosHistoricoOutput> {
     prisma.sessao_import.findMany({
       where: { status: "VIGENTE" },
       orderBy: { mes_referencia: "asc" },
-      include: { posicoes: { select: { patrimonio_hoje_centavos: true } } },
+      include: { posicoes: { select: { chave_export: true, patrimonio_hoje_centavos: true } } },
     }),
     prisma.sessao_import.findMany({
       where: { status: "SUBSTITUIDO" },
       orderBy: [{ mes_referencia: "desc" }, { criado_em: "desc" }],
-      include: { posicoes: { select: { patrimonio_hoje_centavos: true } } },
+      include: { posicoes: { select: { chave_export: true, patrimonio_hoje_centavos: true } } },
     }),
     prisma.aporte.findMany({
       include: { sessao_import: { select: { mes_referencia: true } } },
     }),
   ]);
 
-  const serieMensal: PontoSerieMensal[] = sessoesVigentes.map((sessao) => ({
-    sessaoImportId: sessao.id,
-    mesReferencia: sessao.mes_referencia,
-    dataExport: sessao.data_export,
-    patrimonioTotalCentavos: sessao.posicoes.reduce(
-      (acc, p) => acc + p.patrimonio_hoje_centavos,
-      0,
-    ),
-  }));
+  const serieMensal: PontoSerieMensal[] = await Promise.all(
+    sessoesVigentes.map(async (sessao) => ({
+      sessaoImportId: sessao.id,
+      mesReferencia: sessao.mes_referencia,
+      dataExport: sessao.data_export,
+      patrimonioTotalCentavos: await somarPatrimonioSemIgnorados(sessao.posicoes),
+    })),
+  );
 
   const linhaDoTempoAportes: PontoAporteHistorico[] = aportesBrutos
     .map((aporte) => ({
@@ -620,18 +666,15 @@ export async function dadosHistorico(): Promise<DadosHistoricoOutput> {
         a.mesReferencia.localeCompare(b.mesReferencia) || a.criadoEm.getTime() - b.criadoEm.getTime(),
     );
 
-  const sessoesSubstituidas: SessaoSubstituidaAuditoria[] = sessoesSubstituidasBrutas.map(
-    (sessao) => ({
+  const sessoesSubstituidas: SessaoSubstituidaAuditoria[] = await Promise.all(
+    sessoesSubstituidasBrutas.map(async (sessao) => ({
       sessaoImportId: sessao.id,
       mesReferencia: sessao.mes_referencia,
       dataExport: sessao.data_export,
       criadoEm: sessao.criado_em,
       instituicoes: JSON.parse(sessao.instituicoes) as string[],
-      patrimonioTotalCentavos: sessao.posicoes.reduce(
-        (acc, p) => acc + p.patrimonio_hoje_centavos,
-        0,
-      ),
-    }),
+      patrimonioTotalCentavos: await somarPatrimonioSemIgnorados(sessao.posicoes),
+    })),
   );
 
   return { serieMensal, linhaDoTempoAportes, sessoesSubstituidas };
