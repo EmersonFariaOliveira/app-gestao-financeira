@@ -73,7 +73,7 @@ import {
 } from "@/components/ui/table";
 import { formatCentavosParaReais, parseDecimalParaCentavos } from "@/core/money";
 import { useSortableRows } from "@/hooks/use-sortable-rows";
-import type { VinculoVinculado } from "@/services/mapeamento-service";
+import type { VinculoForaDaCarteira, VinculoVinculado } from "@/services/mapeamento-service";
 import type { AjusteAtivoListItem, PosicaoManualListItem } from "@/services/posicao-manual-service";
 
 type Fase = "carregando" | "erro" | "pronto";
@@ -120,11 +120,14 @@ function PosicoesManuaisContent() {
 
   // Seção "Ajustes de fundos" (T017, User Story 2): correção pontual do
   // valor investido de um chave_export que continua vindo do CSV — nunca
-  // toca valor_atual/déficit (FR-006). `vinculados` popula o dropdown de
-  // "qual ativo ajustar" (só ativos vinculados a um alvo fazem sentido
-  // aqui — pendentes/fora-da-carteira/ignorados não).
+  // toca valor_atual/déficit (FR-006). `vinculados` + `foraDaCarteira`
+  // populam o dropdown de "qual ativo ajustar" — pendentes/ignorados/reserva
+  // de emergência não fazem sentido aqui (pendentes ainda não têm alvo
+  // definido e distorceriam o vínculo; reserva/ignorados não entram no
+  // motor de aporte).
   const [ajustes, setAjustes] = useState<AjusteAtivoListItem[]>([]);
   const [vinculados, setVinculados] = useState<VinculoVinculado[]>([]);
+  const [foraDaCarteira, setForaDaCarteira] = useState<VinculoForaDaCarteira[]>([]);
   const [mostrarFormAjuste, setMostrarFormAjuste] = useState(false);
   const [chaveExportSelecionada, setChaveExportSelecionada] = useState("");
   const [valorAjusteTexto, setValorAjusteTexto] = useState("");
@@ -162,6 +165,7 @@ function PosicoesManuaisContent() {
     setAlvos(respAlvos.data);
     setAjustes(respAjustes.data);
     setVinculados(respVinculos.data.vinculados);
+    setForaDaCarteira(respVinculos.data.foraDaCarteira);
     setFase("pronto");
   }, []);
 
@@ -195,10 +199,21 @@ function PosicoesManuaisContent() {
     valorInvestidoCentavosCorrigido: (a) => a.valorInvestidoCentavosCorrigido ?? -1,
   });
 
-  /** chave_export vinculados ainda sem nenhum ajuste cadastrado — evita repetir no dropdown quem já está na tabela abaixo (a edição de quem já tem ajuste é feita pelo botão "Editar" da linha). */
-  const chavesSemAjusteAinda = vinculados.filter(
-    (v) => !ajustes.some((a) => a.chaveExport === v.chaveExport),
-  );
+  /**
+   * chave_export vinculados ou fora-da-carteira ainda sem nenhum ajuste
+   * cadastrado — evita repetir no dropdown quem já está na tabela abaixo (a
+   * edição de quem já tem ajuste é feita pelo botão "Editar" da linha).
+   * Normaliza as duas fontes (`vinculados`/`foraDaCarteira`, shapes
+   * diferentes — só o primeiro tem `nomeAlvo`) numa lista única com rótulo
+   * pronto para exibição.
+   */
+  const chavesSemAjusteAinda = [
+    ...vinculados.map((v) => ({ chaveExport: v.chaveExport, rotulo: `${v.chaveExport} (${v.nomeAlvo})` })),
+    ...foraDaCarteira.map((f) => ({
+      chaveExport: f.chaveExport,
+      rotulo: `${f.chaveExport} (fora da carteira)`,
+    })),
+  ].filter((v) => !ajustes.some((a) => a.chaveExport === v.chaveExport));
 
   function limparFormularioAjuste() {
     setChaveExportSelecionada("");
@@ -592,7 +607,7 @@ function PosicoesManuaisContent() {
                       )}
                     {chavesSemAjusteAinda.map((v) => (
                       <option key={v.chaveExport} value={v.chaveExport}>
-                        {v.chaveExport} ({v.nomeAlvo})
+                        {v.rotulo}
                       </option>
                     ))}
                   </select>
@@ -665,7 +680,7 @@ function PosicoesManuaisContent() {
                     <TableCell className="max-w-56 whitespace-normal break-words">
                       {a.chaveExport}
                     </TableCell>
-                    <TableCell>{a.nomeAlvo ?? "—"}</TableCell>
+                    <TableCell>{a.nomeAlvo ?? "Fora da carteira"}</TableCell>
                     <TableCell>
                       {a.valorInvestidoCentavosCorrigido !== null ? (
                         formatCentavosParaReais(a.valorInvestidoCentavosCorrigido)
