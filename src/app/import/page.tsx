@@ -523,6 +523,43 @@ export default function ImportPage() {
                 </div>
               )}
 
+              {preview.movimentacoesNaoExplicadas.length > 0 && (
+                <div className="flex flex-col gap-2 rounded-lg border border-amber-400/60 bg-amber-400/10 p-3 text-sm">
+                  <p className="font-medium text-amber-700">
+                    Atenção: movimentação de valor investido não explicada pelos aportes
+                    registrados no app.
+                  </p>
+                  <p className="text-muted-foreground">
+                    O valor investido esperado (posição anterior + aportes registrados) não
+                    bate com o valor investido real deste import além da tolerância. Isso não
+                    impede a confirmação — apenas confira se corresponde a um aporte ou resgate
+                    feito fora do app.
+                  </p>
+                  <ul className="flex flex-col gap-1">
+                    {preview.movimentacoesNaoExplicadas.map((item, idx) => (
+                      <li
+                        key={`${item.alvoId}-${item.chaveExport ?? item.posicaoManualId ?? idx}`}
+                        className="rounded-md border border-amber-400/40 bg-background/40 px-2 py-1.5"
+                      >
+                        <span className="font-medium">{item.nomeAlvo}</span>
+                        <span className="text-muted-foreground">
+                          {" "}
+                          (
+                          {item.granularidade === "ativo"
+                            ? `ativo ${item.chaveExport ?? item.posicaoManualId ?? "—"}`
+                            : "soma do alvo — múltiplos ativos elegíveis"}
+                          )
+                        </span>
+                        : esperado {formatCentavosParaReais(item.valorInvestidoEsperadoCentavos)},
+                        real {formatCentavosParaReais(item.valorInvestidoRealCentavos)} (diferença{" "}
+                        {item.diferencaCentavos > 0 ? "+" : ""}
+                        {formatCentavosParaReais(item.diferencaCentavos)}).
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {preview.diff && (
                 <div className="flex flex-col gap-2 text-sm">
                   <p className="font-medium">Diferenças em relação à sessão anterior</p>

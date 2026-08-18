@@ -80,6 +80,37 @@ describe("actions/import", () => {
       });
     });
 
+    it("repassa movimentacoesNaoExplicadas (US4, feature 003) do serviço para {ok:true, data} sem alterar o shape", async () => {
+      const movimentacoesNaoExplicadas = [
+        {
+          granularidade: "ativo" as const,
+          chaveExport: "AAA11",
+          alvoId: "alvo-1",
+          nomeAlvo: "Ações",
+          valorInvestidoEsperadoCentavos: 80_000,
+          valorInvestidoRealCentavos: 200_000,
+          diferencaCentavos: 120_000,
+          excedeTolerancia: true,
+        },
+      ];
+      previewImportServiceMock.mockResolvedValue({
+        ok: true,
+        arquivos: [],
+        mesReferenciaProposto: "2026-07",
+        dataExport: "2026-07-28T00:00:00.000Z",
+        posicoesManuaisRevisao: [],
+        ajustesRevisao: [],
+        incrementosAmbiguosPendentes: [],
+        movimentacoesNaoExplicadas,
+      });
+
+      const resultado = await previewImport(formDataComArquivos([arquivoCsv()]));
+
+      expect(resultado.ok).toBe(true);
+      if (!resultado.ok) return;
+      expect(resultado.data.movimentacoesNaoExplicadas).toEqual(movimentacoesNaoExplicadas);
+    });
+
     it("traduz resultado ok:false (erro de parse) do serviço em {ok:false, erro, detalhes}", async () => {
       previewImportServiceMock.mockResolvedValue({
         ok: false,

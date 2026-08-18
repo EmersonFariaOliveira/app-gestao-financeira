@@ -63,7 +63,16 @@ function extrairJsonDoFormData<T>(formData: FormData, chave: string): T | undefi
   }
 }
 
-/** Preview do que os CSVs trazem: 100% em memória, nada persiste (FR-006/007/009, R9). */
+/**
+ * Preview do que os CSVs trazem: 100% em memória, nada persiste (FR-006/007/009, R9).
+ *
+ * `movimentacoesNaoExplicadas` (feature 003, US4, contracts/server-actions.md
+ * "import.ts — extensão para US4") já flui aqui automaticamente: como
+ * `PreviewImportOutput` é um `Extract<PreviewImportResultado, { ok: true }>` e
+ * o `return` abaixo devolve `resultado` inteiro (mesmo padrão de
+ * `avisoSubstituicao`/`instituicoesFaltantes`, nenhum campo é reconstruído
+ * campo a campo aqui) — repassado sem nenhuma lógica nova nesta action.
+ */
 export type PreviewImportOutput = Extract<PreviewImportResultado, { ok: true }>;
 
 export async function previewImport(
