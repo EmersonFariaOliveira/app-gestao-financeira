@@ -39,6 +39,7 @@ O export do MyCapital traz o valor investido de fundos de investimento sempre ig
 1. **Given** um ativo do CSV (fundo) já vinculado a um alvo, **When** o usuário informa um valor investido corrigido para ele, **Then** o valor atual continua sendo o do CSV e o valor investido exibido passa a ser o valor corrigido.
 2. **Given** um ativo com valor investido corrigido, **When** o motor de aporte calcula o déficit do alvo, **Then** o resultado é idêntico ao que seria obtido sem nenhuma correção de valor investido (o campo é puramente informativo).
 3. **Given** um ativo do CSV que nunca recebeu correção, **When** ele aparece pela primeira vez na tela de ajustes, **Then** o campo de valor investido é exibido vazio ou com aviso visual de que o valor do CSV está incorreto, aguardando preenchimento.
+4. **Given** um ativo do CSV marcado "fora da carteira alvo" (sem vínculo a nenhum alvo), **When** o usuário abre o seletor de "novo ajuste", **Then** esse ativo aparece na lista de opções (identificado como fora da carteira) e pode receber um valor investido corrigido normalmente, sem exigir vínculo a um alvo — apenas sem elegibilidade a incremento automático por aporte executado (FR-015).
 
 ---
 
@@ -124,7 +125,7 @@ Ao registrar um aporte como executado, o valor investido das posições manuais 
 ## Assumptions
 
 - Cada posição manual está vinculada a exatamente um alvo da carteira (relação N-para-1, como nos ativos mapeados do CSV) — não há posição manual sem alvo.
-- Um ajuste de valor investido só é relevante enquanto o `chave_export` correspondente estiver vinculado a um alvo ativo; ativos "fora da carteira" ou pendentes de vínculo não recebem incremento automático (FR-015), mas um ajuste histórico não é apagado se o vínculo mudar depois.
+- Um ajuste de valor investido pode ser criado/exibido tanto para um `chave_export` vinculado a um alvo ativo quanto para um marcado "fora da carteira" (sem alvo) — só ativos pendentes de vínculo, ignorados ou em reserva de emergência ficam de fora. O INCREMENTO AUTOMÁTICO por aporte executado, porém, continua exigindo alvo (FR-015): um ajuste fora-da-carteira nunca recebe incremento automático, só correção manual pontual. Um ajuste histórico não é apagado se o vínculo mudar depois.
 - Uma posição manual encerrada não pode ser reativada — se o mesmo ativo precisar voltar a ser acompanhado, o usuário cadastra uma nova posição manual. Reativação fica fora do escopo desta funcionalidade.
 - Quando não existe sessão de import anterior vigente (primeira posição manual ou primeiro ajuste cadastrado fora do fluxo de import), não há carry-forward a aplicar — os valores iniciais são os informados no cadastro.
 - A tela de revisão de posições manuais e ajustes (User Story 3) é exibida mesmo quando não há nenhuma posição manual ou ajuste cadastrado, sem bloquear a confirmação da sessão de import nesse caso.

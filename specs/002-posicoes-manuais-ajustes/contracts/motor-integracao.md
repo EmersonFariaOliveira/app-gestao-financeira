@@ -250,8 +250,19 @@ simétrico ao algoritmo da seção 3.
 
 ### 4.1 Pré-preenchimento por ativo (caso exclusivo, `n === 1` histórico)
 
-Para cada `posicao_manual` ativa / `chave_export` com ajuste ativo (mesma definição de
-elegibilidade da seção 3.1, avaliada agora no momento do import):
+Para cada `posicao_manual` ativa / `chave_export` com ajuste ativo, o CONJUNTO exibido
+na tela de revisão usa a identidade ampliada de "ativo sob ajuste" (data-model.md,
+seção "Identidade de 'ativo sob ajuste'"): `ignorar_no_import = false` E (`alvo_id
+IS NOT NULL` OU `fora_da_carteira = true`) — **não** a elegibilidade de incremento
+automático da seção 3.1 (`alvo_id = X AND fora_da_carteira = false`), que continua
+restrita a ativos vinculados a um alvo, por ser inerentemente por-alvo (um aporte é
+sempre registrado NUM alvo). As duas condições são deliberadamente distintas: um
+`chave_export` fora-da-carteira aparece na revisão com o valor anterior carregado
+(carry-forward normal de `valorAnterior`, ver abaixo), mas `incrementoPendenteCentavos`
+é sempre `0` para ele, porque nunca existe `incremento_valor_investido_pendente` para
+uma chave sem alvo (a seção 3.1 nunca gera uma linha dessas). Não "corrija" este
+comportamento para reaproveitar a fórmula de 3.1 aqui — foi ampliado por decisão de
+produto (ver data-model.md).
 
 ```
 valorAnterior = valor_investido (ou valor_investido_corrigido) do snapshot
