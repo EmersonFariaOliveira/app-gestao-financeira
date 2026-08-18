@@ -48,8 +48,12 @@ afterAll(async () => {
 /** Limpa todas as tabelas (ordem respeita FKs, igual a prisma/seed.ts). */
 async function resetDb() {
   await prisma.dividendo.deleteMany();
+  await prisma.incremento_valor_investido_pendente.deleteMany();
   await prisma.aporte.deleteMany();
   await prisma.posicao.deleteMany();
+  await prisma.posicao_manual_valor.deleteMany();
+  await prisma.posicao_manual.deleteMany();
+  await prisma.ajuste_valor_investido.deleteMany();
   await prisma.ativo_mapeado.deleteMany();
   await prisma.sessao_import.deleteMany();
   await prisma.alvo.deleteMany();
@@ -439,6 +443,340 @@ describe("dashboard-service", () => {
           dados.patrimonioReservaEmergenciaCentavos +
           dados.patrimonioPendenteCentavos,
       ).toBe(dados.patrimonioTotalCentavos);
+    });
+
+    describe("posicao_manual (feature 002-posicoes-manuais-ajustes)", () => {
+      it("posição manual vinculada a um alvo soma em patrimonioNaCarteiraCentavos/valorPorAlvoId/alocacao, com valor_atual_centavos (nunca valor_investido_centavos)", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        const sessao = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-07",
+            data_export: new Date("2026-07-28"),
+            status: "VIGENTE",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+        await prisma.posicao.create({
+          data: {
+            sessao_import_id: sessao.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 300_000,
+            tipo_grupo: "ACOES",
+          },
+        });
+        await prisma.ativo_mapeado.create({
+          data: { chave_export: "PRIO3", alvo_id: alvo.id, fora_da_carteira: false },
+        });
+
+        const posicaoManual = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "CDB-ITAU-2029",
+            instituicao: "Itaú",
+            descricao: "CDB manual",
+            alvo_id: alvo.id,
+          },
+        });
+        await prisma.posicao_manual_valor.create({
+          data: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: sessao.id,
+            // valor_investido bem diferente do valor_atual — a única coisa
+            // que pode entrar no patrimônio exibido é valor_atual (FR-006).
+            valor_investido_centavos: 999_999,
+            valor_atual_centavos: 50_000,
+          },
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        if (dados.vazio) throw new Error("não deveria ser vazio");
+
+        expect(dados.patrimonioNaCarteiraCentavos).toBe(350_000);
+        expect(dados.patrimonioTotalCentavos).toBe(350_000);
+        const linhaAlvo = dados.alocacao.find((a) => a.alvoId === alvo.id)!;
+        expect(linhaAlvo.valorAtualCentavos).toBe(350_000);
+        // Nunca aparece 999_999 (valor_investido) em nenhum lugar do output.
+        expect(JSON.stringify(dados)).not.toContain("999999");
+      });
+
+      it("posição manual fora da carteira aparece em foraDaCarteira e NÃO entra em patrimonioNaCarteiraCentavos/alocação", async () => {
+        const sessao = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-07",
+            data_export: new Date("2026-07-28"),
+            status: "VIGENTE",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+        const posicaoManual = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "LEGADO-MANUAL",
+            instituicao: "Itaú",
+            descricao: "Posição legada",
+            fora_da_carteira: true,
+          },
+        });
+        await prisma.posicao_manual_valor.create({
+          data: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: sessao.id,
+            valor_investido_centavos: 10_000,
+            valor_atual_centavos: 12_000,
+          },
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        if (dados.vazio) throw new Error("não deveria ser vazio");
+
+        expect(dados.foraDaCarteira).toEqual([
+          { chaveExport: "LEGADO-MANUAL", valorCentavos: 12_000 },
+        ]);
+        expect(dados.patrimonioForaDaCarteiraCentavos).toBe(12_000);
+        expect(dados.patrimonioNaCarteiraCentavos).toBe(0);
+        expect(dados.patrimonioTotalCentavos).toBe(12_000);
+      });
+
+      it("posição manual em reserva de emergência aparece isolada em reservaEmergencia e soma em patrimonioReservaEmergenciaCentavos", async () => {
+        const sessao = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-07",
+            data_export: new Date("2026-07-28"),
+            status: "VIGENTE",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+        const posicaoManual = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "RESERVA-MANUAL",
+            instituicao: "Itaú",
+            descricao: "Reserva de emergência manual",
+            reserva_emergencia: true,
+          },
+        });
+        await prisma.posicao_manual_valor.create({
+          data: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: sessao.id,
+            valor_investido_centavos: 5_000,
+            valor_atual_centavos: 7_000,
+          },
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        if (dados.vazio) throw new Error("não deveria ser vazio");
+
+        expect(dados.reservaEmergencia).toEqual([
+          { chaveExport: "RESERVA-MANUAL", valorCentavos: 7_000 },
+        ]);
+        expect(dados.patrimonioReservaEmergenciaCentavos).toBe(7_000);
+        expect(dados.patrimonioNaCarteiraCentavos).toBe(0);
+        expect(dados.patrimonioForaDaCarteiraCentavos).toBe(0);
+      });
+
+      it("posição manual pendente aparece em pendentes e soma em qtdPendencias e patrimonioPendenteCentavos", async () => {
+        const sessao = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-07",
+            data_export: new Date("2026-07-28"),
+            status: "VIGENTE",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+        const posicaoManual = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "PENDENTE-MANUAL",
+            instituicao: "Itaú",
+            descricao: "Posição manual sem vínculo ainda",
+          },
+        });
+        await prisma.posicao_manual_valor.create({
+          data: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: sessao.id,
+            valor_investido_centavos: 1_000,
+            valor_atual_centavos: 1_500,
+          },
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        if (dados.vazio) throw new Error("não deveria ser vazio");
+
+        expect(dados.pendentes).toEqual([
+          { chaveExport: "PENDENTE-MANUAL", valorCentavos: 1_500 },
+        ]);
+        expect(dados.patrimonioPendenteCentavos).toBe(1_500);
+        expect(dados.qtdPendencias).toBe(1);
+      });
+
+      it("posição manual pendente conta em qtdPendencias mesmo SEM nenhuma sessão vigente (branch vazio:true)", async () => {
+        await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "PENDENTE-SEM-SESSAO",
+            instituicao: "Itaú",
+            descricao: "Posição manual cadastrada sem import ainda",
+          },
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        expect(dados.vazio).toBe(true);
+        if (dados.vazio) {
+          expect(dados.qtdPendencias).toBe(1);
+        }
+      });
+
+      it("posição manual ATIVA sem snapshot NESTA sessão é omitida silenciosamente (não conta em nenhum total nem balde)", async () => {
+        const sessaoAnterior = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-06",
+            data_export: new Date("2026-06-28"),
+            status: "SUBSTITUIDO",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+        const sessaoVigente = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-07",
+            data_export: new Date("2026-07-28"),
+            status: "VIGENTE",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+
+        const posicaoManual = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "SEM-SNAPSHOT-NA-VIGENTE",
+            instituicao: "Itaú",
+            descricao: "Posição manual com snapshot só da sessão antiga",
+          },
+        });
+        // Snapshot existe, mas só para a sessão ANTIGA — não para a vigente.
+        await prisma.posicao_manual_valor.create({
+          data: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: sessaoAnterior.id,
+            valor_investido_centavos: 1_000,
+            valor_atual_centavos: 1_000,
+          },
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        if (dados.vazio) throw new Error("não deveria ser vazio");
+
+        expect(dados.sessaoImportId).toBe(sessaoVigente.id);
+        expect(dados.pendentes).toEqual([]);
+        expect(dados.foraDaCarteira).toEqual([]);
+        expect(dados.reservaEmergencia).toEqual([]);
+        expect(dados.patrimonioTotalCentavos).toBe(0);
+        // Pendente de VÍNCULO ainda conta (independe de sessão) — mas ela não
+        // aparece na listagem de patrimônio deste mês por falta de snapshot.
+        expect(dados.qtdPendencias).toBe(1);
+      });
+
+      it("invariante da soma dos 4 patrimônios continua batendo com posições manuais + CSV misturados nos 4 estados", async () => {
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        const sessao = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-07",
+            data_export: new Date("2026-07-28"),
+            status: "VIGENTE",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+        await prisma.posicao.create({
+          data: {
+            sessao_import_id: sessao.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 100_000,
+            tipo_grupo: "ACOES",
+          },
+        });
+        await prisma.ativo_mapeado.create({
+          data: { chave_export: "PRIO3", alvo_id: alvo.id, fora_da_carteira: false },
+        });
+
+        const vinculada = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "MANUAL-VINCULADA",
+            instituicao: "Itaú",
+            descricao: "Vinculada",
+            alvo_id: alvo.id,
+          },
+        });
+        const fora = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "MANUAL-FORA",
+            instituicao: "Itaú",
+            descricao: "Fora da carteira",
+            fora_da_carteira: true,
+          },
+        });
+        const reserva = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "MANUAL-RESERVA",
+            instituicao: "Itaú",
+            descricao: "Reserva",
+            reserva_emergencia: true,
+          },
+        });
+        const pendente = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "MANUAL-PENDENTE",
+            instituicao: "Itaú",
+            descricao: "Pendente",
+          },
+        });
+        await prisma.posicao_manual_valor.createMany({
+          data: [
+            {
+              posicao_manual_id: vinculada.id,
+              sessao_import_id: sessao.id,
+              valor_investido_centavos: 1,
+              valor_atual_centavos: 10_000,
+            },
+            {
+              posicao_manual_id: fora.id,
+              sessao_import_id: sessao.id,
+              valor_investido_centavos: 1,
+              valor_atual_centavos: 20_000,
+            },
+            {
+              posicao_manual_id: reserva.id,
+              sessao_import_id: sessao.id,
+              valor_investido_centavos: 1,
+              valor_atual_centavos: 30_000,
+            },
+            {
+              posicao_manual_id: pendente.id,
+              sessao_import_id: sessao.id,
+              valor_investido_centavos: 1,
+              valor_atual_centavos: 40_000,
+            },
+          ],
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        if (dados.vazio) throw new Error("não deveria ser vazio");
+
+        expect(dados.patrimonioNaCarteiraCentavos).toBe(110_000); // 100_000 CSV + 10_000 manual
+        expect(dados.patrimonioForaDaCarteiraCentavos).toBe(20_000);
+        expect(dados.patrimonioReservaEmergenciaCentavos).toBe(30_000);
+        expect(dados.patrimonioPendenteCentavos).toBe(40_000);
+        expect(dados.patrimonioTotalCentavos).toBe(200_000);
+        expect(
+          dados.patrimonioNaCarteiraCentavos +
+            dados.patrimonioForaDaCarteiraCentavos +
+            dados.patrimonioReservaEmergenciaCentavos +
+            dados.patrimonioPendenteCentavos,
+        ).toBe(dados.patrimonioTotalCentavos);
+        expect(dados.qtdPendencias).toBe(1);
+      });
     });
 
     it("invariante patrimonioTotal = naCarteira + foraDaCarteira + pendente quando TUDO é fora da carteira", async () => {

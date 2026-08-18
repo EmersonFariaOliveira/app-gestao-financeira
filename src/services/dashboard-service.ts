@@ -56,6 +56,21 @@ import { contarPendencias } from "@/services/mapeamento-service";
 //    - Invariante: `patrimonioTotalCentavos === patrimonioNaCarteiraCentavos +
 //      patrimonioForaDaCarteiraCentavos + patrimonioReservaEmergenciaCentavos +
 //      patrimonioPendenteCentavos`.
+//    - `posicao_manual` (feature 002-posicoes-manuais-ajustes) participa dos
+//      quatro totais acima com a MESMA máquina de estados e a MESMA
+//      prioridade de classificação de `ativo_mapeado` (foraDaCarteira →
+//      reservaEmergencia → alvo_id → pendente) — ver
+//      `classificarPosicoesDaSessao` abaixo. Diferença central: uma posição
+//      manual só entra no cálculo de UM mês específico se tiver um
+//      `posicao_manual_valor` cujo `sessao_import_id` seja EXATAMENTE a
+//      sessão vigente resolvida por `dadosDashboard` (nunca "último snapshot
+//      conhecido de qualquer sessão"); sem esse snapshot, a posição é
+//      omitida silenciosamente deste dashboard (mesmo comportamento de
+//      `aporte-service.montarContextoEntradaMotor`, §2.2/§2.3). E usa SEMPRE
+//      `valor_atual_centavos` — nunca `valor_investido_centavos` (FR-006/
+//      SC-004, inviolável). `qtdPendencias` soma `contarPendencias()` (CSV)
+//      + posições manuais pendentes (independente de sessão, mesma decisão
+//      de `aporte-service.listarPendencias`).
 //
 // 2. **Data usada para ordenar a linha do tempo sugerido vs. executado**:
 //    usa-se o `mes_referencia` da SESSÃO à qual o `aporte` está amarrado
@@ -206,6 +221,22 @@ async function obterSessaoVigenteMaisRecente() {
   });
 }
 
+/**
+ * Quantidade de `posicao_manual` pendentes (mesmo critério de pendência de
+ * `ativo_mapeado`: `alvo_id = null AND fora_da_carteira = false AND
+ * reserva_emergencia = false`), independente de sessão (`posicao_manual` não
+ * é filha de `sessao_import` — mesma decisão de
+ * `aporte-service.listarPendenciasPosicoesManuais`). Query de contagem
+ * direta (não `posicao-manual-service.listarPosicoesManuaisParaVinculo`, que
+ * monta os 4 baldes com snapshot incluído) porque só o número é necessário
+ * aqui — evitaria uma query extra de `posicao_manual_valor` sem uso.
+ */
+async function contarPendenciasPosicoesManuais(): Promise<number> {
+  return prisma.posicao_manual.count({
+    where: { ativo: true, alvo_id: null, fora_da_carteira: false, reserva_emergencia: false },
+  });
+}
+
 interface ClassificacaoPosicoes {
   patrimonioTotalCentavos: number;
   patrimonioNaCarteiraCentavos: number;
@@ -288,6 +319,60 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
       // listado à parte.
       patrimonioPendenteCentavos += valorCentavos;
       pendentes.push({ chaveExport, valorCentavos });
+    }
+  }
+
+  // posicao_manual (feature 002-posicoes-manuais-ajustes): mesma máquina de
+  // estados de ativo_mapeado, mas nunca é filha de sessao_import — para
+  // entrar no cálculo/exibição de UM mês específico, precisa ter um
+  // posicao_manual_valor cujo `sessao_import_id` seja EXATAMENTE a sessão
+  // vigente resolvida por `dadosDashboard` (nunca "último snapshot conhecido
+  // de qualquer sessão" — isso seria inconsistente com o tratamento de
+  // `posicao` acima, que também está sempre escopado à sessão específica).
+  // Uma posição manual ativa SEM snapshot nesta sessão é omitida
+  // silenciosamente (mesmo comportamento de
+  // aporte-service.montarContextoEntradaMotor, §2.2/§2.3): ainda não existe
+  // dado suficiente para ela entrar este mês, e isso não é um erro.
+  const posicoesManuaisAtivas = await prisma.posicao_manual.findMany({
+    where: { ativo: true },
+  });
+  if (posicoesManuaisAtivas.length > 0) {
+    const snapshots = await prisma.posicao_manual_valor.findMany({
+      where: {
+        sessao_import_id: sessaoId,
+        posicao_manual_id: { in: posicoesManuaisAtivas.map((p) => p.id) },
+      },
+    });
+    const snapshotPorPosicaoManualId = new Map(snapshots.map((s) => [s.posicao_manual_id, s]));
+
+    for (const posicaoManual of posicoesManuaisAtivas) {
+      const snapshot = snapshotPorPosicaoManualId.get(posicaoManual.id);
+      if (!snapshot) continue;
+
+      // FR-006/SC-004 (inviolável): patrimônio SEMPRE usa
+      // valor_atual_centavos — valor_investido_centavos nunca entra em
+      // nenhum cálculo/exibição de patrimônio.
+      const valorCentavos = snapshot.valor_atual_centavos;
+      const chaveExport = posicaoManual.chave_manual;
+
+      patrimonioTotalCentavos += valorCentavos;
+
+      if (posicaoManual.fora_da_carteira) {
+        patrimonioForaDaCarteiraCentavos += valorCentavos;
+        foraDaCarteira.push({ chaveExport, valorCentavos });
+      } else if (posicaoManual.reserva_emergencia) {
+        patrimonioReservaEmergenciaCentavos += valorCentavos;
+        reservaEmergencia.push({ chaveExport, valorCentavos });
+      } else if (posicaoManual.alvo_id !== null) {
+        patrimonioNaCarteiraCentavos += valorCentavos;
+        valorPorAlvoId.set(
+          posicaoManual.alvo_id,
+          (valorPorAlvoId.get(posicaoManual.alvo_id) ?? 0) + valorCentavos,
+        );
+      } else {
+        patrimonioPendenteCentavos += valorCentavos;
+        pendentes.push({ chaveExport, valorCentavos });
+      }
     }
   }
 
@@ -377,11 +462,16 @@ function agruparAlocacaoPorTag(
  * do app e precisa ser sempre renderizável.
  */
 export async function dadosDashboard(): Promise<DadosDashboardOutput> {
-  const [sessao, bandaToleranciaBps, qtdPendencias] = await Promise.all([
+  const [sessao, bandaToleranciaBps, qtdPendenciasCsv, qtdPendenciasManuais] = await Promise.all([
     obterSessaoVigenteMaisRecente(),
     getConfig("banda_tolerancia_bps"),
     contarPendencias(),
+    // posicao_manual não é filha de sessao_import — pendência manual conta
+    // mesmo no branch "vazio" (sem sessão vigente nenhuma), mesma decisão já
+    // tomada em aporte-service.listarPendencias.
+    contarPendenciasPosicoesManuais(),
   ]);
+  const qtdPendencias = qtdPendenciasCsv + qtdPendenciasManuais;
 
   if (!sessao) {
     return { vazio: true, bandaToleranciaBps, qtdPendencias };
