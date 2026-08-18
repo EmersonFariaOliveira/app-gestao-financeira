@@ -249,7 +249,12 @@ function calcularInstituicoesFaltantes(
   return instituicoesAnteriores.filter((i) => !instituicoesAtuais.includes(i));
 }
 
-/** Chaves pendentes de vínculo (data-model.md: `alvo_id = null AND fora_da_carteira = false`, ou sem registro algum). */
+/**
+ * Chaves pendentes de vínculo (data-model.md: `alvo_id = null AND
+ * fora_da_carteira = false AND reserva_emergencia = false`, ou sem registro
+ * algum). `reserva_emergencia = true` é um estado RESOLVIDO — não conta como
+ * pendência nem bloqueia a calculadora.
+ */
 async function listarPendenciasDaSessao(sessaoId: string): Promise<string[]> {
   const posicoes = await prisma.posicao.findMany({
     where: { sessao_import_id: sessaoId },
@@ -266,7 +271,10 @@ async function listarPendenciasDaSessao(sessaoId: string): Promise<string[]> {
 
   return chaves.filter((chave) => {
     const mapeamento = mapaPorChave.get(chave);
-    return !mapeamento || (mapeamento.alvo_id === null && !mapeamento.fora_da_carteira);
+    return (
+      !mapeamento ||
+      (mapeamento.alvo_id === null && !mapeamento.fora_da_carteira && !mapeamento.reserva_emergencia)
+    );
   });
 }
 

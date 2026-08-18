@@ -527,6 +527,29 @@ describe("import-service", () => {
       if (!segundo.ok) return;
       expect(segundo.pendenciasVinculo).toEqual([]);
     });
+
+    it("chave já marcada reserva_emergencia=true (novo estado isolado) também não vira pendência de novo — estado RESOLVIDO, não bloqueia a calculadora", async () => {
+      const primeiro = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "RESERVA-CDB" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(primeiro.ok).toBe(true);
+      if (!primeiro.ok) return;
+      expect(primeiro.pendenciasVinculo).toEqual(["RESERVA-CDB"]);
+
+      await prisma.ativo_mapeado.update({
+        where: { chave_export: "RESERVA-CDB" },
+        data: { reserva_emergencia: true },
+      });
+
+      const segundo = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "RESERVA-CDB" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(segundo.ok).toBe(true);
+      if (!segundo.ok) return;
+      expect(segundo.pendenciasVinculo).toEqual([]);
+    });
   });
 
   describe("import com 0 arquivos (lacuna de cobertura investigada)", () => {
