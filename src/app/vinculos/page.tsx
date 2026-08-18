@@ -90,19 +90,7 @@ import type {
 type Fase = "carregando" | "erro" | "pronto";
 type Origem = "csv" | "manual";
 
-// "ignorar-existente"/"ignorar-novo" (feature 002, FR-001): mesma escolha de
-// alvo dos modos "existente"/"novo" (reaproveitam os campos do form), só que
-// gravam `ignorarNoImport: true` — o ativo some da consolidação do CSV
-// porque será substituído por uma posição manual. Exclusivos de linhas CSV —
-// posições manuais nunca oferecem esses dois modos (ver cabeçalho do
-// arquivo).
-type ModoResolucao =
-  | "existente"
-  | "novo"
-  | "fora"
-  | "reserva"
-  | "ignorar-existente"
-  | "ignorar-novo";
+type ModoResolucao = "existente" | "novo" | "fora" | "reserva";
 
 // Reaproveitado no aviso de "ignorar" tanto em Pendentes quanto nas ações de
 // Vinculados/Fora da carteira (feature 002, FR-001) — mesmo texto, sem
@@ -311,24 +299,16 @@ export default function VinculosPage() {
       return;
     }
 
-    const ignorarNoImport = form.modo === "ignorar-existente" || form.modo === "ignorar-novo";
-
-    if (form.modo === "existente" || form.modo === "ignorar-existente") {
+    if (form.modo === "existente") {
       if (!form.alvoId) {
         toast.error("Selecione um alvo existente.");
         return;
       }
-      await executarVinculoCsv(
-        key,
-        chaveExport,
-        ignorarNoImport
-          ? { chaveExport, ignorarNoImport: true, alvoId: form.alvoId }
-          : { chaveExport, alvoId: form.alvoId },
-      );
+      await executarVinculoCsv(key, chaveExport, { chaveExport, alvoId: form.alvoId });
       return;
     }
 
-    // modo === "novo" | "ignorar-novo"
+    // modo === "novo"
     if (!form.novoNome.trim()) {
       toast.error("Informe o nome do novo alvo.");
       return;
@@ -344,17 +324,19 @@ export default function VinculosPage() {
       toast.error("Percentual do novo alvo deve ser maior que zero.");
       return;
     }
-    await executarVinculoCsv(
-      key,
+    await executarVinculoCsv(key, chaveExport, {
       chaveExport,
-      ignorarNoImport
-        ? {
-            chaveExport,
-            ignorarNoImport: true,
-            novoAlvo: { nome: form.novoNome.trim(), percentualBps },
-          }
-        : { chaveExport, novoAlvo: { nome: form.novoNome.trim(), percentualBps } },
-    );
+      novoAlvo: { nome: form.novoNome.trim(), percentualBps },
+    });
+  }
+
+  // "Ignorar (substituído por posição manual)" (feature 002, FR-001) —
+  // mesmo padrão de um clique de `handleMarcarForaDaCarteiraCsv`/
+  // `handleMarcarReservaEmergenciaCsv`, sem seletor de alvo (o serviço
+  // sempre zera `alvo_id` para essa forma). Exclusivo de linhas CSV.
+  async function handleIgnorarCsv(chaveExport: string) {
+    const key = chaveCsv(chaveExport);
+    await executarVinculoCsv(key, chaveExport, { chaveExport, ignorarNoImport: true });
   }
 
   async function handleResolverPendenteManual(posicaoManualId: string, rotulo: string) {
@@ -446,20 +428,6 @@ export default function VinculosPage() {
     await executarVinculoManual(key, rotulo, { posicaoManualId, reservaEmergencia: true });
   }
 
-  // "Ignorar (substituído por posição manual)" a partir das seções
-  // Vinculados/Fora da carteira (feature 002, FR-001) — mesma chamada usada
-  // no modo "ignorar-existente" de Pendentes, reaproveitando o dropdown de
-  // alvo que já existe na linha. Exclusivo de linhas CSV.
-  async function handleIgnorar(chaveExport: string) {
-    const key = chaveCsv(chaveExport);
-    const alvoId = reatribuirAlvoId[key];
-    if (!alvoId) {
-      toast.error("Selecione um alvo.");
-      return;
-    }
-    await executarVinculoCsv(key, chaveExport, { chaveExport, ignorarNoImport: true, alvoId });
-  }
-
   // Linhas unificadas CSV + posição manual para as três tabelas de baixo —
   // hooks de ordenação chamados incondicionalmente (regra dos hooks), com
   // fallback `[]` enquanto os dados ainda não carregaram.
@@ -532,7 +500,7 @@ export default function VinculosPage() {
   const ignoradosOrdenados = useSortableRows(vinculos?.ignorados ?? [], {
     chaveExport: (i) => i.chaveExport,
     valorAtualCentavos: (i) => i.valorAtualCentavos,
-    nomeAlvo: (i) => i.nomeAlvo,
+    nomeAlvo: (i) => i.nomeAlvo ?? "",
   });
 
   if (fase === "carregando") {
@@ -612,16 +580,10 @@ export default function VinculosPage() {
                         <option value="novo">Criar novo alvo</option>
                         <option value="fora">Marcar fora da carteira</option>
                         <option value="reserva">Marcar como reserva de emergência</option>
-                        <option value="ignorar-existente">
-                          Ignorar (substituído por posição manual) — alvo existente
-                        </option>
-                        <option value="ignorar-novo">
-                          Ignorar (substituído por posição manual) — criar alvo
-                        </option>
                       </select>
                     </Field>
 
-                    {(form.modo === "existente" || form.modo === "ignorar-existente") && (
+                    {form.modo === "existente" && (
                       <Field className="w-auto">
                         <FieldLabel htmlFor={`alvo-${key}`}>Alvo</FieldLabel>
                         <select
@@ -642,7 +604,7 @@ export default function VinculosPage() {
                       </Field>
                     )}
 
-                    {(form.modo === "novo" || form.modo === "ignorar-novo") && (
+                    {form.modo === "novo" && (
                       <>
                         <Field className="w-auto">
                           <FieldLabel htmlFor={`nome-${key}`}>
@@ -686,10 +648,16 @@ export default function VinculosPage() {
                     >
                       {salvando ? "Salvando…" : "Confirmar"}
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={salvando}
+                      title={AVISO_IGNORAR}
+                      onClick={() => void handleIgnorarCsv(pendente.chaveExport)}
+                    >
+                      Ignorar (substituído por posição manual)
+                    </Button>
                   </div>
-                  {(form.modo === "ignorar-existente" || form.modo === "ignorar-novo") && (
-                    <p className="text-xs text-muted-foreground">{AVISO_IGNORAR}</p>
-                  )}
                 </div>
               );
             })}
@@ -921,9 +889,9 @@ export default function VinculosPage() {
                             <Button
                               size="sm"
                               variant="ghost"
-                              disabled={salvando || alvos.length === 0}
+                              disabled={salvando}
                               title={AVISO_IGNORAR}
-                              onClick={() => void handleIgnorar(v.rawId)}
+                              onClick={() => void handleIgnorarCsv(v.rawId)}
                             >
                               Ignorar (substituído por posição manual)
                             </Button>
@@ -1036,9 +1004,9 @@ export default function VinculosPage() {
                             <Button
                               size="sm"
                               variant="ghost"
-                              disabled={salvando || alvos.length === 0}
+                              disabled={salvando}
                               title={AVISO_IGNORAR}
-                              onClick={() => void handleIgnorar(f.rawId)}
+                              onClick={() => void handleIgnorarCsv(f.rawId)}
                             >
                               Ignorar (substituído por posição manual)
                             </Button>
@@ -1206,7 +1174,13 @@ export default function VinculosPage() {
                       {i.chaveExport}
                     </TableCell>
                     <TableCell>{formatCentavosParaReais(i.valorAtualCentavos)}</TableCell>
-                    <TableCell>{i.nomeAlvo}</TableCell>
+                    <TableCell>
+                      {i.nomeAlvo ?? (
+                        <span className="text-sm text-muted-foreground">
+                          Sem posição manual ainda
+                        </span>
+                      )}
+                    </TableCell>
                     <TableCell>
                       {i.posicaoManualPendente ? (
                         <Button
@@ -1214,7 +1188,7 @@ export default function VinculosPage() {
                           variant="outline"
                           render={
                             <Link
-                              href={`/posicoes-manuais?alvoId=${encodeURIComponent(i.alvoId)}&descricaoSugerida=${encodeURIComponent(i.chaveExport)}`}
+                              href={`/posicoes-manuais?alvoId=${encodeURIComponent(i.alvoId ?? "")}&descricaoSugerida=${encodeURIComponent(i.chaveExport)}`}
                             />
                           }
                         >

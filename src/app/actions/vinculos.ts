@@ -109,10 +109,23 @@ export async function vincularAtivo(
     }
   } else if ("foraDaCarteira" in input) {
     if (input.foraDaCarteira !== true) {
-      return { ok: false, erro: "Input inválido: informe alvoId, novoAlvo, foraDaCarteira ou reservaEmergencia." };
+      return {
+        ok: false,
+        erro: "Input inválido: informe alvoId, novoAlvo, foraDaCarteira, reservaEmergencia ou ignorarNoImport.",
+      };
+    }
+  } else if ("ignorarNoImport" in input) {
+    if (input.ignorarNoImport !== true) {
+      return {
+        ok: false,
+        erro: "Input inválido: informe alvoId, novoAlvo, foraDaCarteira, reservaEmergencia ou ignorarNoImport.",
+      };
     }
   } else if (!("reservaEmergencia" in input) || input.reservaEmergencia !== true) {
-    return { ok: false, erro: "Input inválido: informe alvoId, novoAlvo, foraDaCarteira ou reservaEmergencia." };
+    return {
+      ok: false,
+      erro: "Input inválido: informe alvoId, novoAlvo, foraDaCarteira, reservaEmergencia ou ignorarNoImport.",
+    };
   }
 
   try {
