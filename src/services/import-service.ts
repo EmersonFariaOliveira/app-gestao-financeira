@@ -470,6 +470,7 @@ export async function confirmarImport(
           instituicao: linha.instituicao,
           quantidade: linha.quantidade,
           patrimonio_hoje_centavos: linha.patrimonioHojeCentavos,
+          patrimonio_investido_centavos: linha.patrimonioAplicadoCentavos,
           tipo_grupo: linha.tipoGrupo,
           tipo_ativo_internacional: linha.tipoAtivoInternacional,
           data_ultima_cotacao: linha.dataUltimaCotacao ? new Date(linha.dataUltimaCotacao) : null,
