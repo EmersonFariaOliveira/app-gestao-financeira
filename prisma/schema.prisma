@@ -50,6 +50,16 @@ model ativo_mapeado {
   /// imports futuros. Mutuamente exclusivo com fora_da_carteira=true
   /// (validado na aplicação — data-model.md da feature 002).
   ignorar_no_import Boolean  @default(false)
+  /// true = ativo reconhecido do CSV que é reserva de emergência: não
+  /// entra em nenhum déficit/alocação por alvo (mesmo tratamento de
+  /// exclusão que fora_da_carteira) mas é um balde ISOLADO próprio, nunca
+  /// misturado com "fora da carteira" nem com pendências (tela de
+  /// vínculos e dashboard mostram os três separados). Mutuamente
+  /// exclusivo com alvo_id preenchido, fora_da_carteira=true e
+  /// ignorar_no_import=true (validado na aplicação — combinação
+  /// reserva_emergencia=true AND ignorar_no_import=true fora de escopo
+  /// por decisão do usuário).
+  reserva_emergencia Boolean  @default(false)
   criado_em         DateTime @default(now())
 
   alvo       alvo?       @relation(fields: [alvo_id], references: [id])
