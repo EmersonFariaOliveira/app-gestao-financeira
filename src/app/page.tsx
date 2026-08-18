@@ -70,6 +70,13 @@ export default function DashboardPage() {
     chaveExport: (a) => a.chaveExport,
     valorCentavos: (a) => a.valorCentavos,
   });
+  const reservaEmergenciaOrdenados = useSortableRows(
+    dados && !dados.vazio ? dados.reservaEmergencia : [],
+    {
+      chaveExport: (a) => a.chaveExport,
+      valorCentavos: (a) => a.valorCentavos,
+    },
+  );
 
   useEffect(() => {
     let cancelado = false;
@@ -259,6 +266,50 @@ export default function DashboardPage() {
               </TableHeader>
               <TableBody>
                 {foraDaCarteiraOrdenados.sortedRows.map((ativo) => (
+                  <TableRow key={ativo.chaveExport}>
+                    <TableCell>{ativo.chaveExport}</TableCell>
+                    <TableCell>{formatCentavosParaReais(ativo.valorCentavos)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      {(dados.patrimonioReservaEmergenciaCentavos > 0 || dados.reservaEmergencia.length > 0) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Reserva de emergência</CardTitle>
+            <CardDescription>
+              Ativos reconhecidos do export, mas isolados tanto da carteira alvo quanto do
+              &quot;Fora da carteira&quot; — não entram nos percentuais nem no aporte.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-4">
+            <Estatistica
+              titulo="Total em reserva de emergência"
+              valor={formatCentavosParaReais(dados.patrimonioReservaEmergenciaCentavos)}
+            />
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <SortableTableHead
+                    sortDirection={reservaEmergenciaOrdenados.sortDirectionFor("chaveExport")}
+                    onSort={() => reservaEmergenciaOrdenados.toggleSort("chaveExport")}
+                  >
+                    Ativo
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={reservaEmergenciaOrdenados.sortDirectionFor("valorCentavos")}
+                    onSort={() => reservaEmergenciaOrdenados.toggleSort("valorCentavos")}
+                  >
+                    Valor
+                  </SortableTableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {reservaEmergenciaOrdenados.sortedRows.map((ativo) => (
                   <TableRow key={ativo.chaveExport}>
                     <TableCell>{ativo.chaveExport}</TableCell>
                     <TableCell>{formatCentavosParaReais(ativo.valorCentavos)}</TableCell>
