@@ -212,6 +212,7 @@ describe("mapeamento-service", () => {
         alvoId: alvo.id,
         nomeAlvo: "Ações BR",
         foraDaCarteira: false,
+        reservaEmergencia: false,
       });
 
       const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
@@ -235,6 +236,7 @@ describe("mapeamento-service", () => {
         alvoId: null,
         nomeAlvo: null,
         foraDaCarteira: true,
+        reservaEmergencia: false,
       });
 
       const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
@@ -297,6 +299,7 @@ describe("mapeamento-service", () => {
         alvoId: alvoCriado.id,
         nomeAlvo: "FIIs",
         foraDaCarteira: false,
+        reservaEmergencia: false,
       });
 
       const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
@@ -334,6 +337,7 @@ describe("mapeamento-service", () => {
         alvoId: alvo.id,
         nomeAlvo: "Ações BR",
         foraDaCarteira: false,
+        reservaEmergencia: false,
       });
     });
 
@@ -543,6 +547,7 @@ describe("mapeamento-service", () => {
         alvoId: alvo.id,
         nomeAlvo: "Pós-fixado",
         foraDaCarteira: false,
+        reservaEmergencia: false,
         ignorarNoImport: true,
         posicaoManualPendente: true,
       });
@@ -632,6 +637,7 @@ describe("mapeamento-service", () => {
         alvoId: alvo.id,
         nomeAlvo: "Pós-fixado",
         foraDaCarteira: false,
+        reservaEmergencia: false,
         ignorarNoImport: true,
         posicaoManualPendente: true,
       });
@@ -677,6 +683,164 @@ describe("mapeamento-service", () => {
       });
       expect(registro.alvo_id).toBe(alvoNovo.id);
       expect(registro.ignorar_no_import).toBe(true);
+    });
+  });
+
+  describe("balde reserva de emergência (novo estado isolado, mutuamente exclusivo com alvo_id/fora_da_carteira/ignorar_no_import)", () => {
+    it("{chaveExport, reservaEmergencia: true} marca reserva_emergencia=true, zerando alvo_id/fora_da_carteira/ignorar_no_import", async () => {
+      const resultado = await mapeamentoService.vincularAtivo({
+        chaveExport: "RESERVA-CDB",
+        reservaEmergencia: true,
+      });
+
+      expect(resultado).toEqual({
+        chaveExport: "RESERVA-CDB",
+        alvoId: null,
+        nomeAlvo: null,
+        foraDaCarteira: false,
+        reservaEmergencia: true,
+      });
+
+      const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
+        where: { chave_export: "RESERVA-CDB" },
+      });
+      expect(registro.reserva_emergencia).toBe(true);
+      expect(registro.alvo_id).toBeNull();
+      expect(registro.fora_da_carteira).toBe(false);
+      expect(registro.ignorar_no_import).toBe(false);
+    });
+
+    it("listarVinculos classifica reserva_emergencia=true no balde reservaEmergencia, nunca em pendentes/vinculados/foraDaCarteira", async () => {
+      const alvo = await criarAlvo("Ações BR", 10000);
+      await prisma.ativo_mapeado.create({ data: { chave_export: "PRIO3", alvo_id: alvo.id } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "LEGADO-X", fora_da_carteira: true } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "WRLD11" } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "RESERVA-CDB", reserva_emergencia: true } });
+
+      const vinculos = await mapeamentoService.listarVinculos();
+
+      expect(vinculos.reservaEmergencia).toEqual([
+        { chaveExport: "RESERVA-CDB", valorAtualCentavos: 0 },
+      ]);
+      expect(vinculos.pendentes.map((p) => p.chaveExport)).not.toContain("RESERVA-CDB");
+      expect(vinculos.vinculados.map((v) => v.chaveExport)).not.toContain("RESERVA-CDB");
+      expect(vinculos.foraDaCarteira.map((f) => f.chaveExport)).not.toContain("RESERVA-CDB");
+      // Os demais baldes continuam intactos.
+      expect(vinculos.pendentes).toEqual([{ chaveExport: "WRLD11", valorAtualCentavos: 0 }]);
+      expect(vinculos.vinculados).toEqual([
+        { chaveExport: "PRIO3", alvoId: alvo.id, nomeAlvo: "Ações BR", valorAtualCentavos: 0 },
+      ]);
+      expect(vinculos.foraDaCarteira).toEqual([{ chaveExport: "LEGADO-X", valorAtualCentavos: 0 }]);
+    });
+
+    it("contarPendencias não conta um ativo em reserva de emergência como pendência", async () => {
+      await prisma.ativo_mapeado.create({ data: { chave_export: "RESERVA-CDB", reserva_emergencia: true } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "WRLD11" } });
+
+      expect(await mapeamentoService.contarPendencias()).toBe(1);
+    });
+
+    it("marcar reserva de emergência depois de já estar ignorado (ignorar_no_import=true) zera ignorar_no_import e alvo_id (exclusão mútua)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await mapeamentoService.vincularAtivo({
+        chaveExport: "CDB-ITAU",
+        ignorarNoImport: true,
+        alvoId: alvo.id,
+      });
+
+      const resultado = await mapeamentoService.vincularAtivo({
+        chaveExport: "CDB-ITAU",
+        reservaEmergencia: true,
+      });
+
+      expect(resultado).toEqual({
+        chaveExport: "CDB-ITAU",
+        alvoId: null,
+        nomeAlvo: null,
+        foraDaCarteira: false,
+        reservaEmergencia: true,
+      });
+
+      const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
+        where: { chave_export: "CDB-ITAU" },
+      });
+      expect(registro.reserva_emergencia).toBe(true);
+      expect(registro.ignorar_no_import).toBe(false);
+      expect(registro.alvo_id).toBeNull();
+
+      const vinculos = await mapeamentoService.listarVinculos();
+      expect(vinculos.ignorados).toEqual([]);
+      expect(vinculos.reservaEmergencia.map((r) => r.chaveExport)).toEqual(["CDB-ITAU"]);
+    });
+
+    it("marcar ignorado (ignorarNoImport:true) depois de já estar em reserva de emergência zera reserva_emergencia (exclusão mútua no outro sentido)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await mapeamentoService.vincularAtivo({ chaveExport: "CDB-ITAU", reservaEmergencia: true });
+
+      const resultado = await mapeamentoService.vincularAtivo({
+        chaveExport: "CDB-ITAU",
+        ignorarNoImport: true,
+        alvoId: alvo.id,
+      });
+
+      expect(resultado).toEqual({
+        chaveExport: "CDB-ITAU",
+        alvoId: alvo.id,
+        nomeAlvo: "Pós-fixado",
+        foraDaCarteira: false,
+        reservaEmergencia: false,
+        ignorarNoImport: true,
+        posicaoManualPendente: true,
+      });
+
+      const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
+        where: { chave_export: "CDB-ITAU" },
+      });
+      expect(registro.reserva_emergencia).toBe(false);
+      expect(registro.ignorar_no_import).toBe(true);
+      expect(registro.alvo_id).toBe(alvo.id);
+
+      const vinculos = await mapeamentoService.listarVinculos();
+      expect(vinculos.reservaEmergencia).toEqual([]);
+      expect(vinculos.ignorados.map((i) => i.chaveExport)).toEqual(["CDB-ITAU"]);
+    });
+
+    it("marcar reserva de emergência depois de já vinculado a um alvo zera alvo_id; marcar fora-da-carteira depois de já em reserva zera reserva_emergencia (ambos os sentidos com alvoId/foraDaCarteira)", async () => {
+      const alvo = await criarAlvo("Ações BR", 10000);
+      await mapeamentoService.vincularAtivo({ chaveExport: "PRIO3", alvoId: alvo.id });
+
+      const paraReserva = await mapeamentoService.vincularAtivo({
+        chaveExport: "PRIO3",
+        reservaEmergencia: true,
+      });
+      expect(paraReserva.reservaEmergencia).toBe(true);
+      expect(paraReserva.alvoId).toBeNull();
+
+      const paraForaDaCarteira = await mapeamentoService.vincularAtivo({
+        chaveExport: "PRIO3",
+        foraDaCarteira: true,
+      });
+      expect(paraForaDaCarteira.foraDaCarteira).toBe(true);
+      expect(paraForaDaCarteira.reservaEmergencia).toBe(false);
+
+      const registro = await prisma.ativo_mapeado.findUniqueOrThrow({ where: { chave_export: "PRIO3" } });
+      expect(registro.reserva_emergencia).toBe(false);
+      expect(registro.fora_da_carteira).toBe(true);
+      expect(registro.alvo_id).toBeNull();
+    });
+
+    it("chave_export já marcada reserva_emergencia=true não vira pendência de novo mesmo reaparecendo num import novo", async () => {
+      await prisma.ativo_mapeado.create({ data: { chave_export: "RESERVA-CDB", reserva_emergencia: true } });
+
+      const chavesNovas = await simularImportCriaPendenteSeNovo(["RESERVA-CDB"]);
+      expect(chavesNovas).toEqual([]);
+
+      const vinculos = await mapeamentoService.listarVinculos();
+      expect(vinculos.pendentes).toEqual([]);
+      expect(vinculos.reservaEmergencia).toEqual([
+        { chaveExport: "RESERVA-CDB", valorAtualCentavos: 0 },
+      ]);
+      expect(await mapeamentoService.contarPendencias()).toBe(0);
     });
   });
 });

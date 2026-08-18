@@ -13,9 +13,12 @@ import { prisma } from "@/db/client";
 // (upsert defensivo: não deveria ocorrer no fluxo normal, mas evita um
 // vínculo "impossível de registrar" caso a UI seja usada fora de ordem).
 //
-// Invariante inviolável (data-model.md, `ativo_mapeado`): `alvo_id` e
-// `fora_da_carteira = true` são mutuamente exclusivos. Toda escrita neste
-// arquivo zera explicitamente o lado oposto antes de setar um dos dois.
+// Invariante inviolável (data-model.md, `ativo_mapeado`): `alvo_id`,
+// `fora_da_carteira = true` e `reserva_emergencia = true` são mutuamente
+// exclusivos entre si (e com `ignorar_no_import = true`, exceto que
+// `ignorar_no_import` convive com `alvo_id` preenchido — ver comentários
+// específicos abaixo). Toda escrita neste arquivo zera explicitamente os
+// lados opostos antes de setar um dos estados.
 
 export interface VinculoPendente {
   chaveExport: string;
@@ -30,6 +33,17 @@ export interface VinculoVinculado {
 }
 
 export interface VinculoForaDaCarteira {
+  chaveExport: string;
+  valorAtualCentavos: number;
+}
+
+/**
+ * Balde "reserva de emergência" (novo estado, mesmo shape de
+ * `VinculoForaDaCarteira`): `chave_export` reconhecida do CSV que NÃO entra
+ * em nenhum déficit/alocação por alvo, mas é um grupo ISOLADO próprio —
+ * nunca misturado com `foraDaCarteira` nem com `pendentes`/`vinculados`.
+ */
+export interface VinculoReservaEmergencia {
   chaveExport: string;
   valorAtualCentavos: number;
 }
@@ -55,6 +69,8 @@ export interface ListarVinculosOutput {
   pendentes: VinculoPendente[];
   vinculados: VinculoVinculado[];
   foraDaCarteira: VinculoForaDaCarteira[];
+  /** Balde isolado "reserva de emergência" — ver `VinculoReservaEmergencia`. */
+  reservaEmergencia: VinculoReservaEmergencia[];
   ignorados: IgnoradoRow[];
 }
 
@@ -66,18 +82,23 @@ export type VincularAtivoInput =
   // Reaproveita os mesmos dois sub-modos de escolha de alvo já existentes
   // acima; não existe um modo "ignorar sem alvo" (contracts/server-actions.md).
   | { chaveExport: string; ignorarNoImport: true; alvoId: string }
-  | { chaveExport: string; ignorarNoImport: true; novoAlvo: { nome: string; percentualBps: number } };
+  | { chaveExport: string; ignorarNoImport: true; novoAlvo: { nome: string; percentualBps: number } }
+  // NOVO — "Reserva de emergência": mesmo padrão de `{chaveExport,
+  // foraDaCarteira: true}`, um estado isolado próprio (não combina com
+  // ignorarNoImport por decisão explícita, fora de escopo por ora).
+  | { chaveExport: string; reservaEmergencia: true };
 
 export interface VinculoAtualizado {
   chaveExport: string;
   alvoId: string | null;
   nomeAlvo: string | null;
   foraDaCarteira: boolean;
+  /** Sempre presente, mesmo padrão de `foraDaCarteira` — `true` só na forma `{reservaEmergencia: true}`. */
+  reservaEmergencia: boolean;
   /**
    * Presentes apenas quando a resolução foi feita com `ignorarNoImport: true`
-   * (contracts/server-actions.md) — omitidos (`undefined`) nas 3 formas
-   * pré-existentes para não alterar o shape que a tela 6.3 já consome há
-   * mais tempo.
+   * (contracts/server-actions.md) — omitidos (`undefined`) nas demais formas
+   * para não alterar o shape que a tela 6.3 já consome há mais tempo.
    */
   ignorarNoImport?: boolean;
   posicaoManualPendente?: boolean;
@@ -142,7 +163,9 @@ async function obterAlvoIdsComPosicaoManualAtiva(): Promise<Set<string>> {
 
 /**
  * Estado completo de `ativo_mapeado` (data-model.md, "Estados derivados"),
- * agrupado nos quatro baldes da tela 6.3. `vinculados` traz `nomeAlvo`
+ * agrupado nos cinco baldes da tela 6.3 (`reservaEmergencia` é o mais
+ * novo — balde isolado, nunca misturado com `foraDaCarteira`).
+ * `vinculados` traz `nomeAlvo`
  * denormalizado para exibição direta (N-para-1: vários `chaveExport` podem
  * repetir o mesmo `alvoId`/`nomeAlvo` — agrupável no cliente por `alvoId`).
  *
@@ -171,6 +194,7 @@ export async function listarVinculos(): Promise<ListarVinculosOutput> {
   const pendentes: VinculoPendente[] = [];
   const vinculados: VinculoVinculado[] = [];
   const foraDaCarteira: VinculoForaDaCarteira[] = [];
+  const reservaEmergencia: VinculoReservaEmergencia[] = [];
   const ignorados: IgnoradoRow[] = [];
 
   for (const registro of registros) {
@@ -189,6 +213,11 @@ export async function listarVinculos(): Promise<ListarVinculosOutput> {
       // Estado "fora da carteira" — independente de alvo_id (que, pela
       // invariante, deve estar null aqui; ver nota em vincularAtivo).
       foraDaCarteira.push({ chaveExport: registro.chave_export, valorAtualCentavos });
+    } else if (registro.reserva_emergencia) {
+      // Estado "reserva de emergência" — balde ISOLADO próprio, nunca
+      // misturado com foraDaCarteira nem com pendentes/vinculados (alvo_id
+      // também deve estar null aqui, pela invariante).
+      reservaEmergencia.push({ chaveExport: registro.chave_export, valorAtualCentavos });
     } else if (registro.alvo_id !== null) {
       vinculados.push({
         chaveExport: registro.chave_export,
@@ -197,21 +226,26 @@ export async function listarVinculos(): Promise<ListarVinculosOutput> {
         valorAtualCentavos,
       });
     } else {
-      // Pendente: alvo_id = null AND fora_da_carteira = false — bloqueia a
-      // calculadora (FR-015). aporte-service.listarPendencias faz a mesma
-      // checagem hoje (duplicada por decisão explícita da task: não alterar
-      // aporte-service nesta task); este é o balde equivalente.
+      // Pendente: alvo_id = null AND fora_da_carteira = false AND
+      // reserva_emergencia = false — bloqueia a calculadora (FR-015).
+      // aporte-service.listarPendencias faz a mesma checagem hoje (duplicada
+      // por decisão explícita da task: não alterar aporte-service nesta
+      // task); este é o balde equivalente.
       pendentes.push({ chaveExport: registro.chave_export, valorAtualCentavos });
     }
   }
 
-  return { pendentes, vinculados, foraDaCarteira, ignorados };
+  return { pendentes, vinculados, foraDaCarteira, reservaEmergencia, ignorados };
 }
 
-/** Quantidade de `ativo_mapeado` pendentes (alvo_id null AND fora_da_carteira false). */
+/**
+ * Quantidade de `ativo_mapeado` pendentes (alvo_id null AND fora_da_carteira
+ * false AND reserva_emergencia false — reserva de emergência é um estado
+ * RESOLVIDO, não conta como pendência).
+ */
 export async function contarPendencias(): Promise<number> {
   return prisma.ativo_mapeado.count({
-    where: { alvo_id: null, fora_da_carteira: false },
+    where: { alvo_id: null, fora_da_carteira: false, reserva_emergencia: false },
   });
 }
 
@@ -239,10 +273,14 @@ export async function vincularAtivo(input: VincularAtivoInput): Promise<VinculoA
   if ("novoAlvo" in input) {
     return vincularNovoAlvo(input.chaveExport, input.novoAlvo);
   }
-  // Após excluir `novoAlvo`, resta `{alvoId}` | `{foraDaCarteira: true}` — o
-  // discriminante `"alvoId" in input` narrowa positivamente para o primeiro
-  // e, por eliminação, o `else` só pode ser o segundo (narrowing negativo de
-  // `"in"` combinado com `&&` não é confiável no TS, daí a ordem aqui).
+  if ("reservaEmergencia" in input && input.reservaEmergencia) {
+    return marcarReservaEmergencia(input.chaveExport);
+  }
+  // Após excluir `novoAlvo`/`reservaEmergencia`, resta `{alvoId}` |
+  // `{foraDaCarteira: true}` — o discriminante `"alvoId" in input` narrowa
+  // positivamente para o primeiro e, por eliminação, o `else` só pode ser o
+  // segundo (narrowing negativo de `"in"` combinado com `&&` não é
+  // confiável no TS, daí a ordem aqui).
   if ("alvoId" in input) {
     return vincularAlvoExistente(input.chaveExport, input.alvoId);
   }
@@ -262,11 +300,17 @@ async function vincularAlvoExistente(
   }
 
   // Exclusão mútua (data-model.md): vincular a um alvo sempre zera
-  // fora_da_carteira, independentemente do estado anterior do registro.
+  // fora_da_carteira e reserva_emergencia, independentemente do estado
+  // anterior do registro.
   const mapeamento = await prisma.ativo_mapeado.upsert({
     where: { chave_export: chaveExport },
-    create: { chave_export: chaveExport, alvo_id: alvo.id, fora_da_carteira: false },
-    update: { alvo_id: alvo.id, fora_da_carteira: false },
+    create: {
+      chave_export: chaveExport,
+      alvo_id: alvo.id,
+      fora_da_carteira: false,
+      reserva_emergencia: false,
+    },
+    update: { alvo_id: alvo.id, fora_da_carteira: false, reserva_emergencia: false },
   });
 
   return {
@@ -274,17 +318,19 @@ async function vincularAlvoExistente(
     alvoId: alvo.id,
     nomeAlvo: alvo.nome,
     foraDaCarteira: false,
+    reservaEmergencia: false,
   };
 }
 
-/** Forma `{chaveExport, foraDaCarteira: true}` — marca fora-da-carteira, zerando alvo_id. */
+/** Forma `{chaveExport, foraDaCarteira: true}` — marca fora-da-carteira, zerando alvo_id e reserva_emergencia. */
 async function marcarForaDaCarteira(chaveExport: string): Promise<VinculoAtualizado> {
   // Exclusão mútua (data-model.md): marcar fora-da-carteira sempre zera
-  // alvo_id, independentemente do estado anterior do registro.
+  // alvo_id e reserva_emergencia, independentemente do estado anterior do
+  // registro.
   const mapeamento = await prisma.ativo_mapeado.upsert({
     where: { chave_export: chaveExport },
-    create: { chave_export: chaveExport, alvo_id: null, fora_da_carteira: true },
-    update: { alvo_id: null, fora_da_carteira: true },
+    create: { chave_export: chaveExport, alvo_id: null, fora_da_carteira: true, reserva_emergencia: false },
+    update: { alvo_id: null, fora_da_carteira: true, reserva_emergencia: false },
   });
 
   return {
@@ -292,6 +338,41 @@ async function marcarForaDaCarteira(chaveExport: string): Promise<VinculoAtualiz
     alvoId: null,
     nomeAlvo: null,
     foraDaCarteira: true,
+    reservaEmergencia: false,
+  };
+}
+
+/**
+ * Forma `{chaveExport, reservaEmergencia: true}` — marca "reserva de
+ * emergência", zerando alvo_id, fora_da_carteira e ignorar_no_import. Mesmo
+ * padrão de `marcarForaDaCarteira`, mas para o balde isolado próprio de
+ * reserva de emergência (não combina com ignorar_no_import por decisão
+ * explícita, fora de escopo por ora).
+ */
+async function marcarReservaEmergencia(chaveExport: string): Promise<VinculoAtualizado> {
+  const mapeamento = await prisma.ativo_mapeado.upsert({
+    where: { chave_export: chaveExport },
+    create: {
+      chave_export: chaveExport,
+      alvo_id: null,
+      fora_da_carteira: false,
+      ignorar_no_import: false,
+      reserva_emergencia: true,
+    },
+    update: {
+      alvo_id: null,
+      fora_da_carteira: false,
+      ignorar_no_import: false,
+      reserva_emergencia: true,
+    },
+  });
+
+  return {
+    chaveExport: mapeamento.chave_export,
+    alvoId: null,
+    nomeAlvo: null,
+    foraDaCarteira: false,
+    reservaEmergencia: true,
   };
 }
 
@@ -318,8 +399,13 @@ async function vincularNovoAlvo(
 
     const mapeamento = await tx.ativo_mapeado.upsert({
       where: { chave_export: chaveExport },
-      create: { chave_export: chaveExport, alvo_id: alvo.id, fora_da_carteira: false },
-      update: { alvo_id: alvo.id, fora_da_carteira: false },
+      create: {
+        chave_export: chaveExport,
+        alvo_id: alvo.id,
+        fora_da_carteira: false,
+        reserva_emergencia: false,
+      },
+      update: { alvo_id: alvo.id, fora_da_carteira: false, reserva_emergencia: false },
     });
 
     return {
@@ -327,6 +413,7 @@ async function vincularNovoAlvo(
       alvoId: alvo.id,
       nomeAlvo: alvo.nome,
       foraDaCarteira: false,
+      reservaEmergencia: false,
     };
   });
 }
@@ -356,8 +443,14 @@ async function vincularIgnorarNoImportComAlvoExistente(
       alvo_id: alvo.id,
       fora_da_carteira: false,
       ignorar_no_import: true,
+      reserva_emergencia: false,
     },
-    update: { alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: true },
+    update: {
+      alvo_id: alvo.id,
+      fora_da_carteira: false,
+      ignorar_no_import: true,
+      reserva_emergencia: false,
+    },
   });
 
   const posicaoManualPendente = !(await obterAlvoIdsComPosicaoManualAtiva()).has(alvo.id);
@@ -367,6 +460,7 @@ async function vincularIgnorarNoImportComAlvoExistente(
     alvoId: alvo.id,
     nomeAlvo: alvo.nome,
     foraDaCarteira: false,
+    reservaEmergencia: false,
     ignorarNoImport: true,
     posicaoManualPendente,
   };
@@ -398,8 +492,14 @@ async function vincularIgnorarNoImportComNovoAlvo(
         alvo_id: alvo.id,
         fora_da_carteira: false,
         ignorar_no_import: true,
+        reserva_emergencia: false,
       },
-      update: { alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: true },
+      update: {
+        alvo_id: alvo.id,
+        fora_da_carteira: false,
+        ignorar_no_import: true,
+        reserva_emergencia: false,
+      },
     });
 
     return { mapeamento, alvo };
@@ -413,6 +513,7 @@ async function vincularIgnorarNoImportComNovoAlvo(
     alvoId: resultado.alvo.id,
     nomeAlvo: resultado.alvo.nome,
     foraDaCarteira: false,
+    reservaEmergencia: false,
     ignorarNoImport: true,
     posicaoManualPendente: true,
   };
