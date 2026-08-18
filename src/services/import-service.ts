@@ -10,6 +10,11 @@ import {
   type IncrementoAmbiguoPendenteItem,
   type PosicaoManualRevisaoItem,
 } from "@/services/posicao-manual-service";
+import {
+  calcularMovimentacaoNaoExplicada,
+  contarAtivosComValorInvestidoRastreavel,
+  type MovimentacaoNaoExplicada,
+} from "@/services/rendimento-service";
 
 // Serviço de import mensal (T036): orquestra o parse em memória (preview,
 // sem persistir nada) e a confirmação (backup + transação Prisma) de uma
@@ -82,6 +87,16 @@ export type PreviewImportResultado =
       ajustesRevisao: AjusteRevisaoItem[];
       /** Pendências ambíguas de alvo agregadas (T026, motor-integracao.md §4.2). */
       incrementosAmbiguosPendentes: IncrementoAmbiguoPendente[];
+      /**
+       * NOVO (feature 003, US4, FR-011/FR-011a/FR-018). Comparação, POR ALVO,
+       * entre o valor investido esperado (sessão VIGENTE anterior + aportes
+       * registrados no app desde então, research.md R7) e o valor investido
+       * REAL que este preview traria — só para diferenças que excedem FR-018
+       * (5% E R$20,00 simultaneamente, research.md R8). Array vazio = nada a
+       * sinalizar. Puramente informativo (research.md R13) — NUNCA bloqueia
+       * `previewImport` nem `confirmarImport`.
+       */
+      movimentacoesNaoExplicadas: MovimentacaoNaoExplicada[];
     }
   | { ok: false; erros: ErroParse[] };
 
@@ -287,6 +302,120 @@ async function listarPendenciasDaSessao(sessaoId: string): Promise<string[]> {
 }
 
 /**
+ * Consolida `patrimonioAplicadoCentavos` por `chave_export`, entre todos os
+ * arquivos deste preview — mesma técnica de `consolidarPorChave`
+ * (`patrimonio_hoje_centavos`), mas preservando `null` quando QUALQUER linha
+ * daquela chave não trouxe valor (coluna ausente/inválida naquela linha,
+ * research.md R2 da feature 003) — nunca soma parcial disfarçada de
+ * completa (mesma regra já usada por `resolverValorInvestido`, feature 003
+ * US1).
+ */
+function consolidarPatrimonioAplicadoPorChave(
+  arquivosParseados: ArquivoParseado[],
+): Map<string, number | null> {
+  const mapa = new Map<string, number | null>();
+  for (const arquivo of arquivosParseados) {
+    for (const linha of arquivo.linhas) {
+      const atual = mapa.get(linha.chaveExport);
+      if (atual === null) continue; // já marcada como sem dado por outra linha da mesma chave
+      if (linha.patrimonioAplicadoCentavos === null) {
+        mapa.set(linha.chaveExport, null);
+      } else {
+        mapa.set(linha.chaveExport, (atual ?? 0) + linha.patrimonioAplicadoCentavos);
+      }
+    }
+  }
+  return mapa;
+}
+
+/**
+ * Calcula `movimentacoesNaoExplicadas` do preview (US4, FR-011/FR-011a/
+ * FR-018, research.md R6/R7/R13) — ANTES de qualquer persistência, a partir
+ * dos dados parseados em memória e da sessão VIGENTE mais recente (mesma
+ * referência de "sessão anterior" já usada por `instituicoesFaltantes`/
+ * `diff`).
+ *
+ * Escopo desta fatia (decisão documentada em tasks.md): só valida alvos
+ * cuja elegibilidade COMPLETA (`contarAtivosComValorInvestidoRastreavel`,
+ * R6) é formada exclusivamente por `chave_export` presentes NESTE import com
+ * valor real disponível. Um alvo com QUALQUER `posicao_manual` elegível, ou
+ * com um `chave_export` elegível ausente/sem valor neste import específico,
+ * é pulado (nunca um falso alarme construído sobre dado incompleto) — o
+ * valor investido de posição manual só é conhecido depois da revisão da
+ * tela de import (ainda não confirmada neste momento do preview).
+ */
+async function calcularMovimentacoesNaoExplicadasDoPreview(
+  arquivosParseados: ArquivoParseado[],
+  sessaoAnteriorId: string | null,
+): Promise<MovimentacaoNaoExplicada[]> {
+  if (!sessaoAnteriorId) return [];
+
+  const consolidadoPorChave = consolidarPatrimonioAplicadoPorChave(arquivosParseados);
+  const chaves = Array.from(consolidadoPorChave.keys());
+  if (chaves.length === 0) return [];
+
+  const mapeamentos = await prisma.ativo_mapeado.findMany({
+    where: {
+      chave_export: { in: chaves },
+      alvo_id: { not: null },
+      fora_da_carteira: false,
+      ignorar_no_import: false,
+    },
+    select: { chave_export: true, alvo_id: true },
+  });
+  if (mapeamentos.length === 0) return [];
+
+  const chavesPorAlvoId = new Map<string, string[]>();
+  for (const m of mapeamentos) {
+    const alvoId = m.alvo_id as string;
+    if (!chavesPorAlvoId.has(alvoId)) chavesPorAlvoId.set(alvoId, []);
+    chavesPorAlvoId.get(alvoId)!.push(m.chave_export);
+  }
+
+  const alvos = await prisma.alvo.findMany({
+    where: { id: { in: Array.from(chavesPorAlvoId.keys()) } },
+    select: { id: true, nome: true },
+  });
+  const nomePorAlvoId = new Map(alvos.map((a) => [a.id, a.nome]));
+
+  const resultado: MovimentacaoNaoExplicada[] = [];
+  for (const [alvoId, chavesDoAlvo] of chavesPorAlvoId) {
+    const elegibilidade = await contarAtivosComValorInvestidoRastreavel(alvoId);
+    const somenteChaveExport = elegibilidade.elegiveis.every((e) => e.chaveExport !== undefined);
+    if (!somenteChaveExport) continue;
+
+    const chavesElegiveisEsperadas = new Set(elegibilidade.elegiveis.map((e) => e.chaveExport as string));
+    const chavesDoAlvoSet = new Set(chavesDoAlvo);
+    const cobreTodasElegiveis =
+      chavesElegiveisEsperadas.size === chavesDoAlvoSet.size &&
+      Array.from(chavesElegiveisEsperadas).every((c) => chavesDoAlvoSet.has(c));
+    if (!cobreTodasElegiveis) continue;
+
+    let valorRealCentavos: number | null = 0;
+    for (const chave of chavesDoAlvo) {
+      const valor = consolidadoPorChave.get(chave);
+      if (valor === null || valor === undefined) {
+        valorRealCentavos = null;
+        break;
+      }
+      valorRealCentavos += valor;
+    }
+    if (valorRealCentavos === null) continue;
+
+    const nomeAlvo = nomePorAlvoId.get(alvoId) ?? alvoId;
+    const movimentacao = await calcularMovimentacaoNaoExplicada(
+      { alvoId, nomeAlvo, valorInvestidoRealCentavos: valorRealCentavos },
+      sessaoAnteriorId,
+    );
+    if (movimentacao && movimentacao.excedeTolerancia) {
+      resultado.push(movimentacao);
+    }
+  }
+
+  return resultado;
+}
+
+/**
  * Preview de um import multi-arquivo: parse 100% EM MEMÓRIA — nada persiste,
  * inclusive quando há erro de parse (retorna `ok: false` com todos os erros
  * de todos os arquivos, nunca resultado parcial).
@@ -365,6 +494,16 @@ export async function previewImport(arquivos: ArquivoImport[]): Promise<PreviewI
     montarIncrementosAmbiguosPendentes(),
   ]);
 
+  // US4 (FR-011/FR-011a/FR-018, research.md R13): puramente informativo,
+  // calculado ANTES de qualquer persistência — mesma referência de "sessão
+  // anterior" já usada acima para instituicoesFaltantes/diff. Nunca lançado
+  // como erro: qualquer alvo sem dado suficiente é simplesmente omitido
+  // (calcularMovimentacoesNaoExplicadasDoPreview já trata isso).
+  const movimentacoesNaoExplicadas = await calcularMovimentacoesNaoExplicadasDoPreview(
+    arquivosParseados,
+    sessaoMaisRecenteQualquerMes?.id ?? null,
+  );
+
   return {
     ok: true,
     arquivos: resumoPorInstituicao,
@@ -376,6 +515,7 @@ export async function previewImport(arquivos: ArquivoImport[]): Promise<PreviewI
     posicoesManuaisRevisao,
     ajustesRevisao,
     incrementosAmbiguosPendentes,
+    movimentacoesNaoExplicadas,
   };
 }
 

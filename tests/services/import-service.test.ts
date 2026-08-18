@@ -1301,4 +1301,270 @@ describe("import-service", () => {
       expect(noBanco.sessao_aplicacao_id).toBeNull();
     });
   });
+
+  // -------------------------------------------------------------------
+  // T024 (User Story 4, FR-011/FR-011a/FR-018/FR-019, research.md R6/R7/R13):
+  // `previewImport.movimentacoesNaoExplicadas` — informativo, nunca
+  // bloqueante; `confirmarImport` sempre persiste o valor REAL do CSV em
+  // `posicao.patrimonio_investido_centavos`, nunca o "esperado".
+  // -------------------------------------------------------------------
+  describe("movimentacoesNaoExplicadas no preview (T024, US4)", () => {
+    const COLUNAS_COM_PATRIMONIO_APLICADO = [
+      "Ação",
+      "Quantidade",
+      "Patrimônio Hoje",
+      "Patrimônio Aplicado",
+      "Tipo de Grupo",
+      "dataUltimaCotacao",
+    ];
+
+    function headerComPatrimonioAplicado(): string {
+      return COLUNAS_COM_PATRIMONIO_APLICADO.join(";");
+    }
+
+    function linhaComPatrimonioAplicado(opts: {
+      acao: string;
+      quantidade?: string;
+      patrimonioHoje: string;
+      patrimonioAplicado: string;
+      tipoGrupo?: string;
+      dataUltimaCotacao?: string;
+    }): string {
+      const {
+        acao,
+        quantidade = "100",
+        patrimonioHoje,
+        patrimonioAplicado,
+        tipoGrupo = "ACOES",
+        dataUltimaCotacao = "2026-08-28T03:00:00.000Z",
+      } = opts;
+      return [acao, quantidade, patrimonioHoje, patrimonioAplicado, tipoGrupo, dataUltimaCotacao].join(";");
+    }
+
+    function arquivoComPatrimonioAplicado(instituicao: string, linhasDados: string[]): ArquivoImport {
+      return arquivo(`Export_${instituicao}.csv`, [headerComPatrimonioAplicado(), ...linhasDados]);
+    }
+
+    async function criarAlvo(nome: string) {
+      return prisma.alvo.create({
+        data: { nome, percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },
+      });
+    }
+
+    it("presente quando a diferença excede AMBOS os limiares de FR-018 (5% E R$20,00)", async () => {
+      const alvo = await criarAlvo("Ações");
+
+      // Sessão anterior (VIGENTE): AAA11 com valor investido = R$800,00, vinculado ao alvo (único elegível, n=1).
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "AAA11", patrimonioHoje: "1000.00" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+      await prisma.ativo_mapeado.update({ where: { chave_export: "AAA11" }, data: { alvo_id: alvo.id } });
+      // O primeiro import (linha() default) não trouxe "Patrimônio Aplicado" — ajusta
+      // manualmente a posição criada para simular um valor investido conhecido.
+      await prisma.posicao.updateMany({
+        where: { sessao_import_id: r1.sessaoId, chave_export: "AAA11" },
+        data: { patrimonio_investido_centavos: 80_000 },
+      });
+
+      // Novo import: valor investido real = R$2.000,00 (bem acima de 80_000 + 0 esperado).
+      const preview = await importService.previewImport([
+        arquivoComPatrimonioAplicado("Itaú", [
+          linhaComPatrimonioAplicado({
+            acao: "AAA11",
+            patrimonioHoje: "2500.00",
+            patrimonioAplicado: "2000.00",
+          }),
+        ]),
+      ]);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+
+      expect(preview.movimentacoesNaoExplicadas.length).toBeGreaterThan(0);
+      const item = preview.movimentacoesNaoExplicadas.find((m) => m.alvoId === alvo.id);
+      expect(item).toBeDefined();
+      expect(item!.granularidade).toBe("ativo");
+      expect(item!.chaveExport).toBe("AAA11");
+      expect(item!.excedeTolerancia).toBe(true);
+      expect(item!.valorInvestidoEsperadoCentavos).toBe(80_000);
+      expect(item!.valorInvestidoRealCentavos).toBe(200_000);
+    });
+
+    it("ausente/vazio quando a diferença NÃO excede a tolerância", async () => {
+      const alvo = await criarAlvo("Ações");
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "BBB11", patrimonioHoje: "1000.00" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+      await prisma.ativo_mapeado.update({ where: { chave_export: "BBB11" }, data: { alvo_id: alvo.id } });
+      await prisma.posicao.updateMany({
+        where: { sessao_import_id: r1.sessaoId, chave_export: "BBB11" },
+        data: { patrimonio_investido_centavos: 80_000 },
+      });
+
+      // Novo import: valor investido real = R$805,00 — diferença de R$5,00, bem abaixo do piso.
+      const preview = await importService.previewImport([
+        arquivoComPatrimonioAplicado("Itaú", [
+          linhaComPatrimonioAplicado({
+            acao: "BBB11",
+            patrimonioHoje: "900.00",
+            patrimonioAplicado: "805.00",
+          }),
+        ]),
+      ]);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+
+      const item = preview.movimentacoesNaoExplicadas.find((m) => m.alvoId === alvo.id);
+      expect(item).toBeUndefined();
+    });
+
+    it("NUNCA bloqueia previewImport nem confirmarImport, independente do conteúdo de movimentacoesNaoExplicadas", async () => {
+      const alvo = await criarAlvo("Ações");
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "CCC11", patrimonioHoje: "1000.00" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+      await prisma.ativo_mapeado.update({ where: { chave_export: "CCC11" }, data: { alvo_id: alvo.id } });
+      await prisma.posicao.updateMany({
+        where: { sessao_import_id: r1.sessaoId, chave_export: "CCC11" },
+        data: { patrimonio_investido_centavos: 80_000 },
+      });
+
+      const arquivos = [
+        arquivoComPatrimonioAplicado("Itaú", [
+          linhaComPatrimonioAplicado({
+            acao: "CCC11",
+            patrimonioHoje: "5000.00",
+            patrimonioAplicado: "4000.00", // bem acima da tolerância
+          }),
+        ]),
+      ];
+
+      const preview = await importService.previewImport(arquivos);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+      expect(preview.movimentacoesNaoExplicadas.length).toBeGreaterThan(0);
+
+      const confirmacao = await importService.confirmarImport({
+        arquivos,
+        mesReferencia: "2026-08",
+      });
+      expect(confirmacao.ok).toBe(true);
+    });
+
+    it("chave espalhada por 2 instituições onde UMA tem Patrimônio Aplicado ausente: alvo é pulado (nunca falso alarme sobre dado incompleto)", async () => {
+      const alvo = await criarAlvo("Ações");
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "FFF11", patrimonioHoje: "1000.00" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+      await prisma.ativo_mapeado.update({ where: { chave_export: "FFF11" }, data: { alvo_id: alvo.id } });
+      await prisma.posicao.updateMany({
+        where: { sessao_import_id: r1.sessaoId, chave_export: "FFF11" },
+        data: { patrimonio_investido_centavos: 80_000 },
+      });
+
+      // Mesma chave FFF11 em duas instituições no novo import — Nubank sem
+      // "Patrimônio Aplicado" (coluna ausente do header dessa instituição
+      // específica; MyCapital exporta por instituição, cada arquivo pode ter
+      // colunas diferentes) — o valor real consolidado da chave fica
+      // indisponível (null), não uma soma parcial disfarçada de completa.
+      const preview = await importService.previewImport([
+        arquivoComPatrimonioAplicado("Itaú", [
+          linhaComPatrimonioAplicado({ acao: "FFF11", patrimonioHoje: "1500.00", patrimonioAplicado: "1000.00" }),
+        ]),
+        arquivoInstituicao("Nubank", [linha({ acao: "FFF11", patrimonioHoje: "500.00" })]),
+      ]);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+
+      const item = preview.movimentacoesNaoExplicadas.find((m) => m.alvoId === alvo.id);
+      expect(item).toBeUndefined();
+    });
+
+    it("US4 Acceptance Scenario 3: ativo novo (primeira aparição, mapeado ao alvo só agora, sem posicao na sessão anterior) não gera alerta ('não há base de comparação')", async () => {
+      const alvo = await criarAlvo("Ações");
+
+      // Sessão anterior VIGENTE existe, mas SEM NENHUMA posição de "EEE11"
+      // nela — o ativo é mapeado ao alvo só agora, no import corrente
+      // (spec.md US4 Acceptance Scenario 3: "ativo novo, primeira aparição,
+      // sem sessão anterior" -> "nenhum alerta... não há base de comparação").
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "OUTRO1", patrimonioHoje: "1000.00" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+      await prisma.ativo_mapeado.create({
+        data: {
+          chave_export: "EEE11",
+          alvo_id: alvo.id,
+          fora_da_carteira: false,
+          ignorar_no_import: false,
+          reserva_emergencia: false,
+        },
+      });
+
+      const preview = await importService.previewImport([
+        arquivoComPatrimonioAplicado("Itaú", [
+          linhaComPatrimonioAplicado({ acao: "OUTRO1", patrimonioHoje: "1000.00", patrimonioAplicado: "800.00" }),
+          linhaComPatrimonioAplicado({ acao: "EEE11", patrimonioHoje: "500.00", patrimonioAplicado: "500.00" }),
+        ]),
+      ]);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+
+      const item = preview.movimentacoesNaoExplicadas.find((m) => m.alvoId === alvo.id);
+      expect(item).toBeUndefined();
+    });
+
+    it("FR-019: patrimonio_investido_centavos persistido é sempre o valor REAL do CSV, nunca o 'esperado' calculado para comparação", async () => {
+      const alvo = await criarAlvo("Ações");
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "DDD11", patrimonioHoje: "1000.00" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+      await prisma.ativo_mapeado.update({ where: { chave_export: "DDD11" }, data: { alvo_id: alvo.id } });
+      await prisma.posicao.updateMany({
+        where: { sessao_import_id: r1.sessaoId, chave_export: "DDD11" },
+        data: { patrimonio_investido_centavos: 80_000 }, // "esperado" seria 80_000 (sem aporte executado)
+      });
+
+      const r2 = await importService.confirmarImport({
+        arquivos: [
+          arquivoComPatrimonioAplicado("Itaú", [
+            linhaComPatrimonioAplicado({
+              acao: "DDD11",
+              patrimonioHoje: "5000.00",
+              patrimonioAplicado: "4000.00", // valor REAL, bem diferente do "esperado" (80_000)
+            }),
+          ]),
+        ],
+        mesReferencia: "2026-08",
+      });
+      expect(r2.ok).toBe(true);
+      if (!r2.ok) return;
+
+      const posicaoPersistida = await prisma.posicao.findFirstOrThrow({
+        where: { sessao_import_id: r2.sessaoId, chave_export: "DDD11" },
+      });
+      // Sempre o valor REAL do CSV (R$4.000,00) — nunca o "esperado" (R$800,00).
+      expect(posicaoPersistida.patrimonio_investido_centavos).toBe(400_000);
+    });
+  });
 });
