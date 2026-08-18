@@ -370,6 +370,77 @@ describe("dashboard-service", () => {
       ).toBe(dados.patrimonioTotalCentavos);
     });
 
+    it("ativo em reserva_emergencia soma em patrimonioReservaEmergenciaCentavos, aparece isolado em reservaEmergencia[] e NÃO entra em naCarteira/foraDaCarteira/alocacao/alocacaoPorTag; invariante do total se mantém", async () => {
+      const alvo = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+      await prisma.posicao.createMany({
+        data: [
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 300_000,
+            tipo_grupo: "ACOES",
+          },
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "RESERVA-CDB",
+            instituicao: "Itaú",
+            quantidade: "1",
+            patrimonio_hoje_centavos: 80_000,
+            tipo_grupo: "OUTROS_FUNDOS",
+          },
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "ATIVO-PENDENTE",
+            instituicao: "Itaú",
+            quantidade: "1",
+            patrimonio_hoje_centavos: 20_000,
+            tipo_grupo: "ACOES",
+          },
+        ],
+      });
+      await prisma.ativo_mapeado.createMany({
+        data: [
+          { chave_export: "PRIO3", alvo_id: alvo.id, fora_da_carteira: false },
+          { chave_export: "RESERVA-CDB", alvo_id: null, reserva_emergencia: true },
+        ],
+      });
+
+      const dados = await dashboardService.dadosDashboard();
+      if (dados.vazio) throw new Error("não deveria ser vazio");
+
+      expect(dados.patrimonioReservaEmergenciaCentavos).toBe(80_000);
+      expect(dados.reservaEmergencia).toEqual([
+        { chaveExport: "RESERVA-CDB", valorCentavos: 80_000 },
+      ]);
+      // Não entra em naCarteira nem em foraDaCarteira.
+      expect(dados.patrimonioNaCarteiraCentavos).toBe(300_000);
+      expect(dados.patrimonioForaDaCarteiraCentavos).toBe(0);
+      expect(dados.patrimonioPendenteCentavos).toBe(20_000);
+      // Não aparece na alocação por alvo nem por tag.
+      expect(dados.alocacao.reduce((acc, a) => acc + a.valorAtualCentavos, 0)).toBe(300_000);
+      expect(dados.alocacaoPorTag.reduce((acc, g) => acc + g.valorAtualCentavos, 0)).toBe(300_000);
+      // Invariante do total, agora com o novo componente.
+      expect(dados.patrimonioTotalCentavos).toBe(400_000);
+      expect(
+        dados.patrimonioNaCarteiraCentavos +
+          dados.patrimonioForaDaCarteiraCentavos +
+          dados.patrimonioReservaEmergenciaCentavos +
+          dados.patrimonioPendenteCentavos,
+      ).toBe(dados.patrimonioTotalCentavos);
+    });
+
     it("invariante patrimonioTotal = naCarteira + foraDaCarteira + pendente quando TUDO é fora da carteira", async () => {
       const sessao = await prisma.sessao_import.create({
         data: {

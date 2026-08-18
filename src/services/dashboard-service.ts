@@ -39,15 +39,23 @@ import { contarPendencias } from "@/services/mapeamento-service";
 //      `fora_da_carteira = true` — excluídas da base, exibidas à parte
 //      (`foraDaCarteira: {chaveExport, valorCentavos}[]`), nunca misturadas
 //      na alocação por alvo.
+//    - `patrimonioReservaEmergenciaCentavos` = soma das posições marcadas
+//      `reserva_emergencia = true` — excluídas da base (mesmo tratamento de
+//      exclusão que `fora_da_carteira`), mas exibidas em um balde ISOLADO
+//      próprio (`reservaEmergencia: {chaveExport, valorCentavos}[]`), nunca
+//      misturado com `foraDaCarteira` nem com `pendentes`/alocação por alvo.
 //    - `patrimonioPendenteCentavos` = soma das posições sem vínculo resolvido
-//      (`alvo_id = null AND fora_da_carteira = false`, incluindo — defensivamente,
-//      igual a `aporte-service.listarPendenciasDaSessao` — chaves sem NENHUM
-//      registro de `ativo_mapeado`). Não é "fora da carteira" (decisão do
-//      usuário) nem "na carteira" (ainda sem alvo) — listado à parte em
-//      `pendentes`, como contraparte financeira do alerta de contagem
-//      (`contarPendencias()`, que só conta, não soma valor).
+//      (`alvo_id = null AND fora_da_carteira = false AND reserva_emergencia
+//      = false`, incluindo — defensivamente, igual a
+//      `aporte-service.listarPendenciasDaSessao` — chaves sem NENHUM
+//      registro de `ativo_mapeado`). Não é "fora da carteira" nem "reserva
+//      de emergência" (decisões do usuário) nem "na carteira" (ainda sem
+//      alvo) — listado à parte em `pendentes`, como contraparte financeira
+//      do alerta de contagem (`contarPendencias()`, que só conta, não soma
+//      valor).
 //    - Invariante: `patrimonioTotalCentavos === patrimonioNaCarteiraCentavos +
-//      patrimonioForaDaCarteiraCentavos + patrimonioPendenteCentavos`.
+//      patrimonioForaDaCarteiraCentavos + patrimonioReservaEmergenciaCentavos +
+//      patrimonioPendenteCentavos`.
 //
 // 2. **Data usada para ordenar a linha do tempo sugerido vs. executado**:
 //    usa-se o `mes_referencia` da SESSÃO à qual o `aporte` está amarrado
@@ -127,11 +135,15 @@ export interface DashboardComDados {
   patrimonioTotalCentavos: number;
   patrimonioNaCarteiraCentavos: number;
   patrimonioForaDaCarteiraCentavos: number;
+  /** Soma das posições marcadas `reserva_emergencia = true` — balde isolado, ver nota de design acima. */
+  patrimonioReservaEmergenciaCentavos: number;
   patrimonioPendenteCentavos: number;
   alocacao: AlocacaoPorAlvo[];
   /** Mesma alocação de `alocacao`, agrupada por `tag` — ver `AlocacaoPorTag`. */
   alocacaoPorTag: AlocacaoPorTag[];
   foraDaCarteira: AtivoComValor[];
+  /** Balde isolado "reserva de emergência" — nunca misturado com `foraDaCarteira`/`pendentes`. */
+  reservaEmergencia: AtivoComValor[];
   pendentes: AtivoComValor[];
   qtdPendencias: number;
   bandaToleranciaBps: number;
@@ -198,20 +210,26 @@ interface ClassificacaoPosicoes {
   patrimonioTotalCentavos: number;
   patrimonioNaCarteiraCentavos: number;
   patrimonioForaDaCarteiraCentavos: number;
+  patrimonioReservaEmergenciaCentavos: number;
   patrimonioPendenteCentavos: number;
   valorPorAlvoId: Map<string, number>;
   foraDaCarteira: AtivoComValor[];
+  reservaEmergencia: AtivoComValor[];
   pendentes: AtivoComValor[];
 }
 
 /**
  * Consolida as posições de uma sessão por `chave_export` (mesma chave em
  * instituições diferentes = uma posição só, somando patrimônio — data-model.md)
- * e classifica cada uma em vinculada / fora-da-carteira / pendente, espelhando
- * EXATAMENTE a condição de exclusão de `src/core/motor/deficit.ts`
- * (`foraDaCarteira || alvoId === null` ⇒ fora da base) para que
- * `patrimonioNaCarteiraCentavos` seja idêntico ao `patrimonioBaseCentavos`
- * que o motor usaria hoje.
+ * e classifica cada uma em vinculada / fora-da-carteira / reserva-de-emergência /
+ * pendente, espelhando EXATAMENTE a condição de exclusão de
+ * `src/core/motor/deficit.ts` (`foraDaCarteira || alvoId === null` ⇒ fora da
+ * base) para que `patrimonioNaCarteiraCentavos` seja idêntico ao
+ * `patrimonioBaseCentavos` que o motor usaria hoje. `reserva_emergencia`
+ * também tem `alvo_id = null` (invariante da aplicação), então já cairia na
+ * mesma exclusão do motor — aqui ela é classificada num branch próprio, ANTES
+ * do branch de "pendente", para ser exibida em um balde isolado em vez de
+ * cair em `pendentes`.
  */
 async function classificarPosicoesDaSessao(sessaoId: string): Promise<ClassificacaoPosicoes> {
   const posicoesBrutas = await prisma.posicao.findMany({
@@ -237,9 +255,11 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
   let patrimonioTotalCentavos = 0;
   let patrimonioNaCarteiraCentavos = 0;
   let patrimonioForaDaCarteiraCentavos = 0;
+  let patrimonioReservaEmergenciaCentavos = 0;
   let patrimonioPendenteCentavos = 0;
   const valorPorAlvoId = new Map<string, number>();
   const foraDaCarteira: AtivoComValor[] = [];
+  const reservaEmergencia: AtivoComValor[] = [];
   const pendentes: AtivoComValor[] = [];
 
   for (const [chaveExport, valorCentavos] of valorPorChave) {
@@ -247,17 +267,25 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
     const mapeamento = mapaPorChave.get(chaveExport);
     const alvoId = mapeamento?.alvo_id ?? null;
     const foraDaCarteiraFlag = mapeamento?.fora_da_carteira ?? false;
+    const reservaEmergenciaFlag = mapeamento?.reserva_emergencia ?? false;
 
     if (foraDaCarteiraFlag) {
       patrimonioForaDaCarteiraCentavos += valorCentavos;
       foraDaCarteira.push({ chaveExport, valorCentavos });
+    } else if (reservaEmergenciaFlag) {
+      // Balde isolado próprio — nunca misturado com foraDaCarteira nem com
+      // a alocação por alvo (mesmo tratamento de exclusão da base, mas
+      // exibição separada).
+      patrimonioReservaEmergenciaCentavos += valorCentavos;
+      reservaEmergencia.push({ chaveExport, valorCentavos });
     } else if (alvoId !== null) {
       patrimonioNaCarteiraCentavos += valorCentavos;
       valorPorAlvoId.set(alvoId, (valorPorAlvoId.get(alvoId) ?? 0) + valorCentavos);
     } else {
       // Pendente (ou chave sem NENHUM ativo_mapeado — mesmo tratamento
       // defensivo de aporte-service.listarPendenciasDaSessao): fica de fora
-      // da base do motor e do bucket fora-da-carteira; listado à parte.
+      // da base do motor e dos buckets fora-da-carteira/reserva-de-emergência;
+      // listado à parte.
       patrimonioPendenteCentavos += valorCentavos;
       pendentes.push({ chaveExport, valorCentavos });
     }
@@ -267,9 +295,11 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
     patrimonioTotalCentavos,
     patrimonioNaCarteiraCentavos,
     patrimonioForaDaCarteiraCentavos,
+    patrimonioReservaEmergenciaCentavos,
     patrimonioPendenteCentavos,
     valorPorAlvoId,
     foraDaCarteira,
+    reservaEmergencia,
     pendentes,
   };
 }
@@ -399,10 +429,12 @@ export async function dadosDashboard(): Promise<DadosDashboardOutput> {
     patrimonioTotalCentavos: classificacao.patrimonioTotalCentavos,
     patrimonioNaCarteiraCentavos: classificacao.patrimonioNaCarteiraCentavos,
     patrimonioForaDaCarteiraCentavos: classificacao.patrimonioForaDaCarteiraCentavos,
+    patrimonioReservaEmergenciaCentavos: classificacao.patrimonioReservaEmergenciaCentavos,
     patrimonioPendenteCentavos: classificacao.patrimonioPendenteCentavos,
     alocacao,
     alocacaoPorTag,
     foraDaCarteira: classificacao.foraDaCarteira,
+    reservaEmergencia: classificacao.reservaEmergencia,
     pendentes: classificacao.pendentes,
     qtdPendencias,
     bandaToleranciaBps,
