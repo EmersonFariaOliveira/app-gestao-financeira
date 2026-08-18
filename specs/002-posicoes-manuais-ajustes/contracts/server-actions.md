@@ -11,7 +11,7 @@ Referências: `docs/app-gestao-aportes.md` §6.3, §6.2, §6.5, §6.9, §4.1, §
 
 ## vinculos.ts (tela 6.3) — extensão
 
-`vincularAtivo` ganha uma 4ª e 5ª forma (união discriminada, mesmo padrão das 3 existentes —
+`vincularAtivo` ganha uma 4ª forma (união discriminada, mesmo padrão das 3 existentes —
 nenhuma das formas atuais muda):
 
 ```ts
@@ -19,23 +19,31 @@ export type VincularAtivoInput =
   | { chaveExport: string; alvoId: string }
   | { chaveExport: string; foraDaCarteira: true }
   | { chaveExport: string; novoAlvo: { nome: string; percentualBps: number } }
-  // NOVO — FR-001
-  | { chaveExport: string; ignorarNoImport: true; alvoId: string }
-  | { chaveExport: string; ignorarNoImport: true; novoAlvo: { nome: string; percentualBps: number } };
+  // NOVO — FR-001. Ação de um clique, sem sub-modo de escolha de alvo (mesmo
+  // padrão de `{chaveExport, foraDaCarteira: true}`).
+  | { chaveExport: string; ignorarNoImport: true };
 ```
 
-**Nota de design:** "Ignorar" exige escolher um alvo (existente ou novo), reaproveitando os
-mesmos dois sub-modos já usados por "vincular a alvo existente"/"criar alvo novo" — não é um
-modo sem alvo. O `alvo_id` gravado em `ativo_mapeado` não é descartado ao marcar
-`ignorar_no_import = true`; ele é o "mesmo alvo" citado na seção 4.1 para a `posicao_manual`
-substituta, preservando a exibição do ativo em "quais ativos apontam para este alvo" (tela 6.4)
-mesmo estando fora da consolidação. `fora_da_carteira` permanece `false` (o ativo faz parte da
-carteira, só não vem representado pelo CSV).
+**Nota de design (revisada):** "Ignorar" NÃO exige alvo — é uma forma "sem alvo" própria, mesmo
+padrão de `foraDaCarteira`/`reservaEmergencia`. `ativo_mapeado.alvo_id` é sempre zerado (`null`)
+ao marcar `ignorar_no_import = true`, mantendo a invariante de exclusão mútua consistente entre os
+4 estados de `ativo_mapeado` (nenhuma exceção). Não há valor do CSV a atribuir a um alvo neste
+estado — quem tem um alvo é a `posicao_manual` substituta, via seu próprio `alvo_id` (resolvido
+pela tela 6.9, mesmo fluxo de vínculo dos ativos do CSV).
+>
+> Versão anterior deste documento (revertida): "Ignorar" exigia escolher um alvo (reaproveitando os
+> sub-modos `alvoId`/`novoAlvo`) e preservava `ativo_mapeado.alvo_id` preenchido, para alimentar a
+> heurística por-alvo de `posicaoManualPendente` (nota #2 abaixo, também revertida). Essa exceção
+> causava vínculos incorretos: obrigava escolher um alvo só para "Ignorar", mesmo quando a
+> `posicao_manual` substituta ainda nem existia, e podia deixar `ativo_mapeado` apontando para um
+> alvo errado (não relacionado à posição manual real). Revertido para o design original de
+> `data-model.md` ("`alvo_id` pode ficar `null` nesse estado — não há valor do CSV a atribuir a um
+> alvo").
 
 | Action | Input | Output (`data`) | Regras |
 |---|---|---|---|
-| `listarVinculos` | — | `{ pendentes: [], vinculados: [], foraDaCarteira: [], ignorados: IgnoradoRow[] }` — `IgnoradoRow = { chaveExport, alvoId, nomeAlvo, valorAtualCentavos, posicaoManualPendente: boolean }` | Novo balde `ignorados` (FR-001). `valorAtualCentavos` é o valor bruto do CSV — exibido só como referência, rotulado "não usado no cálculo" (o motor usa a `posicao_manual`, não este valor). `posicaoManualPendente = true` quando não existe nenhuma `posicao_manual` ativa com o mesmo `alvoId` — heurística de UX (não há FK direta `ativo_mapeado` ↔ `posicao_manual`; ver Edge Case do spec.md linha 80) |
-| `vincularAtivo` | ver união acima | `VinculoAtualizado` `+ { ignorarNoImport: boolean; posicaoManualPendente: boolean }` | Ao resolver com `ignorarNoImport: true`, a linha some do balde "pendentes" e some do alarme de "ativo novo" em imports futuros (FR-001). Se `posicaoManualPendente` vier `true` na resposta, a UI exibe CTA **"+ Cadastrar posição manual"** linkando para `/posicoes-manuais?alvoId=<alvoId>&descricaoSugerida=<chaveExport>` (navegação client-side com querystring pré-preenchendo o formulário da tela 6.9 — não é uma nova action, é apenas leitura de `searchParams` pela página) |
+| `listarVinculos` | — | `{ pendentes: [], vinculados: [], foraDaCarteira: [], ignorados: IgnoradoRow[] }` — `IgnoradoRow = { chaveExport, alvoId: string \| null, nomeAlvo: string \| null, valorAtualCentavos, posicaoManualPendente: boolean }` | Novo balde `ignorados` (FR-001). `valorAtualCentavos` é o valor bruto do CSV — exibido só como referência, rotulado "não usado no cálculo" (o motor usa a `posicao_manual`, não este valor). `alvoId`/`nomeAlvo` vêm do alvo da `posicao_manual` substituta (NÃO de `ativo_mapeado.alvo_id`, que é sempre `null` aqui) — match EXATO via `posicao_manual.chave_export_origem = chaveExport`; são `null` quando ainda não existe nenhuma `posicao_manual` ativa com esse `chave_export_origem`, que é exatamente quando `posicaoManualPendente = true` |
+| `vincularAtivo` | ver união acima | `VinculoAtualizado` `+ { ignorarNoImport: boolean; posicaoManualPendente: boolean }` | Ao resolver com `ignorarNoImport: true`, a linha some do balde "pendentes" e some do alarme de "ativo novo" em imports futuros (FR-001). `alvoId`/`nomeAlvo` da resposta seguem a mesma regra de `IgnoradoRow` acima (derivados da `posicao_manual` substituta, `null` quando ainda não existe). Se `posicaoManualPendente` vier `true`, a UI exibe CTA **"+ Cadastrar posição manual"** linkando para `/posicoes-manuais?descricaoSugerida=<chaveExport>` (sem `alvoId` na querystring, já que não há alvo a pré-preencher neste ponto — navegação client-side, não é uma nova action) |
 
 ---
 
@@ -177,13 +185,19 @@ de revisão (6.9) é quem consome essas pendências no próximo `previewImport`.
 
 ## Notas de design (defaults escolhidos por consistência, sem inventar regra nova)
 
-1. **"Ignorar" exige alvo:** ver nota na seção `vinculos.ts` acima — reaproveita os dois sub-modos
-   já existentes (`alvoId` / `novoAlvo`) em vez de criar um terceiro fluxo de seleção de alvo do
-   zero.
-2. **Pendência de posição manual após "Ignorar":** como não há FK direta entre `ativo_mapeado` e
-   `posicao_manual`, o aviso ("ainda não tem posição manual cadastrada") é heurístico — existe
-   pelo menos uma `posicao_manual` ativa com o mesmo `alvoId`. Suficiente para o caso de uso comum
-   (1 CDB ignorado ↔ 1 posição manual), documentado como limitação conhecida.
+1. **"Ignorar" NÃO exige alvo (revertido):** ação de um clique, mesmo padrão de `foraDaCarteira`/
+   `reservaEmergencia` — ver nota na seção `vinculos.ts` acima. Versão anterior deste documento
+   exigia escolher um alvo (reaproveitando `alvoId`/`novoAlvo`); revertida por causar vínculos
+   incorretos (alvo escolhido só para satisfazer a UI, sem relação com a `posicao_manual`
+   substituta real).
+2. **Pendência de posição manual após "Ignorar" (revertido para match exato):** antes havia uma
+   heurística por-alvo (existe pelo menos uma `posicao_manual` ativa com o mesmo `alvoId` de
+   `ativo_mapeado`?), documentada como limitação conhecida. Como `ativo_mapeado.alvo_id` agora é
+   sempre `null` no estado "ignorado", essa heurística deixou de fazer sentido — substituída por um
+   match EXATO via `posicao_manual.chave_export_origem = chaveExport` (campo já existente em
+   `data-model.md`, desenhado precisamente para isto: "esta posição manual substitui ESTE
+   `chave_export`"). Não é mais uma limitação conhecida: o aviso ("ainda não tem posição manual
+   cadastrada") passa a ser exato, não heurístico.
 3. **Ponto de entrada da revisão no import:** mesmo card do `previewImport`, seção final antes do
    botão "Confirmar import" — não é uma etapa de wizard separada. Preserva a atomicidade já
    garantida hoje (nada persiste antes de `confirmarImport`).

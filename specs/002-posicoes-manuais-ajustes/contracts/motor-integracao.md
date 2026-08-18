@@ -64,12 +64,15 @@ Hoje essa função só lê `prisma.posicao` (CSV). Ela passa a agregar, na MESMA
 Antes de consolidar `posicao` por `chave_export` (loop atual em
 `montarContextoEntradaMotor`), qualquer `chave_export` cujo `ativo_mapeado.ignorar_no_import`
 seja `true` é **excluída inteiramente** do `consolidadoPorChave` — nunca entra em
-`posicoes[]` com o dado (incorreto) do CSV. Ela é substituída pela `posicao_manual`
-vinculada ao mesmo alvo (seção 2.2). Isso espelha o padrão já existente para
-`foraDaCarteira` (filtrado dentro do motor) e para pendências (filtrado antes de
-chegar ao motor) — `ignorar_no_import` é filtrado **na camada de serviço**, porque não
-é um conceito do motor (`PosicaoConsolidada` não tem esse campo e não deveria ganhar
-um).
+`posicoes[]` com o dado (incorreto) do CSV. Ela é substituída pela `posicao_manual` cujo
+`chave_export_origem` aponta para esta `chave_export` (match exato, ver
+`mapeamento-service.ts` `existePosicaoManualSubstituta` — **não** "vinculada ao mesmo alvo":
+`ativo_mapeado.alvo_id` é sempre `null` para `chave_export` ignorada, então não há alvo
+comum para casar; a única identidade que liga as duas é `chave_export_origem`). Isso
+espelha o padrão já existente para `foraDaCarteira` (filtrado dentro do motor) e para
+pendências (filtrado antes de chegar ao motor) — `ignorar_no_import` é filtrado **na
+camada de serviço**, porque não é um conceito do motor (`PosicaoConsolidada` não tem esse
+campo e não deveria ganhar um).
 
 > Dependência de schema (fora do escopo deste contrato, responsabilidade
 > `arquiteto-dados`): `ativo_mapeado` precisa do campo `ignorar_no_import Boolean` —
