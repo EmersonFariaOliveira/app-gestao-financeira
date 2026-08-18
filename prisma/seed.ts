@@ -17,6 +17,13 @@ import { PrismaClient } from "@prisma/client";
 //   posicao_manual ativa (CDB) que o substitui, com posicao_manual_valor
 //   na sessão VIGENTE, e 1 ajuste_valor_investido sobre um chave_export
 //   já vinculado a um alvo ("Tesouro IPCA+ 2035").
+// - Feature 003 (specs/003-dashboard-analise-rendimento): a sessão
+//   2026-07 tem patrimonio_investido_centavos preenchido em todas as
+//   posições, exceto "Tesouro IPCA+ 2035" (cujo valor investido é
+//   resolvido via ajuste_valor_investido, não via posicao) — isso, junto
+//   com a 2ª sessão VIGENTE (2026-08, ver bloco abaixo), habilita testar
+//   variação de rendimento entre as duas sessões semeadas sem depender de
+//   import manual.
 //
 // Regra inviolável: nenhum valor monetário como float — tudo em
 // *_centavos (Int) e percentuais em *_bps (Int).
@@ -103,6 +110,7 @@ async function main() {
         instituicao: "Itaú",
         quantidade: "50",
         patrimonio_hoje_centavos: 500000,
+        patrimonio_investido_centavos: 460000,
         tipo_grupo: "ETF",
         data_ultima_cotacao: dataExport,
       },
@@ -112,6 +120,7 @@ async function main() {
         instituicao: "Nubank",
         quantidade: "30",
         patrimonio_hoje_centavos: 300000,
+        patrimonio_investido_centavos: 276000,
         tipo_grupo: "ETF",
         data_ultima_cotacao: dataExport,
       },
@@ -121,6 +130,7 @@ async function main() {
         instituicao: "Itaú",
         quantidade: "20",
         patrimonio_hoje_centavos: 400000,
+        patrimonio_investido_centavos: 380000,
         tipo_grupo: "ETF",
         data_ultima_cotacao: dataExport,
       },
@@ -130,6 +140,7 @@ async function main() {
         instituicao: "Itaú",
         quantidade: "1000.00",
         patrimonio_hoje_centavos: 600000,
+        patrimonio_investido_centavos: 580000,
         tipo_grupo: "TESOURO_DIRETO",
         data_ultima_cotacao: dataExport,
       },
@@ -149,6 +160,7 @@ async function main() {
         instituicao: "Itaú",
         quantidade: "100",
         patrimonio_hoje_centavos: 250000,
+        patrimonio_investido_centavos: 235000,
         tipo_grupo: "ACOES",
         data_ultima_cotacao: dataExport,
       },
@@ -208,6 +220,108 @@ async function main() {
       chave_export: "Tesouro IPCA+ 2035",
       sessao_import_id: sessao.id,
       valor_investido_corrigido_centavos: 405000,
+    },
+  });
+
+  // Feature 003 (specs/003-dashboard-analise-rendimento): 2ª sessão VIGENTE,
+  // mês seguinte (2026-08), para exercitar variação de rendimento entre duas
+  // sessões sem precisar de import manual. A sessão de 2026-07 acima
+  // permanece intocada — nenhuma sessão é substituída, pois cada uma é
+  // VIGENTE em seu próprio mes_referencia (só há no máximo uma VIGENTE por
+  // mês — data-model.md). `patrimonio_investido_centavos` preenchido na
+  // maioria das posições; "Tesouro IPCA+ 2035" fica com `null` de propósito
+  // (FR-010: "sem histórico suficiente" para essa chave nesta sessão).
+  console.log("Seed: criando 2ª sessão de import VIGENTE (2026-08, feature 003)...");
+  const dataExport2 = new Date("2026-08-28T00:00:00.000Z");
+  const sessao2 = await prisma.sessao_import.create({
+    data: {
+      mes_referencia: "2026-08",
+      data_export: dataExport2,
+      status: "VIGENTE",
+      instituicoes: JSON.stringify(["Itaú", "Nubank"]),
+    },
+  });
+
+  console.log(
+    "Seed: criando posições da 2ª sessão (patrimonio_investido_centavos preenchido, exceto 1)...",
+  );
+  await prisma.posicao.createMany({
+    data: [
+      {
+        sessao_import_id: sessao2.id,
+        chave_export: "WRLD11",
+        instituicao: "Itaú",
+        quantidade: "50",
+        patrimonio_hoje_centavos: 520000,
+        patrimonio_investido_centavos: 480000,
+        tipo_grupo: "ETF",
+        data_ultima_cotacao: dataExport2,
+      },
+      {
+        sessao_import_id: sessao2.id,
+        chave_export: "WRLD11",
+        instituicao: "Nubank",
+        quantidade: "30",
+        patrimonio_hoje_centavos: 312000,
+        patrimonio_investido_centavos: 288000,
+        tipo_grupo: "ETF",
+        data_ultima_cotacao: dataExport2,
+      },
+      {
+        sessao_import_id: sessao2.id,
+        chave_export: "IVVB11",
+        instituicao: "Itaú",
+        quantidade: "22",
+        patrimonio_hoje_centavos: 440000,
+        patrimonio_investido_centavos: 420000,
+        tipo_grupo: "ETF",
+        data_ultima_cotacao: dataExport2,
+      },
+      {
+        sessao_import_id: sessao2.id,
+        chave_export: "Tesouro Selic 2029",
+        instituicao: "Itaú",
+        quantidade: "1000.00",
+        patrimonio_hoje_centavos: 608000,
+        patrimonio_investido_centavos: 600000,
+        tipo_grupo: "TESOURO_DIRETO",
+        data_ultima_cotacao: dataExport2,
+      },
+      // Sem histórico suficiente (FR-010): patrimonio_investido_centavos
+      // permanece null nesta sessão, propositalmente, para cobrir o caso de
+      // ausência de dado ao calcular rendimento.
+      {
+        sessao_import_id: sessao2.id,
+        chave_export: "Tesouro IPCA+ 2035",
+        instituicao: "Nubank",
+        quantidade: "500.00",
+        patrimonio_hoje_centavos: 415000,
+        patrimonio_investido_centavos: null,
+        tipo_grupo: "TESOURO_DIRETO",
+        data_ultima_cotacao: dataExport2,
+      },
+      {
+        sessao_import_id: sessao2.id,
+        chave_export: "PETR4",
+        instituicao: "Itaú",
+        quantidade: "100",
+        patrimonio_hoje_centavos: 260000,
+        patrimonio_investido_centavos: 245000,
+        tipo_grupo: "ACOES",
+        data_ultima_cotacao: dataExport2,
+      },
+    ],
+  });
+
+  console.log(
+    "Seed: carregando posicao_manual_valor da 2ª sessão para o CDB (feature 002)...",
+  );
+  await prisma.posicao_manual_valor.create({
+    data: {
+      posicao_manual_id: posicaoManualCdb.id,
+      sessao_import_id: sessao2.id,
+      valor_investido_centavos: 500000,
+      valor_atual_centavos: 535000,
     },
   });
 
