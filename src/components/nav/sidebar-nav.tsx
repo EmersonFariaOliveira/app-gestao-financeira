@@ -11,6 +11,7 @@ import {
   Coins,
   History,
   Settings,
+  TrendingUp,
   Wallet,
 } from "lucide-react";
 
@@ -31,6 +32,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/aporte", label: "Aporte", icon: Calculator },
   { href: "/dividendos", label: "Dividendos", icon: Coins },
   { href: "/historico", label: "Histórico", icon: History },
+  { href: "/rendimento", label: "Rendimento", icon: TrendingUp },
   { href: "/configuracoes", label: "Configurações", icon: Settings },
 ];
 

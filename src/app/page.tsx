@@ -14,7 +14,7 @@
  */
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { AlertTriangle, Calculator, Upload } from "lucide-react";
+import { AlertTriangle, Calculator, TrendingUp, Upload } from "lucide-react";
 
 import { dadosDashboard } from "@/app/actions/dashboard";
 import { AlocacaoAtualVsAlvo } from "@/components/dashboard/alocacao-atual-vs-alvo";
@@ -206,6 +206,10 @@ export default function DashboardPage() {
           <Button variant="outline" render={<Link href="/aporte" />}>
             <Calculator className="size-4" />
             Calcular aporte
+          </Button>
+          <Button variant="outline" render={<Link href="/rendimento" />}>
+            <TrendingUp className="size-4" />
+            Ver rendimento da carteira
           </Button>
         </CardFooter>
       </Card>
