@@ -9,8 +9,12 @@
  * Regras de uso (documentadas na task, não decisão arbitrária):
  * - Cor de status (`statusGood`/`statusCritical`) NUNCA é a única pista —
  *   sempre acompanhada de ícone + rótulo textual explícito.
- * - Séries categóricas (não-status) usam `series1Blue`/`series2Orange`,
- *   NESSA ordem fixa (1ª série sempre azul, 2ª sempre laranja).
+ * - Séries categóricas (não-status) usam `series1Blue`/`series2Orange`/
+ *   `series3Green`, NESSA ordem fixa (1ª série sempre azul, 2ª sempre
+ *   laranja, 3ª sempre verde — `series3Green` adicionada para o gráfico de
+ *   evolução de rendimento da tela 6.10/US3, que tem 3 séries simultâneas;
+ *   nunca usada como cor de status, propositalmente distinta de
+ *   `statusGood` para não confundir as duas leituras).
  * - Nunca dual-axis; nunca cor de série carregando texto/eixo (texto usa
  *   sempre `textPrimary`/`textSecondary`/`textMuted`).
  */
@@ -25,4 +29,5 @@ export const CHART_COLORS = {
   statusCritical: "var(--chart-status-critical)",
   series1Blue: "var(--chart-series-1-blue)",
   series2Orange: "var(--chart-series-2-orange)",
+  series3Green: "var(--chart-series-3-green)",
 } as const;

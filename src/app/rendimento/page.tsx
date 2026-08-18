@@ -11,11 +11,12 @@
  * monetária usa `formatCentavosParaReais` (src/core/money) na borda de
  * exibição.
  *
- * Fatia atual (US1+US2, P1): card de rendimento consolidado do patrimônio
- * total + seletor de período (presets 1M/3M/6M/12M/Desde o início), mais a
- * segmentação por bucket (US2, FR-008/FR-009): reserva de emergência, cada
- * tag/alvo dentro dela, e cada ativo fora da carteira individualmente. O
- * gráfico (US3) chega em task futura.
+ * Fatia atual (US1+US2+US3): card de rendimento consolidado do patrimônio
+ * total + seletor de período (presets 1M/3M/6M/12M/Desde o início, mais um
+ * modo customizado com duas sessões vigentes específicas), a segmentação por
+ * bucket (US2, FR-008/FR-009): reserva de emergência, cada tag/alvo dentro
+ * dela, e cada ativo fora da carteira individualmente, e o gráfico
+ * interativo de evolução (US3, `GraficoEvolucaoRendimento`).
  *
  * FR-020 (inviolável): o percentual de rendimento NUNCA é rotulado como
  * "rentabilidade" — é uma razão simples sobre o capital investido no início
@@ -26,11 +27,13 @@ import { useEffect, useState } from "react";
 import { dadosRendimento } from "@/app/actions/rendimento";
 import type { PeriodoInput, RendimentoOutput } from "@/app/actions/rendimento";
 import type {
+  PeriodoDisponivel,
   RendimentoAtivoForaDaCarteira,
   RendimentoPeriodo,
   RendimentoPorAlvo,
   RendimentoPorTag,
 } from "@/services/rendimento-service";
+import { GraficoEvolucaoRendimento } from "@/components/rendimento/grafico-evolucao";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -66,6 +69,13 @@ export default function RendimentoPage() {
   const [erro, setErro] = useState<string | null>(null);
   const [dados, setDados] = useState<RendimentoOutput | null>(null);
   const [periodoSelecionado, setPeriodoSelecionado] = useState<PeriodoInput>({ tipo: "3M" });
+  // Seleção do modo customizado (só usada quando `modoCustomizado: true`) —
+  // separada de `periodoSelecionado` para o usuário poder escolher as duas
+  // sessões antes de disparar a busca (evita re-fetch a cada seleção parcial
+  // com um id vazio/incompleto).
+  const [modoCustomizado, setModoCustomizado] = useState(false);
+  const [sessaoInicioCustom, setSessaoInicioCustom] = useState("");
+  const [sessaoFimCustom, setSessaoFimCustom] = useState("");
 
   useEffect(() => {
     let cancelado = false;
@@ -98,19 +108,47 @@ export default function RendimentoPage() {
             rendimento consolidado do patrimônio total.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-wrap gap-2">
-          {PRESETS.map((preset) => {
-            const ativo = periodoSelecionado.tipo === preset.tipo;
-            return (
-              <Button
-                key={preset.tipo}
-                variant={ativo ? "default" : "outline"}
-                onClick={() => setPeriodoSelecionado({ tipo: preset.tipo })}
-              >
-                {preset.label}
-              </Button>
-            );
-          })}
+        <CardContent className="flex flex-col gap-4">
+          <div className="flex flex-wrap gap-2">
+            {PRESETS.map((preset) => {
+              const ativo = !modoCustomizado && periodoSelecionado.tipo === preset.tipo;
+              return (
+                <Button
+                  key={preset.tipo}
+                  variant={ativo ? "default" : "outline"}
+                  onClick={() => {
+                    setModoCustomizado(false);
+                    setPeriodoSelecionado({ tipo: preset.tipo });
+                  }}
+                >
+                  {preset.label}
+                </Button>
+              );
+            })}
+            <Button
+              variant={modoCustomizado ? "default" : "outline"}
+              onClick={() => setModoCustomizado(true)}
+            >
+              Personalizado
+            </Button>
+          </div>
+
+          {modoCustomizado && (
+            <SeletorPeriodoCustomizado
+              periodosDisponiveis={dados?.periodosDisponiveis ?? []}
+              sessaoInicioId={sessaoInicioCustom}
+              sessaoFimId={sessaoFimCustom}
+              onSessaoInicioChange={setSessaoInicioCustom}
+              onSessaoFimChange={setSessaoFimCustom}
+              onAplicar={() =>
+                setPeriodoSelecionado({
+                  tipo: "CUSTOMIZADO",
+                  sessaoInicioId: sessaoInicioCustom,
+                  sessaoFimId: sessaoFimCustom,
+                })
+              }
+            />
+          )}
         </CardContent>
       </Card>
 
@@ -130,12 +168,89 @@ export default function RendimentoPage() {
       {fase === "pronto" && dados && (
         <>
           <CardConsolidado dados={dados} />
+          <CardGraficoEvolucao dados={dados} />
           <CardReservaEmergencia dados={dados} />
           <SecaoTagsEAlvos dados={dados} />
           <SecaoForaDaCarteira dados={dados} />
           <SecaoPendentesDeVinculo dados={dados} />
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Modo customizado do seletor de período (US3, FR-005/FR-006): duas listas
+ * suspensas com as sessões VIGENTE disponíveis (`periodosDisponiveis`, já
+ * ordenadas por `mesReferencia` como retornado pela camada de serviço), para
+ * o usuário escolher início/fim explicitamente em vez de um preset relativo.
+ * O botão "Aplicar" só dispara o novo fetch quando as duas sessões estão
+ * selecionadas — nunca envia um `PeriodoInput` customizado incompleto.
+ */
+function SeletorPeriodoCustomizado({
+  periodosDisponiveis,
+  sessaoInicioId,
+  sessaoFimId,
+  onSessaoInicioChange,
+  onSessaoFimChange,
+  onAplicar,
+}: {
+  periodosDisponiveis: PeriodoDisponivel[];
+  sessaoInicioId: string;
+  sessaoFimId: string;
+  onSessaoInicioChange: (id: string) => void;
+  onSessaoFimChange: (id: string) => void;
+  onAplicar: () => void;
+}) {
+  const selectClassName =
+    "h-8 w-full min-w-0 rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50";
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border p-3 sm:flex-row sm:items-end sm:gap-4">
+      <div className="flex flex-1 flex-col gap-1">
+        <label className="text-xs text-muted-foreground" htmlFor="sessao-inicio-custom">
+          Sessão de início
+        </label>
+        <select
+          id="sessao-inicio-custom"
+          className={selectClassName}
+          value={sessaoInicioId}
+          onChange={(e) => onSessaoInicioChange(e.target.value)}
+        >
+          <option value="">Selecione…</option>
+          {periodosDisponiveis.map((p) => (
+            <option key={p.sessaoImportId} value={p.sessaoImportId}>
+              {p.mesReferencia}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex flex-1 flex-col gap-1">
+        <label className="text-xs text-muted-foreground" htmlFor="sessao-fim-custom">
+          Sessão de fim
+        </label>
+        <select
+          id="sessao-fim-custom"
+          className={selectClassName}
+          value={sessaoFimId}
+          onChange={(e) => onSessaoFimChange(e.target.value)}
+        >
+          <option value="">Selecione…</option>
+          {periodosDisponiveis.map((p) => (
+            <option key={p.sessaoImportId} value={p.sessaoImportId}>
+              {p.mesReferencia}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <Button
+        disabled={!sessaoInicioId || !sessaoFimId}
+        onClick={onAplicar}
+      >
+        Aplicar
+      </Button>
     </div>
   );
 }
@@ -225,6 +340,46 @@ function CardConsolidado({ dados }: { dados: RendimentoOutput }) {
           </p>
         )}
         <BlocoRendimento rendimento={dados.consolidado} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Gráfico interativo de evolução (US3): um ponto por sessão VIGENTE do
+ * período selecionado, com valor investido/valor atual/rendimento. Não
+ * renderiza nada com menos de 2 pontos — um único ponto não forma uma linha
+ * de evolução (o card consolidado já cobre esse caso via
+ * `semPeriodoAnteriorParaComparacao`), evitando um gráfico vazio/confuso.
+ */
+function CardGraficoEvolucao({ dados }: { dados: RendimentoOutput }) {
+  if (dados.vazio) return null;
+  if (dados.serie.length < 2) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Evolução do rendimento</CardTitle>
+          <CardDescription>
+            É preciso pelo menos duas sessões vigentes no período selecionado para
+            desenhar a evolução — escolha um período mais amplo.
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Evolução do rendimento</CardTitle>
+        <CardDescription>
+          Valor investido, valor atual e rendimento em cada sessão de import vigente do
+          período selecionado. Passe o mouse (ou toque) sobre um ponto para ver os valores
+          exatos.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <GraficoEvolucaoRendimento serie={dados.serie} />
       </CardContent>
     </Card>
   );

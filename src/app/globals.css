@@ -152,6 +152,7 @@
   --chart-status-critical: #d03b3b;
   --chart-series-1-blue: #2a78d6;
   --chart-series-2-orange: #eb6834;
+  --chart-series-3-green: #1baf7a;
   --tag-hue-1: #2a78d6;
   --tag-hue-2: #1baf7a;
   --tag-hue-3: #eda100;
@@ -172,6 +173,7 @@
     --chart-baseline: #383835;
     --chart-series-1-blue: #3987e5;
     --chart-series-2-orange: #d95926;
+    --chart-series-3-green: #199e70;
     --tag-hue-1: #3987e5;
     --tag-hue-2: #199e70;
     --tag-hue-3: #c98500;
@@ -192,6 +194,7 @@
   --chart-baseline: #383835;
   --chart-series-1-blue: #3987e5;
   --chart-series-2-orange: #d95926;
+  --chart-series-3-green: #199e70;
   --tag-hue-1: #3987e5;
   --tag-hue-2: #199e70;
   --tag-hue-3: #c98500;

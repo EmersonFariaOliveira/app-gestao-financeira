@@ -12,11 +12,11 @@
  * amigável. Toda a resolução de período/fórmula de rendimento vive em
  * `src/services/rendimento-service.ts` — nunca duplicada aqui.
  *
- * Fatia atual (US1+US2, P1): `consolidado` (US1) mais a segmentação por
- * bucket `reservaEmergencia`/`porTag`/`porAlvo`/`foraDaCarteira` (US2) — os
- * dois já vêm prontos de `RendimentoOutput`, repassados sem nenhuma lógica
- * adicional aqui. Só `serie` (gráfico, US3) do contrato completo chega em
- * task futura.
+ * Fatia atual (US1+US2+US3): `consolidado` (US1), a segmentação por bucket
+ * `reservaEmergencia`/`porTag`/`porAlvo`/`foraDaCarteira`/`pendentes` (US2) e
+ * a série temporal `serie` para o gráfico interativo (US3) — todos já vêm
+ * prontos de `RendimentoOutput` (`src/services/rendimento-service.ts`),
+ * repassados sem nenhuma lógica adicional aqui.
  *
  * Formato de retorno padrão (contracts/server-actions.md):
  * `{ ok: true, data } | { ok: false, erro: string, detalhes?: unknown }`.
@@ -61,8 +61,9 @@ function validarInput(input: PeriodoInput): string | null {
 /**
  * Dados da tela 6.10 (análise de rendimento): rendimento consolidado do
  * patrimônio total (R$ e %) no período selecionado, a segmentação por
- * reserva de emergência/tag/alvo/ativos fora da carteira (US2), mais as
- * sessões disponíveis para montar o seletor de período customizado
+ * reserva de emergência/tag/alvo/ativos fora da carteira/pendentes (US2), a
+ * série temporal para o gráfico interativo (US3), mais as sessões
+ * disponíveis para montar o seletor de período customizado
  * (FR-001/FR-002/FR-005/FR-006/FR-008/FR-009/FR-020 — nunca rotular o
  * percentual como "rentabilidade").
  */
