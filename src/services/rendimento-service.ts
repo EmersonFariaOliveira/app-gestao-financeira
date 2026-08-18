@@ -33,6 +33,25 @@ export interface RendimentoPonto {
   valorInvestidoCentavos: number | null;
 }
 
+/**
+ * Um ponto por sessão VIGENTE dentro do período selecionado (US3, gráfico
+ * interativo) — nunca inclui sessões `SUBSTITUIDO` (FR-013). `null` em
+ * `valorInvestidoCentavos`/`rendimentoCentavos`/`rendimentoPct` = "sem
+ * histórico suficiente" (FR-010) NAQUELA sessão específica; o ponto ainda
+ * aparece na série, nunca é omitido silenciosamente.
+ */
+export interface PontoSerieRendimento {
+  sessaoImportId: string;
+  mesReferencia: string;
+  dataExport: Date;
+  valorInvestidoCentavos: number | null;
+  valorAtualCentavos: number;
+  rendimentoCentavos: number | null;
+  rendimentoPct: number | null;
+}
+
+export type SerieRendimento = PontoSerieRendimento[];
+
 /** Rendimento entre duas sessões (fórmula R5, variação de período) — o que US1/US3 exibem. */
 export interface RendimentoPeriodo {
   sessaoInicioId: string;
@@ -323,11 +342,12 @@ export interface PeriodoDisponivel {
 }
 
 /**
- * Resultado de `dadosRendimento` — subconjunto do `RendimentoOutput` do
- * contrato (contracts/server-actions.md), com `consolidado` (US1) e a
+ * Resultado de `dadosRendimento` — shape completo do `RendimentoOutput` do
+ * contrato (contracts/server-actions.md), com `consolidado` (US1), a
  * segmentação por bucket `reservaEmergencia`/`porTag`/`porAlvo`/
- * `foraDaCarteira` (US2, `calcularRendimentoPorBucket`). O campo `serie`
- * chega em task futura (US3), quando o shape completo for implementado.
+ * `foraDaCarteira`/`pendentes` (US2, `calcularRendimentoPorBucket`) e a
+ * série temporal `serie` (US3, `montarSerieRendimento`) para o gráfico
+ * interativo.
  */
 export interface RendimentoOutput {
   /** true = nenhuma sessão VIGENTE existe ainda (mesmo padrão de `DashboardVazio`) — nunca "sem dado de valor investido", isso é tratado por `rendimentoCentavos: null` dentro de `consolidado`. */
@@ -376,6 +396,14 @@ export interface RendimentoOutput {
    * mesmo padrão "um item por chave, nunca agregado".
    */
   pendentes: RendimentoAtivoForaDaCarteira[];
+  /**
+   * Série temporal (US3, `montarSerieRendimento`): um ponto por sessão
+   * VIGENTE dentro do período resolvido por `periodo` (inclusive as
+   * extremidades), para o gráfico interativo da tela 6.10. `[]` quando
+   * `vazio: true` (nenhuma sessão VIGENTE) — mesmo padrão neutro dos demais
+   * campos de agregação nesse cenário.
+   */
+  serie: SerieRendimento;
   periodosDisponiveis: PeriodoDisponivel[];
   /**
    * `true` quando o período resolvido tem só UMA sessão VIGENTE disponível
@@ -414,8 +442,9 @@ const PONTO_SEM_DADO: RendimentoPonto = {
  * fora). `posicao_manual` não tem campo equivalente a `ignorar_no_import`
  * (ela É a substituta, nunca a ignorada).
  *
- * Extraída de forma que `consolidadoDoPeriodo` possa montar a UNIÃO das
- * chaves elegíveis de início e fim sem duplicar esta lógica.
+ * Extraída de forma que os chamadores de `consolidarSubconjunto` (consolidado
+ * US1, buckets US2) possam montar a UNIÃO das chaves elegíveis de início e
+ * fim sem duplicar esta lógica.
  */
 async function chavesElegiveisDaSessao(sessaoId: string): Promise<Map<string, number>> {
   const posicoesBrutas = await prisma.posicao.findMany({
@@ -546,39 +575,6 @@ async function consolidarSubconjunto(
     inicio: { valorAtualCentavos: valorAtualInicio, valorInvestidoCentavos: valorInvestidoInicio },
     fim: { valorAtualCentavos: valorAtualFim, valorInvestidoCentavos: valorInvestidoFim },
   };
-}
-
-/**
- * Consolida `valorAtualCentavos`/`valorInvestidoCentavos` de início e fim
- * para o cálculo de rendimento de um PERÍODO (duas sessões), garantindo que
- * as duas pontas somem exatamente o MESMO conjunto de chaves — nunca dois
- * conjuntos diferentes (o que fabricaria ganho/prejuízo falso ao subtrair
- * `fim - início`). Resolve as chaves elegíveis de cada sessão via
- * `chavesElegiveisDaSessao` e delega o matching a `consolidarSubconjunto`
- * (sem nenhum filtro adicional — é o universo COMPLETO de chaves elegíveis,
- * usado pelo consolidado/patrimônio total, US1).
- *
- * IMPORTANTE — mudança de semântica em relação à antiga
- * `totalPatrimonioDaSessao`: os totais retornados NÃO são necessariamente o
- * patrimônio total absoluto de cada sessão. Quando alguma chave é excluída
- * por falta de dado numa das pontas, os totais refletem apenas o
- * SUBCONJUNTO de chaves rastreável nas DUAS pontas do período — é
- * intencional (única forma de uma subtração `fim - início` continuar
- * correta e não-enganosa quando o histórico é parcial, FR-010/FR-014).
- */
-async function consolidadoDoPeriodo(
-  sessaoInicioId: string,
-  sessaoFimId: string,
-): Promise<{
-  inicio: { valorAtualCentavos: number; valorInvestidoCentavos: number | null };
-  fim: { valorAtualCentavos: number; valorInvestidoCentavos: number | null };
-}> {
-  const [elegiveisInicio, elegiveisFim] = await Promise.all([
-    chavesElegiveisDaSessao(sessaoInicioId),
-    chavesElegiveisDaSessao(sessaoFimId),
-  ]);
-
-  return consolidarSubconjunto(elegiveisInicio, elegiveisFim, sessaoInicioId, sessaoFimId);
 }
 
 /**
@@ -852,6 +848,306 @@ export async function calcularRendimentoPorBucket(
   return { reservaEmergencia, porTag, porAlvo, foraDaCarteira, pendentes };
 }
 
+/**
+ * Monta a série de rendimento consolidado (US3, `data-model.md`
+ * `SerieRendimento`): um ponto por sessão VIGENTE cujo `mes_referencia`
+ * esteja entre a sessão de início e a de fim do período (inclusive),
+ * ordenados cronologicamente. Sessões `SUBSTITUIDO` nunca entram (FR-013) —
+ * mesmo filtro de `listarSessoesVigentesOrdenadas`.
+ *
+ * O escopo de elegibilidade é o mesmo do CONSOLIDADO (`chavesElegiveisDaSessao`
+ * — patrimônio total, não por bucket). Cada ponto é calculado como PONTO
+ * (não delta): reaproveita `calcularRendimentoPeriodoDeChaves` com a MESMA
+ * sessão como início e fim (o mesmo truque já usado pelo caso "apenas uma
+ * sessão VIGENTE" de `dadosRendimento`), o que também garante a mesma regra
+ * de "nunca somar total cheio de uma chave sem valor investido resolvível"
+ * (`consolidarSubconjunto`): uma chave sem histórico de valor investido
+ * naquela sessão fica de fora tanto do valor investido quanto do valor
+ * atual do ponto — não uma soma parcial disfarçada de completa.
+ *
+ * Aceita `sessaoInicioId`/`sessaoFimId` em qualquer ordem cronológica (só
+ * usa `mes_referencia` de cada uma para resolver o intervalo `[min, max]`).
+ * Nunca lança exceção: ids inexistentes resolvem para série vazia.
+ */
+export async function montarSerieRendimento(
+  sessaoInicioId: string,
+  sessaoFimId: string,
+): Promise<SerieRendimento> {
+  const [sessaoInicio, sessaoFim] = await Promise.all([
+    prisma.sessao_import.findUnique({
+      where: { id: sessaoInicioId },
+      select: { mes_referencia: true },
+    }),
+    prisma.sessao_import.findUnique({
+      where: { id: sessaoFimId },
+      select: { mes_referencia: true },
+    }),
+  ]);
+  if (!sessaoInicio || !sessaoFim) return [];
+
+  const mesMin =
+    sessaoInicio.mes_referencia <= sessaoFim.mes_referencia
+      ? sessaoInicio.mes_referencia
+      : sessaoFim.mes_referencia;
+  const mesMax =
+    sessaoInicio.mes_referencia <= sessaoFim.mes_referencia
+      ? sessaoFim.mes_referencia
+      : sessaoInicio.mes_referencia;
+
+  const sessoesNoPeriodo = await prisma.sessao_import.findMany({
+    where: { status: "VIGENTE", mes_referencia: { gte: mesMin, lte: mesMax } },
+    orderBy: { mes_referencia: "asc" },
+    select: { id: true, mes_referencia: true, data_export: true },
+  });
+
+  const serie: SerieRendimento = [];
+  for (const sessao of sessoesNoPeriodo) {
+    const elegiveis = await chavesElegiveisDaSessao(sessao.id);
+    const rendimentoPonto = await calcularRendimentoPeriodoDeChaves(
+      elegiveis,
+      elegiveis,
+      sessao.id,
+      sessao.id,
+    );
+    const ponto = rendimentoPonto.pontoInicio; // pontoInicio === pontoFim (mesma sessão)
+
+    serie.push({
+      sessaoImportId: sessao.id,
+      mesReferencia: sessao.mes_referencia,
+      dataExport: sessao.data_export,
+      valorInvestidoCentavos: ponto.valorInvestidoCentavos,
+      valorAtualCentavos: ponto.valorAtualCentavos,
+      rendimentoCentavos: ponto.rendimentoCentavos,
+      rendimentoPct: ponto.rendimentoPct,
+    });
+  }
+
+  return serie;
+}
+
+// ---------------------------------------------------------------------------
+// US4 (P3) — "movimentação de valor investido não explicada" (FR-011/
+// FR-011a/FR-018, research.md R6/R7/R8). Elegibilidade NOVA e mais ampla que
+// `aporte-service.gerarIncrementosPendentes` (feature 002): aqui, todo
+// `chave_export` vinculado ao alvo (fora_da_carteira=false,
+// ignorar_no_import=false) entra, SEM exigir ajuste ativo — a feature 002
+// só precisa contar ativos cujo valor investido é digitado manualmente
+// (pré-preenchimento de incremento); esta validação precisa contar TODO
+// ativo com valor investido rastreável, incluindo os que vêm só do CSV.
+// ---------------------------------------------------------------------------
+
+/** Um ativo/posição manual elegível para validação de movimentação não explicada (R6). */
+export interface AtivoRastreavel {
+  chaveExport?: string;
+  posicaoManualId?: string;
+}
+
+/** Resultado de `contarAtivosComValorInvestidoRastreavel` — contagem + identidade de cada elegível. */
+export interface ElegibilidadeMovimentacaoAlvo {
+  n: number;
+  elegiveis: AtivoRastreavel[];
+}
+
+/**
+ * Conjunto de ativos com valor investido rastreável de um alvo (R6):
+ * - toda `posicao_manual` ATIVA vinculada ao alvo, e
+ * - todo `chave_export` vinculado ao alvo via `ativo_mapeado.alvo_id`, com
+ *   `fora_da_carteira = false` e `ignorar_no_import = false` — SEM exigir
+ *   ajuste ativo (diferente de `aporte-service.gerarIncrementosPendentes`).
+ *
+ * `n = 0` → alvo sem nenhum ativo/posição vinculado ainda (nada a validar).
+ * `n = 1` → validação por ativo (FR-011). `n >= 2` → validação agregada por
+ * alvo (FR-011a).
+ */
+export async function contarAtivosComValorInvestidoRastreavel(
+  alvoId: string,
+): Promise<ElegibilidadeMovimentacaoAlvo> {
+  const [posicoesManuais, mapeamentos] = await Promise.all([
+    prisma.posicao_manual.findMany({
+      where: { alvo_id: alvoId, ativo: true },
+      select: { id: true },
+    }),
+    prisma.ativo_mapeado.findMany({
+      where: { alvo_id: alvoId, fora_da_carteira: false, ignorar_no_import: false },
+      select: { chave_export: true },
+    }),
+  ]);
+
+  const elegiveis: AtivoRastreavel[] = [
+    ...posicoesManuais.map((p): AtivoRastreavel => ({ posicaoManualId: p.id })),
+    ...mapeamentos.map((m): AtivoRastreavel => ({ chaveExport: m.chave_export })),
+  ];
+
+  return { n: elegiveis.length, elegiveis };
+}
+
+/** Resultado da validação FR-011/FR-011a para um alvo, ao confirmar uma nova sessão (data-model.md, mesmo shape do contrato). */
+export interface MovimentacaoNaoExplicada {
+  /** "ativo" quando o alvo mapeia exclusivamente 1 elegível (FR-011); "alvo" quando mapeia >1 (FR-011a). */
+  granularidade: "ativo" | "alvo";
+  /** chaveExport OU posicaoManualId quando granularidade = "ativo"; ausentes quando "alvo" (nunca aponta um ativo específico dentro do alvo compartilhado). */
+  chaveExport?: string;
+  posicaoManualId?: string;
+  alvoId: string;
+  nomeAlvo: string;
+  valorInvestidoEsperadoCentavos: number;
+  valorInvestidoRealCentavos: number;
+  diferencaCentavos: number;
+  /** true apenas quando |diferencaCentavos| excede AMBOS os limiares de FR-018 (R8) simultaneamente. */
+  excedeTolerancia: boolean;
+}
+
+/** Entrada de `calcularMovimentacaoNaoExplicada`: o alvo e o valor investido REAL vindo do preview da nova sessão (ainda não persistida). */
+export interface EntradaMovimentacaoAlvo {
+  alvoId: string;
+  nomeAlvo: string;
+  valorInvestidoRealCentavos: number;
+}
+
+/**
+ * Calcula a movimentação não explicada de UM alvo entre a sessão VIGENTE
+ * anterior e os dados (ainda não persistidos) de uma nova sessão em preview
+ * (FR-011/FR-011a/FR-018, research.md R6/R7/R8). Camada de LEITURA/COMPARAÇÃO
+ * PURA — nunca escreve em `posicao` nem em nenhuma outra tabela (FR-019: o
+ * valor "esperado" calculado aqui NUNCA é persistido, só comparado).
+ *
+ * `n = contarAtivosComValorInvestidoRastreavel(alvoId).n`:
+ * - `n = 0` → nada a validar, retorna `null` (alvo ainda sem nenhum ativo
+ *   com valor investido rastreável).
+ * - `n = 1` → `granularidade: "ativo"`, apontando o `chaveExport` ou
+ *   `posicaoManualId` do único elegível.
+ * - `n >= 2` → `granularidade: "alvo"`, SEM apontar nenhum ativo específico
+ *   (validação agregada da soma do alvo compartilhado).
+ *
+ * `valorInvestidoEsperadoCentavos` = soma de `resolverValorInvestido` (R4)
+ * de cada elegível NA SESSÃO ANTERIOR + soma de `aporte.executado`
+ * (`LinhaAporte[].valor_centavos`) agrupada por `alvo_id`, para todo
+ * `aporte` cujo `sessao_import_id` aponta para essa sessão anterior (R7 —
+ * mesmo vínculo temporal já usado pela feature 002 para
+ * `incremento_valor_investido_pendente`). Uma linha `posicao`/`posicao_
+ * manual_valor` sem valor investido resolvível naquela sessão anterior
+ * simplesmente não contribui (tratada como 0 para a soma — não há como
+ * "esperar" um valor que nunca existiu, e um alvo novo é o caso mais comum
+ * disso).
+ *
+ * `excedeTolerancia`: `true` SOMENTE quando `|diferencaCentavos|` excede
+ * AMBOS os limiares de `TOLERANCIA_MOVIMENTACAO_PCT`/`TOLERANCIA_
+ * MOVIMENTACAO_PISO_CENTAVOS` simultaneamente (R8/FR-018) — nunca sinaliza
+ * só por um dos dois. Quando `valorInvestidoEsperadoCentavos = 0`, o
+ * percentual seria indefinido/infinito: qualquer diferença não-nula é
+ * tratada como excedendo o limiar percentual (nada a dividir por zero de
+ * forma enganosa, Princípio V), mas o limiar de piso em R$ ainda se aplica
+ * normalmente — EXCETO quando não há base de comparação alguma (nenhum
+ * elegível tinha valor investido resolvível na sessão anterior e nenhum
+ * aporte executado foi registrado para o alvo nela): esse é o caso de um
+ * ativo/alvo genuinamente novo (primeira aparição), distinto de "esperado
+ * era 0 porque a sessão anterior existia mas resolveu para 0" — spec.md US4
+ * Acceptance Scenario 3 exige que NENHUM alerta seja gerado para ele,
+ * independentemente do valor real, então `excedeTolerancia` fica sempre
+ * `false` nesse caso.
+ */
+export async function calcularMovimentacaoNaoExplicada(
+  entrada: EntradaMovimentacaoAlvo,
+  sessaoAnteriorId: string,
+): Promise<MovimentacaoNaoExplicada | null> {
+  const elegibilidade = await contarAtivosComValorInvestidoRastreavel(entrada.alvoId);
+  if (elegibilidade.n === 0) return null;
+
+  const chavesMapeadas = elegibilidade.elegiveis
+    .filter((e) => e.chaveExport !== undefined)
+    .map((e) => e.chaveExport as string);
+  const posicaoManualIds = elegibilidade.elegiveis
+    .filter((e) => e.posicaoManualId !== undefined)
+    .map((e) => e.posicaoManualId as string);
+
+  let valorInvestidoAnteriorCentavos = 0;
+  // Distingue "esperado genuinamente 0" (a sessão anterior existia e o valor
+  // investido resolvido para pelo menos 1 elegível foi encontrado, mesmo que
+  // 0) de "SEM NENHUM dado anterior rastreável" (nenhum elegível tinha
+  // sequer uma linha `posicao`/`posicao_manual_valor` resolvível na sessão
+  // anterior — primeira aparição do ativo/alvo). Só o segundo caso suprime o
+  // alerta (spec.md US4 Acceptance Scenario 3: "ativo novo... não há base de
+  // comparação").
+  let houveValorAnteriorRastreavel = false;
+  for (const chaveExport of chavesMapeadas) {
+    const resolvido = await resolverValorInvestido(chaveExport, sessaoAnteriorId);
+    if (resolvido.valorInvestidoCentavos !== null) {
+      valorInvestidoAnteriorCentavos += resolvido.valorInvestidoCentavos;
+      houveValorAnteriorRastreavel = true;
+    }
+  }
+  if (posicaoManualIds.length > 0) {
+    const posicoesManuais = await prisma.posicao_manual.findMany({
+      where: { id: { in: posicaoManualIds } },
+      select: { id: true, chave_manual: true },
+    });
+    for (const posicaoManual of posicoesManuais) {
+      const resolvido = await resolverValorInvestido(posicaoManual.chave_manual, sessaoAnteriorId);
+      if (resolvido.valorInvestidoCentavos !== null) {
+        valorInvestidoAnteriorCentavos += resolvido.valorInvestidoCentavos;
+        houveValorAnteriorRastreavel = true;
+      }
+    }
+  }
+
+  const aportesDaSessaoAnterior = await prisma.aporte.findMany({
+    where: { sessao_import_id: sessaoAnteriorId },
+    select: { executado: true },
+  });
+  let somaExecutadoAlvoCentavos = 0;
+  for (const aporte of aportesDaSessaoAnterior) {
+    let linhas: Array<{ alvo_id?: string; valor_centavos?: number }>;
+    try {
+      linhas = JSON.parse(aporte.executado);
+    } catch {
+      // JSON corrompido/inesperado nunca deveria ocorrer (só aporte-service
+      // escreve este campo) — mesma postura defensiva de
+      // dashboard-service.somarLinhasAporte: ignora em vez de derrubar toda
+      // a validação de movimentação não explicada por um único registro.
+      continue;
+    }
+    for (const linha of linhas) {
+      if (linha.alvo_id === entrada.alvoId) {
+        somaExecutadoAlvoCentavos += linha.valor_centavos ?? 0;
+      }
+    }
+  }
+
+  const valorInvestidoEsperadoCentavos = valorInvestidoAnteriorCentavos + somaExecutadoAlvoCentavos;
+  const diferencaCentavos = entrada.valorInvestidoRealCentavos - valorInvestidoEsperadoCentavos;
+  const diferencaAbsoluta = Math.abs(diferencaCentavos);
+
+  // Base de comparação existe se ao menos 1 elegível tinha valor investido
+  // resolvível na sessão anterior, OU havia aporte executado registrado para
+  // este alvo naquela sessão (evidência de rastreamento prévio mesmo sem
+  // `posicao` remanescente). Sem NENHUma das duas, o ativo/alvo é
+  // genuinamente novo (primeira aparição) — nunca dispara alerta, por mais
+  // que o valor real seja grande, pois não há nada para comparar.
+  const houveBaseComparacao = houveValorAnteriorRastreavel || somaExecutadoAlvoCentavos !== 0;
+
+  const excedePct =
+    valorInvestidoEsperadoCentavos === 0
+      ? diferencaAbsoluta > 0
+      : (diferencaAbsoluta / Math.abs(valorInvestidoEsperadoCentavos)) * 100 > TOLERANCIA_MOVIMENTACAO_PCT;
+  const excedePiso = diferencaAbsoluta > TOLERANCIA_MOVIMENTACAO_PISO_CENTAVOS;
+  const excedeTolerancia = houveBaseComparacao && excedePct && excedePiso;
+
+  const granularidade: "ativo" | "alvo" = elegibilidade.n === 1 ? "ativo" : "alvo";
+  const unico = elegibilidade.n === 1 ? elegibilidade.elegiveis[0] : undefined;
+
+  return {
+    granularidade,
+    chaveExport: granularidade === "ativo" ? unico?.chaveExport : undefined,
+    posicaoManualId: granularidade === "ativo" ? unico?.posicaoManualId : undefined,
+    alvoId: entrada.alvoId,
+    nomeAlvo: entrada.nomeAlvo,
+    valorInvestidoEsperadoCentavos,
+    valorInvestidoRealCentavos: entrada.valorInvestidoRealCentavos,
+    diferencaCentavos,
+    excedeTolerancia,
+  };
+}
+
 /** `RendimentoPeriodo` "vazio" (sem sessões concretas) — mesmo padrão de `PONTO_SEM_DADO`, reutilizado por `consolidado`/`reservaEmergencia` quando não há NENHUMA sessão VIGENTE. */
 const RENDIMENTO_PERIODO_SEM_DADO: RendimentoPeriodo = {
   sessaoInicioId: "",
@@ -908,15 +1204,17 @@ export async function dadosRendimento(input: PeriodoInput): Promise<RendimentoOu
       porAlvo: [],
       foraDaCarteira: [],
       pendentes: [],
+      serie: [],
       periodosDisponiveis,
       semPeriodoAnteriorParaComparacao: false,
     };
   }
 
-  const [elegiveisInicio, elegiveisFim, buckets] = await Promise.all([
+  const [elegiveisInicio, elegiveisFim, buckets, serie] = await Promise.all([
     chavesElegiveisDaSessao(periodo.sessaoInicioId),
     chavesElegiveisDaSessao(periodo.sessaoFimId),
     calcularRendimentoPorBucket(periodo.sessaoInicioId, periodo.sessaoFimId),
+    montarSerieRendimento(periodo.sessaoInicioId, periodo.sessaoFimId),
   ]);
 
   const consolidado = await calcularRendimentoPeriodoDeChaves(
@@ -931,6 +1229,7 @@ export async function dadosRendimento(input: PeriodoInput): Promise<RendimentoOu
     periodo,
     consolidado,
     ...buckets,
+    serie,
     periodosDisponiveis,
     // Só uma sessão VIGENTE disponível (resolverPeriodo já resolveu início =
     // fim): sinaliza para a UI que não há período anterior de comparação

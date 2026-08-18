@@ -1520,4 +1520,517 @@ describe("rendimento-service", () => {
       });
     });
   });
+
+  describe("montarSerieRendimento (US3 — um ponto por sessão VIGENTE no período, FR-013)", () => {
+    async function criarSessao(mesReferencia: string, status: "VIGENTE" | "SUBSTITUIDO" = "VIGENTE") {
+      return prisma.sessao_import.create({
+        data: {
+          mes_referencia: mesReferencia,
+          data_export: new Date(`${mesReferencia}-28`),
+          status,
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+    }
+
+    async function criarPosicao(
+      sessaoId: string,
+      chaveExport: string,
+      patrimonioHojeCentavos: number,
+      patrimonioInvestidoCentavos: number | null,
+    ) {
+      return prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoId,
+          chave_export: chaveExport,
+          instituicao: "Itaú",
+          quantidade: "10",
+          patrimonio_hoje_centavos: patrimonioHojeCentavos,
+          patrimonio_investido_centavos: patrimonioInvestidoCentavos,
+          tipo_grupo: "ACOES",
+        },
+      });
+    }
+
+    it("produz um ponto por sessão VIGENTE dentro do período (início/fim inclusive), ordenado cronologicamente por mes_referencia", async () => {
+      const s1 = await criarSessao("2026-01");
+      const s2 = await criarSessao("2026-02");
+      const s3 = await criarSessao("2026-03");
+      const s4 = await criarSessao("2026-04");
+
+      for (const s of [s1, s2, s3, s4]) {
+        await criarPosicao(s.id, "AAA11", 100_000, 80_000);
+      }
+
+      const serie = await rendimentoService.montarSerieRendimento(s2.id, s4.id);
+
+      expect(serie).toHaveLength(3);
+      expect(serie.map((p) => p.mesReferencia)).toEqual(["2026-02", "2026-03", "2026-04"]);
+      expect(serie.map((p) => p.sessaoImportId)).toEqual([s2.id, s3.id, s4.id]);
+    });
+
+    it("cada ponto segue o shape PontoSerieRendimento (data-model.md), incluindo rendimentoCentavos/rendimentoPct calculados como PONTO", async () => {
+      const s1 = await criarSessao("2026-01");
+      await criarPosicao(s1.id, "AAA11", 120_000, 100_000);
+
+      const serie = await rendimentoService.montarSerieRendimento(s1.id, s1.id);
+
+      expect(serie).toHaveLength(1);
+      const ponto = serie[0];
+      expect(ponto.sessaoImportId).toBe(s1.id);
+      expect(ponto.mesReferencia).toBe("2026-01");
+      expect(ponto.dataExport).toEqual(s1.data_export);
+      expect(ponto.valorInvestidoCentavos).toBe(100_000);
+      expect(ponto.valorAtualCentavos).toBe(120_000);
+      expect(ponto.rendimentoCentavos).toBe(20_000);
+      expect(ponto.rendimentoPct).toBeCloseTo(20, 5);
+    });
+
+    it("EXCLUI sessões SUBSTITUIDO do período, mesmo com mes_referencia dentro do intervalo", async () => {
+      const s1 = await criarSessao("2026-01");
+      const substituida = await criarSessao("2026-02", "SUBSTITUIDO");
+      const s2Vigente = await criarSessao("2026-02"); // mesmo mês, reimport — vigente
+      const s3 = await criarSessao("2026-03");
+
+      for (const s of [s1, s2Vigente, s3]) {
+        await criarPosicao(s.id, "AAA11", 100_000, 80_000);
+      }
+      await criarPosicao(substituida.id, "AAA11", 999_999, 999_999);
+
+      const serie = await rendimentoService.montarSerieRendimento(s1.id, s3.id);
+
+      expect(serie).toHaveLength(3);
+      expect(serie.map((p) => p.sessaoImportId)).not.toContain(substituida.id);
+      expect(serie.map((p) => p.sessaoImportId)).toEqual([s1.id, s2Vigente.id, s3.id]);
+    });
+
+    it("sessão sem histórico de valor investido (patrimonio_investido_centavos: null) ainda gera um ponto na série, com valorInvestidoCentavos/rendimentoCentavos null — NUNCA omitido silenciosamente", async () => {
+      const s1 = await criarSessao("2026-01");
+      const s2SemHistorico = await criarSessao("2026-02");
+      const s3 = await criarSessao("2026-03");
+
+      await criarPosicao(s1.id, "AAA11", 100_000, 80_000);
+      await criarPosicao(s2SemHistorico.id, "AAA11", 105_000, null);
+      await criarPosicao(s3.id, "AAA11", 110_000, 80_000);
+
+      const serie = await rendimentoService.montarSerieRendimento(s1.id, s3.id);
+
+      expect(serie).toHaveLength(3);
+      const pontoSemHistorico = serie.find((p) => p.sessaoImportId === s2SemHistorico.id);
+      expect(pontoSemHistorico).toBeDefined();
+      expect(pontoSemHistorico!.valorInvestidoCentavos).toBeNull();
+      expect(pontoSemHistorico!.rendimentoCentavos).toBeNull();
+      expect(pontoSemHistorico!.rendimentoPct).toBeNull();
+    });
+
+    it("período com sessaoInicioId/sessaoFimId invertidos (fim cronologicamente antes do início): resolve o mesmo intervalo de mes_referencia, ordenado cronologicamente", async () => {
+      const s1 = await criarSessao("2026-01");
+      const s2 = await criarSessao("2026-02");
+      for (const s of [s1, s2]) await criarPosicao(s.id, "AAA11", 100_000, 80_000);
+
+      const serie = await rendimentoService.montarSerieRendimento(s2.id, s1.id);
+
+      expect(serie.map((p) => p.mesReferencia)).toEqual(["2026-01", "2026-02"]);
+    });
+
+    it("sessaoInicioId/sessaoFimId inexistentes no banco: retorna série vazia, nunca lança exceção", async () => {
+      const serie = await rendimentoService.montarSerieRendimento(
+        "sessao-que-nao-existe-1",
+        "sessao-que-nao-existe-2",
+      );
+      expect(serie).toEqual([]);
+    });
+  });
+
+  describe("contarAtivosComValorInvestidoRastreavel (US4, R6 — conjunto NOVO, diferente de aporte-service.gerarIncrementosPendentes)", () => {
+    async function criarAlvo(nome = "Alvo Teste") {
+      return prisma.alvo.create({
+        data: { nome, percentual_alvo_bps: 1000, vigencia_inicio: new Date("2026-01-01") },
+      });
+    }
+
+    it("n=0: alvo sem nenhuma posicao_manual/ativo_mapeado vinculado ainda", async () => {
+      const alvo = await criarAlvo();
+      const resultado = await rendimentoService.contarAtivosComValorInvestidoRastreavel(alvo.id);
+      expect(resultado.n).toBe(0);
+      expect(resultado.elegiveis).toEqual([]);
+    });
+
+    it("n=1: um único chave_export vinculado (fora_da_carteira=false, ignorar_no_import=false) — SEM exigir ajuste ativo (diferente da feature 002)", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "AAA11", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+
+      const resultado = await rendimentoService.contarAtivosComValorInvestidoRastreavel(alvo.id);
+      expect(resultado.n).toBe(1);
+      expect(resultado.elegiveis).toEqual([{ chaveExport: "AAA11" }]);
+    });
+
+    it("n=1: uma única posicao_manual ATIVA vinculada", async () => {
+      const alvo = await criarAlvo();
+      const pm = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-X", instituicao: "Itaú", alvo_id: alvo.id, descricao: "CDB", ativo: true },
+      });
+
+      const resultado = await rendimentoService.contarAtivosComValorInvestidoRastreavel(alvo.id);
+      expect(resultado.n).toBe(1);
+      expect(resultado.elegiveis).toEqual([{ posicaoManualId: pm.id }]);
+    });
+
+    it("n>=2: chave_export + posicao_manual do mesmo alvo somam", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "AAA11", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-X", instituicao: "Itaú", alvo_id: alvo.id, descricao: "CDB", ativo: true },
+      });
+
+      const resultado = await rendimentoService.contarAtivosComValorInvestidoRastreavel(alvo.id);
+      expect(resultado.n).toBe(2);
+    });
+
+    it("exclui chave_export fora_da_carteira=true e ignorar_no_import=true", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "FORA1", alvo_id: alvo.id, fora_da_carteira: true },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "IGN1", alvo_id: alvo.id, ignorar_no_import: true },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "VALIDO1", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+
+      const resultado = await rendimentoService.contarAtivosComValorInvestidoRastreavel(alvo.id);
+      expect(resultado.n).toBe(1);
+      expect(resultado.elegiveis).toEqual([{ chaveExport: "VALIDO1" }]);
+    });
+
+    it("exclui posicao_manual inativa (ativo=false)", async () => {
+      const alvo = await criarAlvo();
+      await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-INATIVA", instituicao: "Itaú", alvo_id: alvo.id, descricao: "CDB", ativo: false },
+      });
+
+      const resultado = await rendimentoService.contarAtivosComValorInvestidoRastreavel(alvo.id);
+      expect(resultado.n).toBe(0);
+    });
+  });
+
+  describe("calcularMovimentacaoNaoExplicada (US4, FR-011/FR-011a/FR-018)", () => {
+    async function criarAlvo(nome = "Alvo Teste") {
+      return prisma.alvo.create({
+        data: { nome, percentual_alvo_bps: 1000, vigencia_inicio: new Date("2026-01-01") },
+      });
+    }
+
+    async function criarSessao(mesReferencia: string) {
+      return prisma.sessao_import.create({
+        data: {
+          mes_referencia: mesReferencia,
+          data_export: new Date(`${mesReferencia}-28`),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+    }
+
+    it("n=0: retorna null, nada a validar", async () => {
+      const alvo = await criarAlvo();
+      const sessaoAnterior = await criarSessao("2026-07");
+
+      const resultado = await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 100_000 },
+        sessaoAnterior.id,
+      );
+      expect(resultado).toBeNull();
+    });
+
+    it("n=1 (ativo único): granularidade 'ativo', aponta chaveExport; real bate com esperado dentro da tolerância → excedeTolerancia false", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "AAA11", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      const sessaoAnterior = await criarSessao("2026-07");
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          chave_export: "AAA11",
+          instituicao: "Itaú",
+          quantidade: "10",
+          patrimonio_hoje_centavos: 100_000,
+          patrimonio_investido_centavos: 80_000,
+          tipo_grupo: "ACOES",
+        },
+      });
+
+      // valorInvestidoEsperado = 80_000 (anterior) + 0 (nenhum aporte executado) = 80_000
+      // real = 80_500 → diferença de R$5,00, bem abaixo do piso de R$20,00.
+      const resultado = await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 80_500 },
+        sessaoAnterior.id,
+      );
+      expect(resultado).not.toBeNull();
+      expect(resultado!.granularidade).toBe("ativo");
+      expect(resultado!.chaveExport).toBe("AAA11");
+      expect(resultado!.posicaoManualId).toBeUndefined();
+      expect(resultado!.alvoId).toBe(alvo.id);
+      expect(resultado!.valorInvestidoEsperadoCentavos).toBe(80_000);
+      expect(resultado!.valorInvestidoRealCentavos).toBe(80_500);
+      expect(resultado!.diferencaCentavos).toBe(500);
+      expect(resultado!.excedeTolerancia).toBe(false);
+    });
+
+    it("n=1: soma aporte.executado (por alvo_id) da sessão anterior ao valor investido esperado (R7)", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "AAA11", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      const sessaoAnterior = await criarSessao("2026-07");
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          chave_export: "AAA11",
+          instituicao: "Itaú",
+          quantidade: "10",
+          patrimonio_hoje_centavos: 100_000,
+          patrimonio_investido_centavos: 80_000,
+          tipo_grupo: "ACOES",
+        },
+      });
+      await prisma.aporte.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          valor_total_centavos: 20_000,
+          valor_dividendos_centavos: 0,
+          sugestao: JSON.stringify([{ alvo_id: alvo.id, nome_alvo: alvo.nome, valor_centavos: 20_000 }]),
+          executado: JSON.stringify([{ alvo_id: alvo.id, nome_alvo: alvo.nome, valor_centavos: 20_000 }]),
+          troco_centavos: 0,
+        },
+      });
+
+      // esperado = 80_000 (anterior) + 20_000 (aporte executado) = 100_000; real bate exatamente.
+      const resultado = await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 100_000 },
+        sessaoAnterior.id,
+      );
+      expect(resultado!.valorInvestidoEsperadoCentavos).toBe(100_000);
+      expect(resultado!.diferencaCentavos).toBe(0);
+      expect(resultado!.excedeTolerancia).toBe(false);
+    });
+
+    it("n=1: aporte.executado de OUTRO alvo na mesma sessão não contamina a soma", async () => {
+      const alvo = await criarAlvo("Alvo A");
+      const outroAlvo = await criarAlvo("Alvo B");
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "AAA11", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      const sessaoAnterior = await criarSessao("2026-07");
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          chave_export: "AAA11",
+          instituicao: "Itaú",
+          quantidade: "10",
+          patrimonio_hoje_centavos: 100_000,
+          patrimonio_investido_centavos: 80_000,
+          tipo_grupo: "ACOES",
+        },
+      });
+      await prisma.aporte.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          valor_total_centavos: 50_000,
+          valor_dividendos_centavos: 0,
+          sugestao: JSON.stringify([{ alvo_id: outroAlvo.id, nome_alvo: outroAlvo.nome, valor_centavos: 50_000 }]),
+          executado: JSON.stringify([{ alvo_id: outroAlvo.id, nome_alvo: outroAlvo.nome, valor_centavos: 50_000 }]),
+          troco_centavos: 0,
+        },
+      });
+
+      const resultado = await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 80_000 },
+        sessaoAnterior.id,
+      );
+      expect(resultado!.valorInvestidoEsperadoCentavos).toBe(80_000);
+    });
+
+    it("n>=2: granularidade 'alvo', SEM apontar chaveExport/posicaoManualId (soma agregada, FR-011a)", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "AAA11", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "BBB11", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      const sessaoAnterior = await criarSessao("2026-07");
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          chave_export: "AAA11",
+          instituicao: "Itaú",
+          quantidade: "10",
+          patrimonio_hoje_centavos: 100_000,
+          patrimonio_investido_centavos: 50_000,
+          tipo_grupo: "ACOES",
+        },
+      });
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          chave_export: "BBB11",
+          instituicao: "Itaú",
+          quantidade: "10",
+          patrimonio_hoje_centavos: 50_000,
+          patrimonio_investido_centavos: 30_000,
+          tipo_grupo: "ACOES",
+        },
+      });
+
+      // esperado = 50_000 + 30_000 = 80_000; real = 200_000 (bem além dos dois limiares).
+      const resultado = await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 200_000 },
+        sessaoAnterior.id,
+      );
+      expect(resultado!.granularidade).toBe("alvo");
+      expect(resultado!.chaveExport).toBeUndefined();
+      expect(resultado!.posicaoManualId).toBeUndefined();
+      expect(resultado!.valorInvestidoEsperadoCentavos).toBe(80_000);
+      expect(resultado!.diferencaCentavos).toBe(120_000);
+      expect(resultado!.excedeTolerancia).toBe(true);
+    });
+
+    it("tolerância FR-018: excede o percentual (5%) mas NÃO o piso (R$20,00) → excedeTolerancia false (nunca sinaliza só por um dos dois)", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PEQUENO1", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      const sessaoAnterior = await criarSessao("2026-07");
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          chave_export: "PEQUENO1",
+          instituicao: "Itaú",
+          quantidade: "1",
+          patrimonio_hoje_centavos: 1_000,
+          patrimonio_investido_centavos: 1_000, // esperado = 1_000 (10 reais)
+          tipo_grupo: "ACOES",
+        },
+      });
+
+      // diferença = 200 centavos (20%, > 5%) mas < 2_000 centavos (piso R$20,00).
+      const resultado = await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 1_200 },
+        sessaoAnterior.id,
+      );
+      expect(resultado!.diferencaCentavos).toBe(200);
+      expect(resultado!.excedeTolerancia).toBe(false);
+    });
+
+    it("tolerância FR-018: excede o piso (R$20,00) mas NÃO o percentual (5%) → excedeTolerancia false", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "GRANDE1", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      const sessaoAnterior = await criarSessao("2026-07");
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          chave_export: "GRANDE1",
+          instituicao: "Itaú",
+          quantidade: "1",
+          patrimonio_hoje_centavos: 10_000_000,
+          patrimonio_investido_centavos: 10_000_000, // esperado = R$100.000,00
+          tipo_grupo: "ACOES",
+        },
+      });
+
+      // diferença = 3_000 centavos (R$30,00, > R$20,00 piso) mas só 0.03% (< 5%).
+      const resultado = await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 10_003_000 },
+        sessaoAnterior.id,
+      );
+      expect(resultado!.diferencaCentavos).toBe(3_000);
+      expect(resultado!.excedeTolerancia).toBe(false);
+    });
+
+    it("tolerância FR-018: excede AMBOS simultaneamente → excedeTolerancia true", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "AMBOS1", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      const sessaoAnterior = await criarSessao("2026-07");
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          chave_export: "AMBOS1",
+          instituicao: "Itaú",
+          quantidade: "1",
+          patrimonio_hoje_centavos: 100_000,
+          patrimonio_investido_centavos: 100_000, // esperado = R$1.000,00
+          tipo_grupo: "ACOES",
+        },
+      });
+
+      // diferença = 10_000 centavos (R$100,00, > R$20,00 piso E 10% > 5%).
+      const resultado = await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 110_000 },
+        sessaoAnterior.id,
+      );
+      expect(resultado!.diferencaCentavos).toBe(10_000);
+      expect(resultado!.excedeTolerancia).toBe(true);
+    });
+
+    it("US4 Acceptance Scenario 3: ativo novo (primeira aparição, sem sessão anterior) — esperado=0 não gera alerta ('não há base de comparação')", async () => {
+      const alvo = await criarAlvo();
+      // Elegível AGORA (vínculo vigente no momento da consulta), mas SEM
+      // nenhuma linha `posicao`/snapshot na sessão anterior — genuinamente
+      // novo, apareceu pela primeira vez nesta sessão.
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "NOVO1", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      const sessaoAnterior = await criarSessao("2026-07");
+      // Nenhum prisma.posicao.create para "NOVO1" na sessaoAnterior.
+
+      const resultado = await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 50_000 },
+        sessaoAnterior.id,
+      );
+
+      expect(resultado!.valorInvestidoEsperadoCentavos).toBe(0);
+      // Spec.md US4 Acceptance Scenario 3: "ativo novo... nenhum alerta de
+      // divergência é gerado para ele (não há base de comparação)".
+      expect(resultado!.excedeTolerancia).toBe(false);
+    });
+
+    it("garantia estrutural (FR-019): a função NUNCA persiste nada — posicao.patrimonio_investido_centavos continua com o valor REAL original após o cálculo", async () => {
+      const alvo = await criarAlvo();
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "SAFE1", alvo_id: alvo.id, fora_da_carteira: false, ignorar_no_import: false },
+      });
+      const sessaoAnterior = await criarSessao("2026-07");
+      const posicaoOriginal = await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoAnterior.id,
+          chave_export: "SAFE1",
+          instituicao: "Itaú",
+          quantidade: "1",
+          patrimonio_hoje_centavos: 100_000,
+          patrimonio_investido_centavos: 80_000,
+          tipo_grupo: "ACOES",
+        },
+      });
+
+      // "real" simulado bem diferente do esperado — a função só COMPARA, nunca grava.
+      await rendimentoService.calcularMovimentacaoNaoExplicada(
+        { alvoId: alvo.id, nomeAlvo: alvo.nome, valorInvestidoRealCentavos: 999_999 },
+        sessaoAnterior.id,
+      );
+
+      const posicaoDepois = await prisma.posicao.findUnique({ where: { id: posicaoOriginal.id } });
+      expect(posicaoDepois!.patrimonio_investido_centavos).toBe(80_000);
+    });
+  });
 });
