@@ -105,6 +105,11 @@ model posicao {
   /// ser fracionado — nunca Int/Float.
   quantidade               String
   patrimonio_hoje_centavos Int
+  /// null = coluna "Patrimônio Aplicado" ausente/inválida nessa linha do CSV
+  /// (data-model.md R2/R10) — NUNCA tratado como zero. Sessões anteriores a
+  /// esta feature ficam com null (sem backfill). Snapshot imutável junto com
+  /// o resto de `posicao`; nunca lido por src/core/motor/**.
+  patrimonio_investido_centavos Int?
   tipo_grupo               String
   tipo_ativo_internacional String?
   data_ultima_cotacao      DateTime?
