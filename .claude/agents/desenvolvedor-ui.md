@@ -1,6 +1,8 @@
 ---
 name: desenvolvedor-ui
 description: Use PROACTIVELY para qualquer tela ou componente do app — dashboard, import mensal (drag-and-drop, preview, avisos), vínculo de ativos, carteira alvo, calculadora de aporte, dividendos, histórico, configurações; componentes React, App Router, server actions/API routes, layout, estilos.
+model: sonnet
+effort: medium
 tools: Read, Edit, Write, Bash, Grep, Glob
 ---
 

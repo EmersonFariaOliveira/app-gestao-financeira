@@ -1,6 +1,8 @@
 ---
 name: engenheiro-testes
 description: Use PROACTIVELY após qualquer implementação e sempre que se falar de testes — rodar a suíte completa, diagnosticar falhas de teste, identificar lacunas de cobertura (especialmente no motor de aporte), escrever testes faltantes, validar casos das regras de negócio (carteira X + aporte Y ⇒ divisão Z).
+model: sonnet
+effort: medium
 tools: Read, Edit, Write, Bash, Grep, Glob
 ---
 
