@@ -64,7 +64,13 @@ type Fase = "carregando" | "erro" | "pronto";
 // alvo dos modos "existente"/"novo" (reaproveitam os campos do form), só que
 // gravam `ignorarNoImport: true` — o ativo some da consolidação do CSV
 // porque será substituído por uma posição manual.
-type ModoResolucao = "existente" | "novo" | "fora" | "ignorar-existente" | "ignorar-novo";
+type ModoResolucao =
+  | "existente"
+  | "novo"
+  | "fora"
+  | "reserva"
+  | "ignorar-existente"
+  | "ignorar-novo";
 
 // Reaproveitado no aviso de "ignorar" tanto em Pendentes quanto nas ações de
 // Vinculados/Fora da carteira (feature 002, FR-001) — mesmo texto, sem
@@ -134,6 +140,9 @@ export default function VinculosPage() {
       for (const f of respVinculos.data.foraDaCarteira) {
         if (!novo[f.chaveExport]) novo[f.chaveExport] = respAlvos.data[0]?.id ?? "";
       }
+      for (const r of respVinculos.data.reservaEmergencia) {
+        if (!novo[r.chaveExport]) novo[r.chaveExport] = respAlvos.data[0]?.id ?? "";
+      }
       return novo;
     });
     setFase("pronto");
@@ -178,6 +187,11 @@ export default function VinculosPage() {
 
     if (form.modo === "fora") {
       await executarVinculo(chaveExport, { chaveExport, foraDaCarteira: true });
+      return;
+    }
+
+    if (form.modo === "reserva") {
+      await executarVinculo(chaveExport, { chaveExport, reservaEmergencia: true });
       return;
     }
 
@@ -238,6 +252,14 @@ export default function VinculosPage() {
     await executarVinculo(chaveExport, { chaveExport, foraDaCarteira: true });
   }
 
+  // Simétrico a `handleMarcarForaDaCarteira`, para o novo balde isolado
+  // "reserva de emergência" — reaproveitado tanto pelas ações das seções
+  // Vinculados/Fora-da-carteira quanto (indiretamente, via
+  // `handleResolverPendente`) pelo modo "reserva" de Pendentes.
+  async function handleMarcarReservaEmergencia(chaveExport: string) {
+    await executarVinculo(chaveExport, { chaveExport, reservaEmergencia: true });
+  }
+
   // "Ignorar (substituído por posição manual)" a partir das seções
   // Vinculados/Fora da carteira (feature 002, FR-001) — mesma chamada usada
   // no modo "ignorar-existente" de Pendentes, reaproveitando o dropdown de
@@ -263,6 +285,10 @@ export default function VinculosPage() {
   const foraDaCarteiraOrdenados = useSortableRows(vinculos?.foraDaCarteira ?? [], {
     chaveExport: (f) => f.chaveExport,
     valorAtualCentavos: (f) => f.valorAtualCentavos,
+  });
+  const reservaEmergenciaOrdenados = useSortableRows(vinculos?.reservaEmergencia ?? [], {
+    chaveExport: (r) => r.chaveExport,
+    valorAtualCentavos: (r) => r.valorAtualCentavos,
   });
   const ignoradosOrdenados = useSortableRows(vinculos?.ignorados ?? [], {
     chaveExport: (i) => i.chaveExport,
@@ -293,7 +319,7 @@ export default function VinculosPage() {
     );
   }
 
-  const { pendentes, vinculados, foraDaCarteira, ignorados } = vinculos;
+  const { pendentes, vinculados, foraDaCarteira, reservaEmergencia, ignorados } = vinculos;
 
   return (
     <div className="flex flex-col gap-6">
@@ -343,6 +369,7 @@ export default function VinculosPage() {
                         <option value="existente">Vincular a alvo existente</option>
                         <option value="novo">Criar novo alvo</option>
                         <option value="fora">Marcar fora da carteira</option>
+                        <option value="reserva">Marcar como reserva de emergência</option>
                         <option value="ignorar-existente">
                           Ignorar (substituído por posição manual) — alvo existente
                         </option>
@@ -513,6 +540,14 @@ export default function VinculosPage() {
                           <Button
                             size="sm"
                             variant="ghost"
+                            disabled={salvando}
+                            onClick={() => void handleMarcarReservaEmergencia(v.chaveExport)}
+                          >
+                            Marcar reserva de emergência
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
                             disabled={salvando || alvos.length === 0}
                             title={AVISO_IGNORAR}
                             onClick={() => void handleIgnorar(v.chaveExport)}
@@ -604,11 +639,115 @@ export default function VinculosPage() {
                           <Button
                             size="sm"
                             variant="ghost"
+                            disabled={salvando}
+                            onClick={() => void handleMarcarReservaEmergencia(f.chaveExport)}
+                          >
+                            Marcar reserva de emergência
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
                             disabled={salvando || alvos.length === 0}
                             title={AVISO_IGNORAR}
                             onClick={() => void handleIgnorar(f.chaveExport)}
                           >
                             Ignorar (substituído por posição manual)
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>
+            Reserva de emergência{" "}
+            {reservaEmergencia.length > 0 && `(${reservaEmergencia.length})`}
+          </CardTitle>
+          <CardDescription>
+            Ativos reconhecidos do export, mas isolados tanto da carteira alvo quanto do
+            balde &quot;Fora da carteira alvo&quot; — não entram nos déficits, na alocação
+            nem no aporte.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {reservaEmergencia.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Nenhum ativo marcado como reserva de emergência.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <SortableTableHead
+                    sortDirection={reservaEmergenciaOrdenados.sortDirectionFor("chaveExport")}
+                    onSort={() => reservaEmergenciaOrdenados.toggleSort("chaveExport")}
+                  >
+                    Chave do export
+                  </SortableTableHead>
+                  <SortableTableHead
+                    sortDirection={reservaEmergenciaOrdenados.sortDirectionFor(
+                      "valorAtualCentavos",
+                    )}
+                    onSort={() => reservaEmergenciaOrdenados.toggleSort("valorAtualCentavos")}
+                  >
+                    Valor atual
+                  </SortableTableHead>
+                  <TableHead>Vincular a</TableHead>
+                  <TableHead>Ações</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {reservaEmergenciaOrdenados.sortedRows.map((r) => {
+                  const salvando = salvandoChave === r.chaveExport;
+                  return (
+                    <TableRow key={r.chaveExport}>
+                      <TableCell className="max-w-48 whitespace-normal break-words">
+                        {r.chaveExport}
+                      </TableCell>
+                      <TableCell>{formatCentavosParaReais(r.valorAtualCentavos)}</TableCell>
+                      <TableCell>
+                        <select
+                          className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
+                          value={reatribuirAlvoId[r.chaveExport] ?? alvos[0]?.id ?? ""}
+                          onChange={(e) =>
+                            setReatribuirAlvoId((prev) => ({
+                              ...prev,
+                              [r.chaveExport]: e.target.value,
+                            }))
+                          }
+                        >
+                          {alvos.length === 0 && <option value="">Nenhum alvo cadastrado</option>}
+                          {alvos.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.nome}
+                            </option>
+                          ))}
+                        </select>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={salvando || alvos.length === 0}
+                            onClick={() => void handleReatribuir(r.chaveExport)}
+                          >
+                            Vincular
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={salvando}
+                            onClick={() => void handleMarcarForaDaCarteira(r.chaveExport)}
+                          >
+                            Marcar fora da carteira
                           </Button>
                         </div>
                       </TableCell>
@@ -698,8 +837,8 @@ function Cabecalho() {
     <div>
       <h1 className="text-2xl font-heading font-semibold tracking-tight">Vínculo de ativos</h1>
       <p className="text-sm text-muted-foreground">
-        Cada ativo do export precisa apontar para um alvo da carteira (ou ser marcado como
-        fora da carteira) antes de calcular o aporte.
+        Cada ativo do export precisa apontar para um alvo da carteira, ou ser marcado como
+        fora da carteira ou reserva de emergência, antes de calcular o aporte.
       </p>
     </div>
   );

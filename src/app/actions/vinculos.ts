@@ -107,8 +107,12 @@ export async function vincularAtivo(
     if (typeof input.alvoId !== "string" || !input.alvoId.trim()) {
       return { ok: false, erro: "alvoId é obrigatório para vincular a um alvo existente." };
     }
-  } else if (input.foraDaCarteira !== true) {
-    return { ok: false, erro: "Input inválido: informe alvoId, novoAlvo ou foraDaCarteira." };
+  } else if ("foraDaCarteira" in input) {
+    if (input.foraDaCarteira !== true) {
+      return { ok: false, erro: "Input inválido: informe alvoId, novoAlvo, foraDaCarteira ou reservaEmergencia." };
+    }
+  } else if (!("reservaEmergencia" in input) || input.reservaEmergencia !== true) {
+    return { ok: false, erro: "Input inválido: informe alvoId, novoAlvo, foraDaCarteira ou reservaEmergencia." };
   }
 
   try {
