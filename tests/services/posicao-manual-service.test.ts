@@ -650,13 +650,45 @@ describe("posicao-manual-service", () => {
 
       expect(await prisma.ajuste_valor_investido.count()).toBe(0);
     });
+
+    // Ampliação (branch 002-posicoes-manuais-ajustes, "ativos fora da
+    // carteira também podem ter ajuste"): criarOuAtualizarAjuste em si não
+    // consulta ativo_mapeado (é indiferente à condição alvo/fora-da-carteira
+    // — só faz upsert por chave_export). O teste abaixo é de INTEGRAÇÃO
+    // ponta a ponta: criar via criarOuAtualizarAjuste e reler via
+    // listarAjustesAtivos, confirmando que o valor persistido volta com
+    // alvoId/nomeAlvo null para uma chave fora_da_carteira=true.
+    it("cria um ajuste para uma chave fora-da-carteira (sem alvo) e o valor volta corretamente em listarAjustesAtivos (alvoId/nomeAlvo null)", async () => {
+      await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "FUNDO-FORA-E2E", alvo_id: null, fora_da_carteira: true },
+      });
+
+      const resultado = await posicaoManualService.criarOuAtualizarAjuste({
+        chaveExport: "FUNDO-FORA-E2E",
+        valorInvestidoCentavosCorrigido: 275_000,
+      });
+      expect(resultado.valorInvestidoCentavosCorrigido).toBe(275_000);
+
+      const lista = await posicaoManualService.listarAjustesAtivos();
+      expect(lista).toEqual([
+        {
+          chaveExport: "FUNDO-FORA-E2E",
+          alvoId: null,
+          nomeAlvo: null,
+          valorInvestidoCentavosCorrigido: 275_000,
+        },
+      ]);
+    });
   });
 
   // T017 (User Story 2, 6.9): listarAjustesAtivos — leitura para a tela
   // dedicada, fora do fluxo de import. "Sob ajuste" = existe pelo menos um
-  // ajuste_valor_investido histórico E o ativo_mapeado correspondente ainda
-  // está vinculado a um alvo ativo (alvo_id != null, fora_da_carteira=false,
-  // ignorar_no_import=false) — condição derivada de data-model.md.
+  // ajuste_valor_investido histórico E o ativo_mapeado correspondente não
+  // está ignorado (ignorar_no_import=false) E (está vinculado a um alvo
+  // ativo (alvo_id != null) OU está fora_da_carteira=true) — condição
+  // derivada de data-model.md ("Identidade de 'ativo sob ajuste'"). Ativos
+  // "pendentes" (sem alvo e não fora-da-carteira) ficam de fora.
   describe("listarAjustesAtivos", () => {
     async function criarAtivoMapeado(
       chaveExport: string,
@@ -735,13 +767,55 @@ describe("posicao-manual-service", () => {
       expect(resultado).toEqual([]);
     });
 
-    it("exclui chave_export cujo ativo_mapeado está fora_da_carteira=true", async () => {
-      const alvo = await criarAlvo("Fundos", 2000);
-      await criarAtivoMapeado("FUNDO-FORA", { alvoId: alvo.id, foraDaCarteira: true });
+    it("inclui chave_export cujo ativo_mapeado está fora_da_carteira=true, mesmo sem alvo_id (alvoId/nomeAlvo null)", async () => {
+      await criarAtivoMapeado("FUNDO-FORA", { alvoId: null, foraDaCarteira: true });
       const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
       await prisma.ajuste_valor_investido.create({
         data: {
           chave_export: "FUNDO-FORA",
+          sessao_import_id: sessao.id,
+          valor_investido_corrigido_centavos: 100_000,
+        },
+      });
+
+      const resultado = await posicaoManualService.listarAjustesAtivos();
+
+      expect(resultado).toEqual([
+        {
+          chaveExport: "FUNDO-FORA",
+          alvoId: null,
+          nomeAlvo: null,
+          valorInvestidoCentavosCorrigido: 100_000,
+        },
+      ]);
+    });
+
+    it("exclui chave_export 'pendente' (alvo_id IS NULL e fora_da_carteira=false)", async () => {
+      await criarAtivoMapeado("FUNDO-PENDENTE", { alvoId: null, foraDaCarteira: false });
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO-PENDENTE",
+          sessao_import_id: sessao.id,
+          valor_investido_corrigido_centavos: 100_000,
+        },
+      });
+
+      const resultado = await posicaoManualService.listarAjustesAtivos();
+
+      expect(resultado).toEqual([]);
+    });
+
+    it("exclui chave_export ignorar_no_import=true mesmo quando fora_da_carteira=true", async () => {
+      await criarAtivoMapeado("FUNDO-IGNORADO-FORA", {
+        alvoId: null,
+        foraDaCarteira: true,
+        ignorarNoImport: true,
+      });
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO-IGNORADO-FORA",
           sessao_import_id: sessao.id,
           valor_investido_corrigido_centavos: 100_000,
         },
@@ -769,14 +843,136 @@ describe("posicao-manual-service", () => {
       expect(resultado).toEqual([]);
     });
 
-    it("mistura chaves válidas e excluídas, retornando apenas a válida com o nome do alvo", async () => {
+    it("exclui chave_export 'reserva de emergência' (reserva_emergencia=true, alvo_id null, fora_da_carteira=false) — mesmo tratamento de 'pendente'", async () => {
+      // Combinação real do schema (prisma/schema.prisma, comentário do campo
+      // reserva_emergencia): mutuamente exclusivo com alvo_id preenchido e
+      // com fora_da_carteira=true — na prática uma reserva de emergência tem
+      // alvo_id null e fora_da_carteira=false, caindo no mesmo ramo do OR já
+      // coberto pela regra "pendente exclui", mas testado aqui explicitamente
+      // com a flag reserva_emergencia=true para não regredir por acidente se
+      // o filtro um dia passar a inspecionar essa coluna diretamente.
+      await prisma.ativo_mapeado.create({
+        data: {
+          chave_export: "RESERVA-CDB",
+          alvo_id: null,
+          fora_da_carteira: false,
+          ignorar_no_import: false,
+          reserva_emergencia: true,
+        },
+      });
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "RESERVA-CDB",
+          sessao_import_id: sessao.id,
+          valor_investido_corrigido_centavos: 100_000,
+        },
+      });
+
+      const resultado = await posicaoManualService.listarAjustesAtivos();
+
+      expect(resultado).toEqual([]);
+    });
+
+    it("re-vínculo: chave fora-da-carteira com ajuste histórico depois vinculada a um alvo — o ajuste continua aparecendo, agora com alvoId/nomeAlvo preenchidos (histórico preservado)", async () => {
+      const ativoMapeado = await criarAtivoMapeado("FUNDO-REVINCULO", {
+        alvoId: null,
+        foraDaCarteira: true,
+      });
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO-REVINCULO",
+          sessao_import_id: sessao.id,
+          valor_investido_corrigido_centavos: 150_000,
+        },
+      });
+
+      const antes = await posicaoManualService.listarAjustesAtivos();
+      expect(antes).toEqual([
+        {
+          chaveExport: "FUNDO-REVINCULO",
+          alvoId: null,
+          nomeAlvo: null,
+          valorInvestidoCentavosCorrigido: 150_000,
+        },
+      ]);
+
+      // Re-vínculo pela tela de vínculos: passa a apontar para um alvo e
+      // deixa de estar fora-da-carteira.
+      const alvo = await criarAlvo("Fundos Imobiliários", 1500);
+      await prisma.ativo_mapeado.update({
+        where: { id: ativoMapeado.id },
+        data: { alvo_id: alvo.id, fora_da_carteira: false },
+      });
+
+      const depois = await posicaoManualService.listarAjustesAtivos();
+      expect(depois).toEqual([
+        {
+          chaveExport: "FUNDO-REVINCULO",
+          alvoId: alvo.id,
+          nomeAlvo: "Fundos Imobiliários",
+          valorInvestidoCentavosCorrigido: 150_000,
+        },
+      ]);
+      // Ajuste histórico em si não foi tocado pelo re-vínculo — só a
+      // resolução de alvoId/nomeAlvo mudou (vem do ativo_mapeado, não do
+      // ajuste_valor_investido).
+      expect(await prisma.ajuste_valor_investido.count()).toBe(1);
+    });
+
+    it("transição inversa: chave vinculada a um alvo com ajuste histórico depois marcada fora-da-carteira — o ajuste continua aparecendo, agora com alvoId/nomeAlvo null", async () => {
+      const alvo = await criarAlvo("Fundos", 2000);
+      const ativoMapeado = await criarAtivoMapeado("FUNDO-DESVINCULO", { alvoId: alvo.id });
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO-DESVINCULO",
+          sessao_import_id: sessao.id,
+          valor_investido_corrigido_centavos: 90_000,
+        },
+      });
+
+      const antes = await posicaoManualService.listarAjustesAtivos();
+      expect(antes).toEqual([
+        {
+          chaveExport: "FUNDO-DESVINCULO",
+          alvoId: alvo.id,
+          nomeAlvo: "Fundos",
+          valorInvestidoCentavosCorrigido: 90_000,
+        },
+      ]);
+
+      await prisma.ativo_mapeado.update({
+        where: { id: ativoMapeado.id },
+        data: { alvo_id: null, fora_da_carteira: true },
+      });
+
+      const depois = await posicaoManualService.listarAjustesAtivos();
+      expect(depois).toEqual([
+        {
+          chaveExport: "FUNDO-DESVINCULO",
+          alvoId: null,
+          nomeAlvo: null,
+          valorInvestidoCentavosCorrigido: 90_000,
+        },
+      ]);
+    });
+
+    it("mistura chaves válidas (com alvo, fora-da-carteira) e excluídas (pendente, ignorada)", async () => {
       const alvo = await criarAlvo("Fundos Imobiliários", 1500);
       await criarAtivoMapeado("FUNDO-VALIDO", { alvoId: alvo.id });
-      await criarAtivoMapeado("FUNDO-FORA-CARTEIRA", { alvoId: alvo.id, foraDaCarteira: true });
+      await criarAtivoMapeado("FUNDO-FORA-CARTEIRA", { alvoId: null, foraDaCarteira: true });
       await criarAtivoMapeado("FUNDO-SEM-ALVO", { alvoId: null });
+      await criarAtivoMapeado("FUNDO-IGNORADO", { alvoId: alvo.id, ignorarNoImport: true });
       const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
 
-      for (const chave of ["FUNDO-VALIDO", "FUNDO-FORA-CARTEIRA", "FUNDO-SEM-ALVO"]) {
+      for (const chave of [
+        "FUNDO-VALIDO",
+        "FUNDO-FORA-CARTEIRA",
+        "FUNDO-SEM-ALVO",
+        "FUNDO-IGNORADO",
+      ]) {
         await prisma.ajuste_valor_investido.create({
           data: {
             chave_export: chave,
@@ -788,13 +984,23 @@ describe("posicao-manual-service", () => {
 
       const resultado = await posicaoManualService.listarAjustesAtivos();
 
-      expect(resultado).toHaveLength(1);
-      expect(resultado[0]).toEqual({
-        chaveExport: "FUNDO-VALIDO",
-        alvoId: alvo.id,
-        nomeAlvo: "Fundos Imobiliários",
-        valorInvestidoCentavosCorrigido: 200_000,
-      });
+      expect(resultado).toHaveLength(2);
+      expect(resultado).toEqual(
+        expect.arrayContaining([
+          {
+            chaveExport: "FUNDO-VALIDO",
+            alvoId: alvo.id,
+            nomeAlvo: "Fundos Imobiliários",
+            valorInvestidoCentavosCorrigido: 200_000,
+          },
+          {
+            chaveExport: "FUNDO-FORA-CARTEIRA",
+            alvoId: null,
+            nomeAlvo: null,
+            valorInvestidoCentavosCorrigido: 200_000,
+          },
+        ]),
+      );
     });
   });
 
@@ -1007,6 +1213,81 @@ describe("posicao-manual-service", () => {
         valorInvestidoCentavosAnterior: 275_000,
         valorInvestidoCentavosSugerido: 275_000,
       });
+    });
+
+    it("inclui no carry-forward um chave_export fora_da_carteira=true (sem alvo_id) com incrementoPendenteCentavos sempre 0", async () => {
+      const sessaoAntiga = await criarSessao("2026-05", "2026-05-28", "SUBSTITUIDO");
+      await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "FUNDO-FORA-REVISAO", alvo_id: null, fora_da_carteira: true },
+      });
+      await criarAjuste("FUNDO-FORA-REVISAO", sessaoAntiga.id, 180_000);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.ajustesRevisao).toHaveLength(1);
+      expect(revisao.ajustesRevisao[0]).toEqual({
+        chaveExport: "FUNDO-FORA-REVISAO",
+        alvoId: null,
+        nomeAlvo: null,
+        primeiraVez: false,
+        valorInvestidoCentavosAnterior: 180_000,
+        incrementoPendenteCentavos: 0,
+        valorInvestidoCentavosSugerido: 180_000,
+      });
+    });
+
+    it("ajustesRevisao: re-vínculo (fora-da-carteira -> alvo) atualiza alvoId/nomeAlvo mantendo o carry-forward do valor anterior", async () => {
+      const sessaoAnterior = await criarSessao("2026-05", "2026-05-28", "SUBSTITUIDO");
+      await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      const ativoMapeado = await prisma.ativo_mapeado.create({
+        data: { chave_export: "FUNDO-REVINCULO-REVISAO", alvo_id: null, fora_da_carteira: true },
+      });
+      await criarAjuste("FUNDO-REVINCULO-REVISAO", sessaoAnterior.id, 220_000);
+
+      const antes = await posicaoManualService.montarRevisaoImport();
+      expect(antes.ajustesRevisao).toEqual([
+        expect.objectContaining({
+          chaveExport: "FUNDO-REVINCULO-REVISAO",
+          alvoId: null,
+          nomeAlvo: null,
+          valorInvestidoCentavosAnterior: 220_000,
+        }),
+      ]);
+
+      const alvo = await criarAlvo("Fundos", 2000);
+      await prisma.ativo_mapeado.update({
+        where: { id: ativoMapeado.id },
+        data: { alvo_id: alvo.id, fora_da_carteira: false },
+      });
+
+      const depois = await posicaoManualService.montarRevisaoImport();
+      expect(depois.ajustesRevisao).toEqual([
+        expect.objectContaining({
+          chaveExport: "FUNDO-REVINCULO-REVISAO",
+          alvoId: alvo.id,
+          nomeAlvo: "Fundos",
+          valorInvestidoCentavosAnterior: 220_000,
+        }),
+      ]);
+    });
+
+    it("ajustesRevisao exclui chave_export 'reserva de emergência' (reserva_emergencia=true, alvo_id null, fora_da_carteira=false)", async () => {
+      const sessao = await criarSessao("2026-06", "2026-06-28", "VIGENTE");
+      await prisma.ativo_mapeado.create({
+        data: {
+          chave_export: "RESERVA-CDB-REVISAO",
+          alvo_id: null,
+          fora_da_carteira: false,
+          ignorar_no_import: false,
+          reserva_emergencia: true,
+        },
+      });
+      await criarAjuste("RESERVA-CDB-REVISAO", sessao.id, 50_000);
+
+      const revisao = await posicaoManualService.montarRevisaoImport();
+
+      expect(revisao.ajustesRevisao).toEqual([]);
     });
 
     it("primeira posição manual, sem NENHUMA sessão anterior (cadastrada fora do fluxo de import, sem posicao_manual_valor ainda) — não lança erro, valores vazios/zero", async () => {
