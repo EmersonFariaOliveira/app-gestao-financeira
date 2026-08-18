@@ -237,13 +237,20 @@ export interface AjusteAtivoListItem {
  * Story 2), fora do fluxo de import. "Sob ajuste" aqui é a mesma condição
  * derivada de data-model.md ("Identidade de 'ativo sob ajuste'"): existe ao
  * menos um `ajuste_valor_investido` histórico para o `chave_export` E o
- * `ativo_mapeado` correspondente ainda está vinculado a um alvo ativo
- * (`alvo_id IS NOT NULL`, `fora_da_carteira = false`, `ignorar_no_import =
- * false`). Retorna o valor corrigido mais recente conhecido (qualquer
- * sessão) — NÃO é o mesmo que `listarPosicoesManuaisEAjustes` (T019, User
- * Story 3), que monta carry-forward/incrementos pendentes para a revisão
- * dentro do import; aqui é só "o que existe agora", para exibição e
- * criação/edição do valor corrigido.
+ * `ativo_mapeado` correspondente não está ignorado (`ignorar_no_import =
+ * false`) E (está vinculado a um alvo ativo (`alvo_id IS NOT NULL`) OU está
+ * marcado `fora_da_carteira = true`). Ativos "pendentes" (sem alvo e não
+ * fora-da-carteira) ficam de fora. Para uma chave `fora_da_carteira = true`
+ * sem alvo, `alvoId`/`nomeAlvo` retornam `null` (não força um nome de alvo
+ * fictício). Esta identidade é distinta da elegibilidade de "incremento
+ * pendente" (que continua exigindo `alvo_id` — um aporte é sempre feito NUM
+ * alvo; ver `montarIncrementosAmbiguosPendentes` abaixo e
+ * `aporte-service.gerarIncrementosPendentes`). Retorna o valor corrigido
+ * mais recente conhecido (qualquer sessão) — NÃO é o mesmo que
+ * `listarPosicoesManuaisEAjustes` (T019, User Story 3), que monta
+ * carry-forward/incrementos pendentes para a revisão dentro do import; aqui
+ * é só "o que existe agora", para exibição e criação/edição do valor
+ * corrigido.
  */
 export async function listarAjustesAtivos(): Promise<AjusteAtivoListItem[]> {
   const ajustes = await prisma.ajuste_valor_investido.findMany({
@@ -255,9 +262,8 @@ export async function listarAjustesAtivos(): Promise<AjusteAtivoListItem[]> {
   const ativosMapeados = await prisma.ativo_mapeado.findMany({
     where: {
       chave_export: { in: chavesComAjuste },
-      alvo_id: { not: null },
-      fora_da_carteira: false,
       ignorar_no_import: false,
+      OR: [{ alvo_id: { not: null } }, { fora_da_carteira: true }],
     },
     include: { alvo: true },
   });
@@ -274,7 +280,7 @@ export async function listarAjustesAtivos(): Promise<AjusteAtivoListItem[]> {
     return {
       chaveExport: ativoMapeado.chave_export,
       alvoId: ativoMapeado.alvo_id,
-      nomeAlvo: ativoMapeado.alvo?.nome ?? ativoMapeado.alvo_id,
+      nomeAlvo: ativoMapeado.alvo?.nome ?? null,
       valorInvestidoCentavosCorrigido: ultimo?.valor_investido_corrigido_centavos ?? null,
     };
   });
@@ -481,12 +487,18 @@ export async function montarRevisaoImport(): Promise<RevisaoImportOutput> {
   let ajustesRevisao: AjusteRevisaoItem[] = [];
   if (ajustesTodos.length > 0) {
     const chavesComAjuste = [...new Set(ajustesTodos.map((a) => a.chave_export))];
+    // Mesma identidade de "ativo sob ajuste" de `listarAjustesAtivos` acima
+    // (data-model.md, "Identidade de 'ativo sob ajuste'"): não ignorado E
+    // (vinculado a um alvo OU fora-da-carteira). Para chaves fora-da-carteira
+    // sem alvo, `incrementoPendenteCentavos` abaixo naturalmente resolve
+    // para 0 (nunca existe `incremento_valor_investido_pendente` para uma
+    // chave sem alvo — regra de elegibilidade de incremento continua
+    // exigindo `alvo_id`, propositalmente inalterada).
     const ativosMapeadosElegiveis = await prisma.ativo_mapeado.findMany({
       where: {
         chave_export: { in: chavesComAjuste },
-        alvo_id: { not: null },
-        fora_da_carteira: false,
         ignorar_no_import: false,
+        OR: [{ alvo_id: { not: null } }, { fora_da_carteira: true }],
       },
       include: { alvo: true },
     });
@@ -531,7 +543,7 @@ export async function montarRevisaoImport(): Promise<RevisaoImportOutput> {
       return {
         chaveExport: ativoMapeado.chave_export,
         alvoId: ativoMapeado.alvo_id,
-        nomeAlvo: ativoMapeado.alvo?.nome ?? ativoMapeado.alvo_id,
+        nomeAlvo: ativoMapeado.alvo?.nome ?? null,
         primeiraVez,
         valorInvestidoCentavosAnterior: valorAnterior,
         incrementoPendenteCentavos,
