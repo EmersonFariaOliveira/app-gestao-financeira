@@ -11,10 +11,11 @@
  * monetária usa `formatCentavosParaReais` (src/core/money) na borda de
  * exibição.
  *
- * Fatia atual (US1/P1, MVP): só o card de rendimento consolidado do
- * patrimônio total + seletor de período (presets 1M/3M/6M/12M/Desde o
- * início). Os cards de segmentação por bucket (US2) e o gráfico (US3)
- * chegam em tasks futuras.
+ * Fatia atual (US1+US2, P1): card de rendimento consolidado do patrimônio
+ * total + seletor de período (presets 1M/3M/6M/12M/Desde o início), mais a
+ * segmentação por bucket (US2, FR-008/FR-009): reserva de emergência, cada
+ * tag/alvo dentro dela, e cada ativo fora da carteira individualmente. O
+ * gráfico (US3) chega em task futura.
  *
  * FR-020 (inviolável): o percentual de rendimento NUNCA é rotulado como
  * "rentabilidade" — é uma razão simples sobre o capital investido no início
@@ -24,6 +25,12 @@ import { useEffect, useState } from "react";
 
 import { dadosRendimento } from "@/app/actions/rendimento";
 import type { PeriodoInput, RendimentoOutput } from "@/app/actions/rendimento";
+import type {
+  RendimentoAtivoForaDaCarteira,
+  RendimentoPeriodo,
+  RendimentoPorAlvo,
+  RendimentoPorTag,
+} from "@/services/rendimento-service";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -120,7 +127,67 @@ export default function RendimentoPage() {
         </Card>
       )}
 
-      {fase === "pronto" && dados && <CardConsolidado dados={dados} />}
+      {fase === "pronto" && dados && (
+        <>
+          <CardConsolidado dados={dados} />
+          <CardReservaEmergencia dados={dados} />
+          <SecaoTagsEAlvos dados={dados} />
+          <SecaoForaDaCarteira dados={dados} />
+          <SecaoPendentesDeVinculo dados={dados} />
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Bloco visual reutilizado por todos os cards de rendimento desta tela
+ * (consolidado, reserva de emergência, cada tag/alvo, cada ativo fora da
+ * carteira) — mesmo par R$/percentual, mesma mensagem "sem histórico
+ * suficiente" quando `rendimentoCentavos: null` (FR-010), nunca a palavra
+ * "rentabilidade" (FR-020).
+ */
+function BlocoRendimento({ rendimento }: { rendimento: RendimentoPeriodo }) {
+  const semHistorico = rendimento.rendimentoCentavos === null;
+
+  if (semHistorico) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Sem histórico suficiente para calcular o rendimento neste período — pelo menos uma
+        das sessões não tem valor investido rastreável (import antigo sem
+        &quot;Patrimônio Aplicado&quot; ou ajuste preenchido).
+      </p>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div className="flex flex-col gap-1 rounded-lg border border-border p-3">
+        <span className="text-xs text-muted-foreground">Rendimento em R$</span>
+        <span
+          className={
+            "text-2xl font-semibold " +
+            (rendimento.rendimentoCentavos! < 0 ? "text-destructive" : "")
+          }
+        >
+          {formatCentavosParaReais(rendimento.rendimentoCentavos!)}
+        </span>
+      </div>
+      <div className="flex flex-col gap-1 rounded-lg border border-border p-3">
+        <span className="text-xs text-muted-foreground">Ganho sobre capital investido</span>
+        <span
+          className={
+            "text-2xl font-semibold " +
+            (rendimento.rendimentoPct !== null && rendimento.rendimentoPct < 0
+              ? "text-destructive"
+              : "")
+          }
+        >
+          {rendimento.rendimentoPct === null
+            ? "sem histórico suficiente"
+            : formatPercentual(rendimento.rendimentoPct)}
+        </span>
+      </div>
     </div>
   );
 }
@@ -140,9 +207,6 @@ function CardConsolidado({ dados }: { dados: RendimentoOutput }) {
     );
   }
 
-  const { consolidado } = dados;
-  const semHistorico = consolidado.rendimentoCentavos === null;
-
   return (
     <Card>
       <CardHeader>
@@ -153,53 +217,172 @@ function CardConsolidado({ dados }: { dados: RendimentoOutput }) {
           pendentes de vínculo com dado disponível).
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        {semHistorico ? (
-          <p className="text-sm text-muted-foreground">
-            Sem histórico suficiente para calcular o rendimento neste período — pelo menos
-            uma das sessões não tem valor investido rastreável (import antigo sem
-            &quot;Patrimônio Aplicado&quot; ou ajuste preenchido).
+      <CardContent className="flex flex-col gap-4">
+        {dados.semPeriodoAnteriorParaComparacao && (
+          <p className="rounded-md border border-border bg-muted px-3 py-2 text-sm text-muted-foreground">
+            Ainda não há período anterior para comparação — mostrando o rendimento
+            acumulado desde a única sessão de import disponível.
           </p>
-        ) : (
-          <div className="flex flex-col gap-4">
-            {dados.semPeriodoAnteriorParaComparacao && (
-              <p className="rounded-md border border-border bg-muted px-3 py-2 text-sm text-muted-foreground">
-                Ainda não há período anterior para comparação — mostrando o rendimento
-                acumulado desde a única sessão de import disponível.
-              </p>
-            )}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <div className="flex flex-col gap-1 rounded-lg border border-border p-3">
-                <span className="text-xs text-muted-foreground">Rendimento em R$</span>
-                <span
-                  className={
-                    "text-2xl font-semibold " +
-                    (consolidado.rendimentoCentavos! < 0 ? "text-destructive" : "")
-                  }
-                >
-                  {formatCentavosParaReais(consolidado.rendimentoCentavos!)}
-                </span>
-              </div>
-              <div className="flex flex-col gap-1 rounded-lg border border-border p-3">
-                <span className="text-xs text-muted-foreground">
-                  Ganho sobre capital investido
-                </span>
-                <span
-                  className={
-                    "text-2xl font-semibold " +
-                    (consolidado.rendimentoPct !== null && consolidado.rendimentoPct < 0
-                      ? "text-destructive"
-                      : "")
-                  }
-                >
-                  {consolidado.rendimentoPct === null
-                    ? "sem histórico suficiente"
-                    : formatPercentual(consolidado.rendimentoPct)}
-                </span>
-              </div>
+        )}
+        <BlocoRendimento rendimento={dados.consolidado} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Rendimento de tudo que está marcado `reserva_emergencia = true` (US2, FR-008). */
+function CardReservaEmergencia({ dados }: { dados: RendimentoOutput }) {
+  if (dados.vazio) return null;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Reserva de emergência</CardTitle>
+        <CardDescription>
+          Rendimento de todos os ativos/posições marcados como reserva de emergência, no
+          mesmo período selecionado acima.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <BlocoRendimento rendimento={dados.reservaEmergencia} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Rendimento por tag e, dentro de cada tag, por alvo individual (US2,
+ * FR-008/FR-009). Alvos sem tag (`tag: null`) são agrupados numa seção "Sem
+ * tag" separada, para nunca ficarem invisíveis.
+ */
+function SecaoTagsEAlvos({ dados }: { dados: RendimentoOutput }) {
+  if (dados.vazio) return null;
+  if (dados.porTag.length === 0 && dados.porAlvo.length === 0) return null;
+
+  const alvosSemTag = dados.porAlvo.filter((a) => a.tag === null);
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Rendimento por tag e por alvo</CardTitle>
+        <CardDescription>
+          Rendimento agrupado por tag da carteira alvo e, dentro de cada tag, o rendimento
+          de cada alvo individualmente.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-6">
+        {dados.porTag.map((porTag) => (
+          <BlocoTag key={porTag.tag} porTag={porTag} alvos={dados.porAlvo} />
+        ))}
+
+        {alvosSemTag.length > 0 && (
+          <div className="flex flex-col gap-3 rounded-lg border border-border p-3">
+            <h3 className="text-sm font-semibold">Sem tag</h3>
+            <div className="flex flex-col gap-4">
+              {alvosSemTag.map((alvo) => (
+                <BlocoAlvo key={alvo.alvoId} alvo={alvo} />
+              ))}
             </div>
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BlocoTag({
+  porTag,
+  alvos,
+}: {
+  porTag: RendimentoPorTag;
+  alvos: RendimentoPorAlvo[];
+}) {
+  const alvosDaTag = alvos.filter((a) => a.tag === porTag.tag);
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border p-3">
+      <h3 className="text-sm font-semibold">{porTag.tag}</h3>
+      <BlocoRendimento rendimento={porTag.rendimento} />
+      {alvosDaTag.length > 0 && (
+        <div className="flex flex-col gap-4 border-t border-border pt-3">
+          {alvosDaTag.map((alvo) => (
+            <BlocoAlvo key={alvo.alvoId} alvo={alvo} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BlocoAlvo({ alvo }: { alvo: RendimentoPorAlvo }) {
+  return (
+    <div className="flex flex-col gap-2 pl-3">
+      <span className="text-xs font-medium text-muted-foreground">{alvo.nomeAlvo}</span>
+      <BlocoRendimento rendimento={alvo.rendimento} />
+    </div>
+  );
+}
+
+/**
+ * Cada ativo `fora_da_carteira = true` exibido individualmente, nunca
+ * agregado num único número (US2, FR-007/FR-009 — Acceptance Scenario 3).
+ */
+function SecaoForaDaCarteira({ dados }: { dados: RendimentoOutput }) {
+  if (dados.vazio) return null;
+  if (dados.foraDaCarteira.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Ativos fora da carteira alvo</CardTitle>
+        <CardDescription>
+          Rendimento de cada ativo marcado como fora da carteira alvo, individualmente —
+          nunca somado num único total.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-6">
+        {dados.foraDaCarteira.map((item) => (
+          <BlocoAtivoForaDaCarteira key={item.chaveExport} item={item} />
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function BlocoAtivoForaDaCarteira({ item }: { item: RendimentoAtivoForaDaCarteira }) {
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
+      <span className="text-xs font-medium text-muted-foreground">{item.chaveExport}</span>
+      <BlocoRendimento rendimento={item.rendimento} />
+    </div>
+  );
+}
+
+/**
+ * Cada ativo pendente de vínculo (sem alvo, não fora da carteira, não
+ * reserva de emergência) exibido individualmente, à parte dos demais
+ * buckets — nunca agregado nem somado ao rendimento de nenhum alvo/tag
+ * (FR-017). Mesmo shape de `foraDaCarteira`, então reaproveita
+ * `BlocoAtivoForaDaCarteira` para o bloco individual.
+ */
+function SecaoPendentesDeVinculo({ dados }: { dados: RendimentoOutput }) {
+  if (dados.vazio) return null;
+  if (dados.pendentes.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Pendentes de vínculo</CardTitle>
+        <CardDescription>
+          Ativos ainda sem vínculo a um alvo da carteira — não fora da carteira nem reserva
+          de emergência. Exibidos à parte, individualmente, e não influenciam o rendimento de
+          nenhum alvo ou tag. Entram apenas no rendimento consolidado do patrimônio total.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-6">
+        {dados.pendentes.map((item) => (
+          <BlocoAtivoForaDaCarteira key={item.chaveExport} item={item} />
+        ))}
       </CardContent>
     </Card>
   );

@@ -161,6 +161,49 @@ describe("actions/rendimento", () => {
   });
 
   describe("caminho feliz e tratamento de exceção do serviço", () => {
+    it("delega ao serviço e repassa os 4 campos de segmentação por bucket (US2) sem alteração de shape", async () => {
+      const rendimentoPeriodoBase = {
+        sessaoInicioId: "s1",
+        sessaoFimId: "s2",
+        rendimentoCentavos: 300,
+        rendimentoPct: 3,
+        pontoInicio: {
+          rendimentoCentavos: 0,
+          rendimentoPct: 0,
+          valorAtualCentavos: 10_000,
+          valorInvestidoCentavos: 10_000,
+        },
+        pontoFim: {
+          rendimentoCentavos: 300,
+          rendimentoPct: 3,
+          valorAtualCentavos: 10_300,
+          valorInvestidoCentavos: 10_000,
+        },
+      };
+      const output = {
+        vazio: false,
+        periodo: { tipo: "1M" as const, sessaoInicioId: "s1", sessaoFimId: "s2" },
+        consolidado: rendimentoPeriodoBase,
+        reservaEmergencia: rendimentoPeriodoBase,
+        porTag: [{ tag: "RENDA-VARIAVEL", rendimento: rendimentoPeriodoBase }],
+        porAlvo: [
+          { alvoId: "alvo-1", nomeAlvo: "Ação 1", tag: "RENDA-VARIAVEL", rendimento: rendimentoPeriodoBase },
+        ],
+        foraDaCarteira: [{ chaveExport: "FORA1", rendimento: rendimentoPeriodoBase }],
+        periodosDisponiveis: [],
+        semPeriodoAnteriorParaComparacao: false,
+      };
+      dadosRendimentoMock.mockResolvedValue(output);
+
+      const resultado = await dadosRendimento({ tipo: "1M" });
+
+      expect(resultado).toEqual({ ok: true, data: output });
+      expect(resultado.ok && resultado.data.reservaEmergencia).toEqual(rendimentoPeriodoBase);
+      expect(resultado.ok && resultado.data.porTag).toHaveLength(1);
+      expect(resultado.ok && resultado.data.porAlvo).toHaveLength(1);
+      expect(resultado.ok && resultado.data.foraDaCarteira).toHaveLength(1);
+    });
+
     it("delega ao serviço e retorna {ok:true, data} com o RendimentoOutput retornado", async () => {
       const output = {
         vazio: false,

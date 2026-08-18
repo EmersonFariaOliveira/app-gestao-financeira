@@ -12,10 +12,11 @@
  * amigável. Toda a resolução de período/fórmula de rendimento vive em
  * `src/services/rendimento-service.ts` — nunca duplicada aqui.
  *
- * Fatia atual (US1/P1, MVP): só o campo `consolidado` de `RendimentoOutput`
- * — `reservaEmergencia`/`porTag`/`porAlvo`/`foraDaCarteira`/`serie` do
- * contrato completo chegam em tasks futuras (US2/US3), quando o shape do
- * serviço for estendido.
+ * Fatia atual (US1+US2, P1): `consolidado` (US1) mais a segmentação por
+ * bucket `reservaEmergencia`/`porTag`/`porAlvo`/`foraDaCarteira` (US2) — os
+ * dois já vêm prontos de `RendimentoOutput`, repassados sem nenhuma lógica
+ * adicional aqui. Só `serie` (gráfico, US3) do contrato completo chega em
+ * task futura.
  *
  * Formato de retorno padrão (contracts/server-actions.md):
  * `{ ok: true, data } | { ok: false, erro: string, detalhes?: unknown }`.
@@ -59,9 +60,11 @@ function validarInput(input: PeriodoInput): string | null {
 
 /**
  * Dados da tela 6.10 (análise de rendimento): rendimento consolidado do
- * patrimônio total (R$ e %) no período selecionado, mais as sessões
- * disponíveis para montar o seletor de período customizado (FR-001/FR-002/
- * FR-005/FR-006/FR-020 — nunca rotular o percentual como "rentabilidade").
+ * patrimônio total (R$ e %) no período selecionado, a segmentação por
+ * reserva de emergência/tag/alvo/ativos fora da carteira (US2), mais as
+ * sessões disponíveis para montar o seletor de período customizado
+ * (FR-001/FR-002/FR-005/FR-006/FR-008/FR-009/FR-020 — nunca rotular o
+ * percentual como "rentabilidade").
  */
 export async function dadosRendimento(input: PeriodoInput): Promise<ActionResult<RendimentoOutput>> {
   const erroValidacao = validarInput(input);

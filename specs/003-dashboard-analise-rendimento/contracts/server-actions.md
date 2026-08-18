@@ -52,6 +52,19 @@ export interface RendimentoOutput {
   porTag: Array<{ tag: string; rendimento: RendimentoPeriodo }>; // US2
   porAlvo: Array<{ alvoId: string; nomeAlvo: string; tag: string | null; rendimento: RendimentoPeriodo }>; // US2
   foraDaCarteira: Array<{ chaveExport: string; rendimento: RendimentoPeriodo }>; // US2
+  /**
+   * NOVO (adicionado durante a implementação, não previsto no desenho
+   * original deste contrato — lacuna de planejamento, não só de
+   * implementação). Um item por chave pendente de vínculo (sem `alvo_id`,
+   * `fora_da_carteira = false`, `reserva_emergencia = false`), nunca
+   * agregado — mesmo shape/padrão de `foraDaCarteira`. Necessário para
+   * cumprir FR-017 ("MUST ser exibidos à parte na análise de rendimento,
+   * sem influenciar o rendimento de nenhum alvo/tag") e FR-014 (o
+   * consolidado MUST bater com a soma de `reservaEmergencia` + Σ`porTag` +
+   * Σ`foraDaCarteira` + Σ`pendentes`, incluindo "pendentes com dado
+   * disponível").
+   */
+  pendentes: Array<{ chaveExport: string; rendimento: RendimentoPeriodo }>;
   serie: SerieRendimento; // US3, um ponto por sessão vigente no período
   periodosDisponiveis: Array<{ sessaoImportId: string; mesReferencia: string; dataExport: string }>; // para popular o seletor de período customizado
 }
@@ -68,5 +81,6 @@ export async function dadosRendimento(
 | Item sem dado suficiente (FR-010) | `RendimentoPeriodo.rendimentoCentavos: null` — a UI exibe "sem histórico suficiente", nunca 0 ou traço genérico. |
 | Rótulo do percentual na UI | NUNCA "rentabilidade" (FR-020) — usar "ganho sobre capital investido" ou equivalente definido pelo `desenvolvedor-ui`. |
 | `foraDaCarteira` | Um item por `chaveExport` (ou `chave_manual` de posição manual fora da carteira) — nunca agregado num único número, mesmo padrão de `dashboard-service.foraDaCarteira` hoje. |
+| `pendentes` (FR-017/FR-014) | Um item por chave pendente de vínculo, nunca agregado — não entra em `reservaEmergencia`/`porTag`/`porAlvo`/`foraDaCarteira` (não influencia rendimento de alvo/tag), mas é somado ao total de `consolidado` (via SC-006: reservaEmergencia + Σ porTag + Σ foraDaCarteira + Σ pendentes == consolidado). |
 
 Nenhuma nova action de escrita nesta feature — `dadosRendimento` é 100% leitura, mesmo padrão de `dashboard`/`historico`.
