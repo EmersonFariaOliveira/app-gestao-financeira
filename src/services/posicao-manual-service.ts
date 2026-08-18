@@ -28,7 +28,14 @@ export interface CriarPosicaoManualInput {
   chaveManual: string;
   instituicao: string;
   descricao: string;
-  alvoId: string;
+  /**
+   * Opcional (mesma máquina de estados de `ativo_mapeado.alvo_id`, ver
+   * `vincularPosicaoManual` abaixo): quando omitido, a posição nasce
+   * "pendente" (`alvo_id = null`, `fora_da_carteira = false`,
+   * `reserva_emergencia = false`) — some fica de fora do cálculo de déficit
+   * até ser resolvida pela tela /vinculos, mesmo fluxo dos ativos do CSV.
+   */
+  alvoId?: string;
   valorInvestidoCentavos: number;
   valorAtualCentavos: number;
   /** Opcional (data-model.md): registra qual `chave_export` ignorada esta posição substitui. */
@@ -40,16 +47,21 @@ export interface PosicaoManualOutput {
   chaveManual: string;
   instituicao: string;
   descricao: string;
-  alvoId: string;
+  alvoId: string | null;
   tipoGrupo: string;
   ativo: boolean;
 }
 
+/**
+ * Campos cadastrais apenas — `alvo_id`/`fora_da_carteira`/`reserva_emergencia`
+ * NÃO são editáveis por aqui (mesmo padrão de `ativo_mapeado`, cujo `alvo_id`
+ * só muda via `mapeamento-service.vincularAtivo`): toda transição de estado
+ * de vínculo passa exclusivamente por `vincularPosicaoManual` abaixo.
+ */
 export interface EditarPosicaoManualInput {
   posicaoManualId: string;
   instituicao?: string;
   descricao?: string;
-  alvoId?: string;
 }
 
 export interface EncerrarPosicaoManualInput {
@@ -85,7 +97,7 @@ function paraOutput(posicaoManual: {
   chave_manual: string;
   instituicao: string;
   descricao: string;
-  alvo_id: string;
+  alvo_id: string | null;
   tipo_grupo: string;
   ativo: boolean;
 }): PosicaoManualOutput {
@@ -119,7 +131,7 @@ export async function criarPosicaoManual(
         chave_manual: input.chaveManual,
         instituicao: input.instituicao,
         descricao: input.descricao,
-        alvo_id: input.alvoId,
+        alvo_id: input.alvoId ?? null,
         chave_export_origem: input.chaveExportOrigem ?? null,
       },
     });
@@ -140,18 +152,19 @@ export async function criarPosicaoManual(
 }
 
 /**
- * Atualiza somente campos cadastrais (`instituicao`, `descricao`, `alvo_id`)
- * — nunca cria/altera `posicao_manual_valor` e nunca toca `chave_manual`
- * (imutável após criação, data-model.md #2). Parcial: campos não informados
- * permanecem como estavam.
+ * Atualiza somente campos cadastrais (`instituicao`, `descricao`) — nunca
+ * cria/altera `posicao_manual_valor`, nunca toca `chave_manual` (imutável
+ * após criação, data-model.md #2) e nunca toca `alvo_id`/`fora_da_carteira`/
+ * `reserva_emergencia` (ver `vincularPosicaoManual`, única forma de mudar
+ * esse estado — mesmo padrão de `ativo_mapeado`/`vincularAtivo`). Parcial:
+ * campos não informados permanecem como estavam.
  */
 export async function editarPosicaoManual(
   input: EditarPosicaoManualInput,
 ): Promise<PosicaoManualOutput> {
-  const data: { instituicao?: string; descricao?: string; alvo_id?: string } = {};
+  const data: { instituicao?: string; descricao?: string } = {};
   if (input.instituicao !== undefined) data.instituicao = input.instituicao;
   if (input.descricao !== undefined) data.descricao = input.descricao;
-  if (input.alvoId !== undefined) data.alvo_id = input.alvoId;
 
   const atualizada = await prisma.posicao_manual.update({
     where: { id: input.posicaoManualId },
@@ -176,6 +189,281 @@ export async function encerrarPosicaoManual(
   });
 
   return paraOutput(atualizada);
+}
+
+export type VincularPosicaoManualInput =
+  | { posicaoManualId: string; alvoId: string }
+  | { posicaoManualId: string; foraDaCarteira: true }
+  | { posicaoManualId: string; reservaEmergencia: true }
+  | { posicaoManualId: string; novoAlvo: { nome: string; percentualBps: number } };
+
+export interface VinculoPosicaoManualAtualizado {
+  posicaoManualId: string;
+  alvoId: string | null;
+  nomeAlvo: string | null;
+  foraDaCarteira: boolean;
+  reservaEmergencia: boolean;
+}
+
+/** Alvo vigente (vigencia_fim = null) por id, ou null se não existir/estiver fechado — mesmo critério de `mapeamento-service.obterAlvoVigentePorId`. */
+async function obterAlvoVigentePorId(alvoId: string) {
+  return prisma.alvo.findFirst({ where: { id: alvoId, vigencia_fim: null } });
+}
+
+/**
+ * Resolve o vínculo de uma `posicao_manual` nas quatro formas do contrato
+ * (mirror de `mapeamento-service.vincularAtivo`, mesma máquina de estados de
+ * `ativo_mapeado`: `alvo_id` preenchido, `fora_da_carteira = true` e
+ * `reserva_emergencia = true` são mutuamente exclusivos — toda escrita aqui
+ * zera explicitamente os lados opostos antes de setar um dos estados).
+ * Diferente de `vincularAtivo`, não usa `upsert`: `posicao_manual` sempre já
+ * existe (criada por `criarPosicaoManual`), então `update` simples é
+ * suficiente e falha alto (erro do Prisma) se o id não existir.
+ */
+export async function vincularPosicaoManual(
+  input: VincularPosicaoManualInput,
+): Promise<VinculoPosicaoManualAtualizado> {
+  if ("novoAlvo" in input) {
+    return vincularPosicaoManualNovoAlvo(input.posicaoManualId, input.novoAlvo);
+  }
+  if ("reservaEmergencia" in input && input.reservaEmergencia) {
+    return marcarPosicaoManualReservaEmergencia(input.posicaoManualId);
+  }
+  if ("alvoId" in input) {
+    return vincularPosicaoManualAlvoExistente(input.posicaoManualId, input.alvoId);
+  }
+  return marcarPosicaoManualForaDaCarteira(input.posicaoManualId);
+}
+
+/** Forma `{posicaoManualId, alvoId}` — vincula a um alvo EXISTENTE da vigência aberta. */
+async function vincularPosicaoManualAlvoExistente(
+  posicaoManualId: string,
+  alvoId: string,
+): Promise<VinculoPosicaoManualAtualizado> {
+  const alvo = await obterAlvoVigentePorId(alvoId);
+  if (!alvo) {
+    throw new Error(
+      `vincularPosicaoManual: alvo "${alvoId}" não encontrado na vigência aberta (vigencia_fim = null).`,
+    );
+  }
+
+  const posicaoManual = await prisma.posicao_manual.update({
+    where: { id: posicaoManualId },
+    data: { alvo_id: alvo.id, fora_da_carteira: false, reserva_emergencia: false },
+  });
+
+  return {
+    posicaoManualId: posicaoManual.id,
+    alvoId: alvo.id,
+    nomeAlvo: alvo.nome,
+    foraDaCarteira: false,
+    reservaEmergencia: false,
+  };
+}
+
+/** Forma `{posicaoManualId, foraDaCarteira: true}` — marca fora-da-carteira, zerando alvo_id e reserva_emergencia. */
+async function marcarPosicaoManualForaDaCarteira(
+  posicaoManualId: string,
+): Promise<VinculoPosicaoManualAtualizado> {
+  const posicaoManual = await prisma.posicao_manual.update({
+    where: { id: posicaoManualId },
+    data: { alvo_id: null, fora_da_carteira: true, reserva_emergencia: false },
+  });
+
+  return {
+    posicaoManualId: posicaoManual.id,
+    alvoId: null,
+    nomeAlvo: null,
+    foraDaCarteira: true,
+    reservaEmergencia: false,
+  };
+}
+
+/** Forma `{posicaoManualId, reservaEmergencia: true}` — marca reserva de emergência, zerando alvo_id e fora_da_carteira. */
+async function marcarPosicaoManualReservaEmergencia(
+  posicaoManualId: string,
+): Promise<VinculoPosicaoManualAtualizado> {
+  const posicaoManual = await prisma.posicao_manual.update({
+    where: { id: posicaoManualId },
+    data: { alvo_id: null, fora_da_carteira: false, reserva_emergencia: true },
+  });
+
+  return {
+    posicaoManualId: posicaoManual.id,
+    alvoId: null,
+    nomeAlvo: null,
+    foraDaCarteira: false,
+    reservaEmergencia: true,
+  };
+}
+
+/**
+ * Forma `{posicaoManualId, novoAlvo: {nome, percentualBps}}` — cria um alvo
+ * novo na vigência aberta atual e vincula a posição manual a ele na MESMA
+ * transação (mirror de `mapeamento-service.vincularNovoAlvo`).
+ */
+async function vincularPosicaoManualNovoAlvo(
+  posicaoManualId: string,
+  novoAlvo: { nome: string; percentualBps: number },
+): Promise<VinculoPosicaoManualAtualizado> {
+  return prisma.$transaction(async (tx) => {
+    const alvo = await tx.alvo.create({
+      data: {
+        nome: novoAlvo.nome,
+        percentual_alvo_bps: novoAlvo.percentualBps,
+        vigencia_inicio: new Date(),
+        vigencia_fim: null,
+      },
+    });
+
+    const posicaoManual = await tx.posicao_manual.update({
+      where: { id: posicaoManualId },
+      data: { alvo_id: alvo.id, fora_da_carteira: false, reserva_emergencia: false },
+    });
+
+    return {
+      posicaoManualId: posicaoManual.id,
+      alvoId: alvo.id,
+      nomeAlvo: alvo.nome,
+      foraDaCarteira: false,
+      reservaEmergencia: false,
+    };
+  });
+}
+
+export interface PosicaoManualParaVinculo {
+  posicaoManualId: string;
+  chaveManual: string;
+  descricao: string;
+  instituicao: string;
+  alvoId: string | null;
+  nomeAlvo: string | null;
+  /** Último snapshot conhecido (qualquer sessão) — `null` se a posição nunca teve `posicao_manual_valor`. */
+  valorAtualCentavos: number | null;
+}
+
+export interface ListarPosicoesManuaisParaVinculoOutput {
+  pendentes: PosicaoManualParaVinculo[];
+  vinculadas: PosicaoManualParaVinculo[];
+  foraDaCarteira: PosicaoManualParaVinculo[];
+  reservaEmergencia: PosicaoManualParaVinculo[];
+}
+
+/**
+ * Estado completo de `posicao_manual` ATIVA (mirror de
+ * `mapeamento-service.listarVinculos`), agrupado nos quatro baldes da tela
+ * /vinculos — mesma máquina de estados de `ativo_mapeado`. Posições
+ * encerradas (`ativo = false`) somem, mesmo padrão de
+ * `listarPosicoesManuaisAtivas`. Reaproveita a mesma query de "último
+ * snapshot conhecido" que `listarPosicoesManuaisAtivas` já faz.
+ */
+export async function listarPosicoesManuaisParaVinculo(): Promise<ListarPosicoesManuaisParaVinculoOutput> {
+  const posicoes = await prisma.posicao_manual.findMany({
+    where: { ativo: true },
+    include: { alvo: true },
+    orderBy: { criado_em: "desc" },
+  });
+
+  const pendentes: PosicaoManualParaVinculo[] = [];
+  const vinculadas: PosicaoManualParaVinculo[] = [];
+  const foraDaCarteira: PosicaoManualParaVinculo[] = [];
+  const reservaEmergencia: PosicaoManualParaVinculo[] = [];
+
+  if (posicoes.length === 0) {
+    return { pendentes, vinculadas, foraDaCarteira, reservaEmergencia };
+  }
+
+  const snapshots = await prisma.posicao_manual_valor.findMany({
+    where: { posicao_manual_id: { in: posicoes.map((p) => p.id) } },
+    orderBy: { criado_em: "desc" },
+  });
+
+  const ultimoSnapshotPorPosicao = new Map<string, { valor_atual_centavos: number }>();
+  for (const snapshot of snapshots) {
+    if (!ultimoSnapshotPorPosicao.has(snapshot.posicao_manual_id)) {
+      ultimoSnapshotPorPosicao.set(snapshot.posicao_manual_id, snapshot);
+    }
+  }
+
+  for (const posicaoManual of posicoes) {
+    const item: PosicaoManualParaVinculo = {
+      posicaoManualId: posicaoManual.id,
+      chaveManual: posicaoManual.chave_manual,
+      descricao: posicaoManual.descricao,
+      instituicao: posicaoManual.instituicao,
+      alvoId: posicaoManual.alvo_id,
+      nomeAlvo: posicaoManual.alvo?.nome ?? null,
+      valorAtualCentavos: ultimoSnapshotPorPosicao.get(posicaoManual.id)?.valor_atual_centavos ?? null,
+    };
+
+    if (posicaoManual.reserva_emergencia) {
+      reservaEmergencia.push(item);
+    } else if (posicaoManual.fora_da_carteira) {
+      foraDaCarteira.push(item);
+    } else if (posicaoManual.alvo_id !== null) {
+      vinculadas.push(item);
+    } else {
+      pendentes.push(item);
+    }
+  }
+
+  return { pendentes, vinculadas, foraDaCarteira, reservaEmergencia };
+}
+
+export interface AtualizarValoresPosicaoManualInput {
+  posicaoManualId: string;
+  valorInvestidoCentavos: number;
+  valorAtualCentavos: number;
+}
+
+export interface PosicaoManualValorOutput {
+  posicaoManualId: string;
+  valorInvestidoCentavos: number;
+  valorAtualCentavos: number;
+}
+
+/**
+ * Cria ou atualiza (upsert) o `posicao_manual_valor` da sessão VIGENTE mais
+ * recente para uma `posicao_manual` (mirror exato de `criarOuAtualizarAjuste`
+ * — mesmo padrão de upsert-na-sessão-vigente). Fail loud (mesma mensagem já
+ * usada nas outras funções deste arquivo) sem sessão VIGENTE.
+ *
+ * Upsert por `(posicao_manual_id, sessao_import_id)` (`@@unique` no schema):
+ * chamadas repetidas na MESMA sessão vigente atualizam a linha existente —
+ * nunca duplicam.
+ */
+export async function atualizarValoresPosicaoManual(
+  input: AtualizarValoresPosicaoManualInput,
+): Promise<PosicaoManualValorOutput> {
+  const sessao = await obterSessaoVigenteMaisRecente();
+  if (!sessao) {
+    throw new Error(MENSAGEM_SEM_SESSAO_VIGENTE);
+  }
+
+  const valor = await prisma.posicao_manual_valor.upsert({
+    where: {
+      posicao_manual_id_sessao_import_id: {
+        posicao_manual_id: input.posicaoManualId,
+        sessao_import_id: sessao.id,
+      },
+    },
+    create: {
+      posicao_manual_id: input.posicaoManualId,
+      sessao_import_id: sessao.id,
+      valor_investido_centavos: input.valorInvestidoCentavos,
+      valor_atual_centavos: input.valorAtualCentavos,
+    },
+    update: {
+      valor_investido_centavos: input.valorInvestidoCentavos,
+      valor_atual_centavos: input.valorAtualCentavos,
+    },
+  });
+
+  return {
+    posicaoManualId: valor.posicao_manual_id,
+    valorInvestidoCentavos: valor.valor_investido_centavos,
+    valorAtualCentavos: valor.valor_atual_centavos,
+  };
 }
 
 /**
@@ -287,7 +575,8 @@ export async function listarAjustesAtivos(): Promise<AjusteAtivoListItem[]> {
 }
 
 export interface PosicaoManualListItem extends PosicaoManualOutput {
-  nomeAlvo: string;
+  /** `null` quando pendente/fora-da-carteira/reserva-de-emergência (`alvo_id = null`). */
+  nomeAlvo: string | null;
   /** Último snapshot conhecido (qualquer sessão) — `null` se a posição nunca teve `posicao_manual_valor` (sem sessão VIGENTE no cadastro). */
   valorInvestidoCentavos: number | null;
   valorAtualCentavos: number | null;
@@ -329,7 +618,7 @@ export async function listarPosicoesManuaisAtivas(): Promise<PosicaoManualListIt
     const snapshot = ultimoSnapshotPorPosicao.get(posicaoManual.id);
     return {
       ...paraOutput(posicaoManual),
-      nomeAlvo: posicaoManual.alvo?.nome ?? posicaoManual.alvo_id,
+      nomeAlvo: posicaoManual.alvo?.nome ?? null,
       valorInvestidoCentavos: snapshot?.valor_investido_centavos ?? null,
       valorAtualCentavos: snapshot?.valor_atual_centavos ?? null,
     };
@@ -341,8 +630,10 @@ export interface PosicaoManualRevisaoItem {
   chaveManual: string;
   instituicao: string;
   descricao: string;
-  alvoId: string;
-  nomeAlvo: string;
+  /** `null` quando pendente/fora-da-carteira/reserva-de-emergência (`alvo_id = null`). */
+  alvoId: string | null;
+  /** `null` quando pendente/fora-da-carteira/reserva-de-emergência (`alvo_id = null`). */
+  nomeAlvo: string | null;
   /** 0 se não houver `posicao_manual_valor` anterior conhecido (posição nova, sem carry-forward). */
   valorInvestidoCentavosAnterior: number;
   /**
@@ -471,7 +762,7 @@ export async function montarRevisaoImport(): Promise<RevisaoImportOutput> {
         instituicao: posicaoManual.instituicao,
         descricao: posicaoManual.descricao,
         alvoId: posicaoManual.alvo_id,
-        nomeAlvo: posicaoManual.alvo?.nome ?? posicaoManual.alvo_id,
+        nomeAlvo: posicaoManual.alvo?.nome ?? null,
         valorInvestidoCentavosAnterior,
         incrementoPendenteCentavos,
         valorInvestidoCentavosSugerido: valorInvestidoCentavosAnterior + incrementoPendenteCentavos,
@@ -676,9 +967,14 @@ export async function montarIncrementosAmbiguosPendentes(): Promise<IncrementoAm
 
   const posicoesManuaisPorAlvoId = new Map<string, typeof posicoesManuaisElegiveis>();
   for (const posicaoManual of posicoesManuaisElegiveis) {
-    const lista = posicoesManuaisPorAlvoId.get(posicaoManual.alvo_id) ?? [];
+    // alvo_id nunca é null aqui: a query acima filtra `alvo_id: { in: alvoIds }`
+    // (só ids concretos) — o tipo `string | null` do schema (pendente
+    // "posicao_manual_pendente") não reflete essa garantia em tempo de
+    // compilação.
+    const alvoId = posicaoManual.alvo_id as string;
+    const lista = posicoesManuaisPorAlvoId.get(alvoId) ?? [];
     lista.push(posicaoManual);
-    posicoesManuaisPorAlvoId.set(posicaoManual.alvo_id, lista);
+    posicoesManuaisPorAlvoId.set(alvoId, lista);
   }
   const ajustesElegiveisPorAlvoId = new Map<string, typeof ativosMapeadosDoAlvo>();
   for (const ativoMapeado of ativosMapeadosDoAlvo) {

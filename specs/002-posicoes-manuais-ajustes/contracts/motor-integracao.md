@@ -89,16 +89,39 @@ snapshots = prisma.posicao_manual_valor.findMany({
 })
 ```
 
-Para cada `posicao_manual` ativa com snapshot na sessão vigente:
+> **Atualização (decisão de produto pós-implementação inicial):** `posicao_manual`
+> deixou de exigir `alvo_id` na criação — ela agora tem exatamente a MESMA máquina de
+> estados que `ativo_mapeado` já tem: `alvo_id: string | null` (null = pendente de
+> vínculo, resolvido em `/vinculos`), mais `fora_da_carteira: boolean` e
+> `reserva_emergencia: boolean`, mutuamente exclusivos com `alvo_id` preenchido (mesma
+> invariante de `ativo_mapeado`, validada na camada de aplicação). O trecho abaixo
+> (`alvoId: posicaoManual.alvo_id, // nunca null`) descrevia o design original — não é
+> mais verdade; a versão corrigida é a que segue.
+
+Para cada `posicao_manual` ativa com snapshot na sessão vigente, `montarContextoEntradaMotor`
+espelha EXATAMENTE o tratamento que já dá a `ativo_mapeado` (bloco do CSV, alguns
+parágrafos acima):
 
 ```ts
+// reserva_emergencia: EXCLUÍDA inteiramente de posicoes[] — mesmo padrão do bloco
+// CSV (`if (mapeamento?.reserva_emergencia) continue;`). Checagem de colisão de
+// identidade (abaixo) roda ANTES deste continue — mesmo posição manual pendente/
+// fora-da-carteira/reserva precisa ser validada quanto à colisão.
+if (posicaoManual.reserva_emergencia) continue;
+
 posicoes.push({
   chaveExport: posicaoManual.chave_manual,       // identificador análogo, não é chave_export do CSV
-  alvoId: posicaoManual.alvo_id,                 // nunca null (Assumption spec.md: 1 alvo obrigatório)
-  foraDaCarteira: false,                         // posição manual nunca é "fora da carteira"
+  alvoId: posicaoManual.alvo_id,                 // agora pode ser null (pendente de vínculo)
+  foraDaCarteira: posicaoManual.fora_da_carteira,// agora reflete o campo real, não mais fixo `false`
   valorCentavos: snapshot.valor_atual_centavos,  // NUNCA valor_investido — regra 5.2/FR-006
   tipoGrupo: "RENDA_FIXA_MANUAL",                // fixo, seção 4.1
 });
+
+// Mesmo `if (!alvoId || foraDaCarteira) continue;` do bloco CSV: posição
+// pendente ou fora da carteira entra em posicoes[] mas não participa da
+// agregação de tipos/cotação por alvo (regra 4) — sem isso, tiposGrupoPorAlvoId
+// quebraria de tipo com alvo_id null.
+if (!posicaoManual.alvo_id || posicaoManual.fora_da_carteira) continue;
 ```
 
 Notas:
@@ -107,6 +130,24 @@ Notas:
   do snapshot — `valor_investido_centavos` nunca é lido por `montarContextoEntradaMotor`
   para fins de `PosicaoConsolidada` (é lido separadamente, só para exibição/histórico,
   em outro serviço fora deste contrato).
+- **Posição manual PENDENTE bloqueia a calculadora (FR-015), mesmo tratamento que
+  `ativo_mapeado` pendente já recebe.** Uma `posicao_manual` ativa com `alvo_id = null
+  AND fora_da_carteira = false AND reserva_emergencia = false` é uma pendência de
+  vínculo — listada por uma função irmã de `listarPendenciasDaSessao`
+  (`listarPendenciasPosicoesManuais`, em `aporte-service.ts`), identificada por
+  `chave_manual` na mesma lista de strings de pendência que já usa `chave_export`.
+  Diferente das pendências de CSV (que dependem de uma sessão de import ter trazido
+  a `chave_export`), a pendência de `posicao_manual` é **independente de sessão**
+  (`posicao_manual` não é filha de `sessao_import`) — `listarPendencias()` retorna
+  pendências de posição manual mesmo quando não há sessão VIGENTE nenhuma.
+- **`fora_da_carteira = true` entra em `posicoes[]` mas nunca no déficit** — mesmo
+  tratamento de `ativo_mapeado.fora_da_carteira` (regra 4): excluída de
+  `patrimonioBaseCentavos` e da fila, mas ainda sujeita à checagem de colisão de
+  identidade (não é "invisível" ao sistema, só não participa dos percentuais).
+- **`reserva_emergencia = true` é EXCLUÍDA inteiramente de `posicoes[]`** — mesmo
+  tratamento de `ativo_mapeado.reserva_emergencia`: nem entra na base do motor, nem
+  na fila, nem bloqueia a calculadora (é um estado RESOLVIDO, análogo a
+  `fora_da_carteira`, não uma pendência).
 - **`RENDA_FIXA_MANUAL` na heurística `rendaFixa`.** `GRUPOS_NAO_RENDA_FIXA` (hoje
   `{ACOES, FII_FIAGRO, ETF, EXTERIOR}`) já trata qualquer tipo fora dessa lista como
   renda-fixa-like — `RENDA_FIXA_MANUAL` cai nesse "qualquer outro" sem precisar de

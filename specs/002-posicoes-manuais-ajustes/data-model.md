@@ -31,12 +31,23 @@ Identidade memorizada de um ativo que não vem (ou não deve vir) corretamente d
 | id | String @id | cuid |
 | chave_manual | String @unique | definida pelo usuário, ex.: `"CDB-ITAU-2029"`; imutável após criação — trocar a chave é cadastrar uma posição manual nova |
 | instituicao | String | obrigatório |
-| alvo_id | String (FK → alvo) | obrigatório — toda posição manual tem exatamente um alvo (Assumption do spec.md); referencia o alvo *conceitual*, mesmo padrão de `ativo_mapeado.alvo_id` ao versionar a carteira (seção 6.4) |
+| alvo_id | String? (FK → alvo) | opcional — ver "Estado de vínculo" abaixo; quando preenchido referencia o alvo *conceitual*, mesmo padrão de `ativo_mapeado.alvo_id` ao versionar a carteira (seção 6.4) |
 | descricao | String | obrigatório; ex.: `"CDB Itaú 120% CDI 2029"` |
 | tipo_grupo | String | default `"RENDA_FIXA_MANUAL"` — string livre (sem enum), como `posicao.tipo_grupo`; não entra no arredondamento por lote (regra 7 do motor) |
 | chave_export_origem | String? (FK → ativo_mapeado.chave_export) | opcional; registra qual `chave_export` marcado `ignorar_no_import` esta posição substitui — fecha a pendência "ativo ignorado sem posição manual associada" (edge case do spec.md). `null` quando a posição foi cadastrada sem CSV de origem (ex.: CDB que nunca apareceu no export) |
+| fora_da_carteira | Boolean | default `false` — ver "Estado de vínculo" abaixo |
+| reserva_emergencia | Boolean | default `false` — ver "Estado de vínculo" abaixo |
 | ativo | Boolean | default `true`; `false` = encerrada (FR-004) — some do carry-forward e do cálculo de déficit, histórico preservado; transição unidirecional, sem reativação (Assumption do spec.md) |
 | criado_em | DateTime | — |
+
+**Estado de vínculo (mesma máquina de estados de `ativo_mapeado`, ver "Alteração necessária em entidade existente" acima e o invariante já documentado para ela).** Uma posição manual pode nascer sem alvo definido — "pendente" — e ser resolvida pela **mesma tela de vínculos (/vinculos, seção 6.3)** usada para ativos do CSV, não uma tela separada. Os três campos `alvo_id`, `fora_da_carteira` e `reserva_emergencia` são **mutuamente exclusivos** (validado na aplicação, sem CHECK — mesmo padrão de `ativo_mapeado` hoje, que também não tem CHECK para essa exclusão):
+
+- `alvo_id` preenchido, `fora_da_carteira = false`, `reserva_emergencia = false` → **vinculada** a um alvo da carteira.
+- `alvo_id = null`, `fora_da_carteira = true`, `reserva_emergencia = false` → **fora da carteira**, balde isolado (mesmo tratamento de `ativo_mapeado.fora_da_carteira`).
+- `alvo_id = null`, `fora_da_carteira = false`, `reserva_emergencia = true` → **reserva de emergência**, balde isolado próprio (mesmo tratamento de `ativo_mapeado.reserva_emergencia`).
+- `alvo_id = null`, `fora_da_carteira = false`, `reserva_emergencia = false` → **pendente**, bloqueia o cálculo de déficit (mesma regra de `ativo_mapeado` pendente).
+
+Uma posição manual **pendente, fora-da-carteira ou reserva-de-emergência é excluída do cálculo de déficit** — regra aplicada em `aporte-service.ts` (fora do escopo deste documento/desta camada de dados), espelhando exatamente a mesma exclusão já aplicada a `ativo_mapeado` nesses estados. Toda transição de estado é feita por `posicao-manual-service.vincularPosicaoManual` (mirror de `mapeamento-service.vincularAtivo`) — nunca pelo `update` cadastral genérico (`editarPosicaoManual`), que só toca `instituicao`/`descricao`.
 
 **Decisão de design (além do diagrama conceitual da seção 4.1):** o diagrama do doc não tem `chave_export_origem`. Adiciono este campo para resolver de forma auditável o edge case "pendência de cadastro visível até criar a posição manual" — sem ele não haveria como o app saber, de forma consultável, quais `ignorar_no_import` já têm posição manual associada. Campo opcional e sem impacto em cálculo; puramente para rastreabilidade/alertas de UI.
 
@@ -132,7 +143,7 @@ elegíveis =
 ## Relações (resumo)
 
 ```
-alvo 1 ── N posicao_manual                        (alvo_id, obrigatório)
+alvo 1 ── N posicao_manual                        (alvo_id, nullable — "pendente" quando null)
 alvo 1 ── N incremento_valor_investido_pendente    (alvo_id, obrigatório)
 
 posicao_manual 1 ── N posicao_manual_valor          (snapshot por sessão)
@@ -152,8 +163,8 @@ aporte  1 ── N incremento_valor_investido_pendente  (aporte_id, proveniênci
 ## Regras de integridade transversais
 
 1. **Nenhum `DELETE`** em `posicao_manual_valor` ou `ajuste_valor_investido` após a sessão ser confirmada — mesmo padrão de `posicao` (feature 001). **Nenhum `UPDATE`** nessas linhas após confirmação; qualquer correção posterior nasce como snapshot novo na próxima sessão.
-2. `posicao_manual` admite `UPDATE` em `instituicao`, `descricao`, `alvo_id` (re-vínculo) e `ativo` (somente `true → false`, irreversível). `chave_manual` é imutável após criação.
-3. `ativo_mapeado.ignorar_no_import = true` e `ativo_mapeado.fora_da_carteira = true` são mutuamente exclusivos (validado na aplicação, mesmo padrão do invariante de estados já existente para `alvo_id`/`fora_da_carteira` em 001).
+2. `posicao_manual` admite `UPDATE` em `instituicao`, `descricao` (via `editarPosicaoManual`), em `alvo_id`/`fora_da_carteira`/`reserva_emergencia` (re-vínculo, exclusivamente via `vincularPosicaoManual` — nunca pelo `update` cadastral genérico) e em `ativo` (somente `true → false`, irreversível). `chave_manual` é imutável após criação.
+3. `ativo_mapeado.ignorar_no_import = true` e `ativo_mapeado.fora_da_carteira = true` são mutuamente exclusivos (validado na aplicação, mesmo padrão do invariante de estados já existente para `alvo_id`/`fora_da_carteira` em 001). `posicao_manual.alvo_id`/`fora_da_carteira`/`reserva_emergencia` seguem o mesmo invariante de exclusão mútua (ver "Estado de vínculo" na entidade `posicao_manual` acima).
 4. `incremento_valor_investido_pendente` é a única entidade desta feature que sofre `UPDATE` depois de criada (transição `aplicado: false → true` + `sessao_aplicacao_id`), porque é fila de trabalho, não snapshot histórico — nunca `DELETE`.
 5. Transação de confirmação de import (estende o item 2 das regras transversais de 001): backup do `.db` **antes**, fora da transação → cria `sessao_import` + `posicao[]` + `ativo_mapeado` pendentes → cria `posicao_manual_valor[]` e `ajuste_valor_investido[]` da revisão → marca `incremento_valor_investido_pendente` consumidos como aplicados → marca sessão anterior do mesmo `mes_referencia` como `SUBSTITUIDO`. Tudo atômico.
 6. `valor_investido_centavos` (`posicao_manual_valor`) e `valor_investido_corrigido_centavos` (`ajuste_valor_investido`) **nunca** são lidos pelo motor de aporte — nenhuma consulta de cálculo de déficit deve fazer `JOIN` nesses campos (FR-006/SC-004). Apenas `valor_atual_centavos` de `posicao_manual_valor` entra na base de cálculo, como `posicao.patrimonio_hoje_centavos`.

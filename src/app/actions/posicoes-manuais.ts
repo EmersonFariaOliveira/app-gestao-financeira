@@ -22,20 +22,28 @@
  * revisão de import) NÃO faz parte desta task — fica para a fase 5.
  */
 import {
+  atualizarValoresPosicaoManual as atualizarValoresPosicaoManualService,
   criarOuAtualizarAjuste as criarOuAtualizarAjusteService,
   criarPosicaoManual as criarPosicaoManualService,
   editarPosicaoManual as editarPosicaoManualService,
   encerrarPosicaoManual as encerrarPosicaoManualService,
   listarAjustesAtivos as listarAjustesAtivosService,
   listarPosicoesManuaisAtivas as listarPosicoesManuaisAtivasService,
+  listarPosicoesManuaisParaVinculo as listarPosicoesManuaisParaVinculoService,
+  vincularPosicaoManual as vincularPosicaoManualService,
   type AjusteAtivoListItem,
   type AjusteValorInvestidoOutput,
+  type AtualizarValoresPosicaoManualInput,
   type CriarOuAtualizarAjusteInput,
   type CriarPosicaoManualInput,
   type EditarPosicaoManualInput,
   type EncerrarPosicaoManualInput,
+  type ListarPosicoesManuaisParaVinculoOutput,
   type PosicaoManualListItem,
   type PosicaoManualOutput,
+  type PosicaoManualValorOutput,
+  type VincularPosicaoManualInput,
+  type VinculoPosicaoManualAtualizado,
 } from "@/services/posicao-manual-service";
 
 export type ActionResult<T> =
@@ -76,8 +84,8 @@ export async function criarPosicaoManual(
   if (typeof input.descricao !== "string" || !input.descricao.trim()) {
     return { ok: false, erro: "descricao é obrigatória." };
   }
-  if (typeof input.alvoId !== "string" || !input.alvoId.trim()) {
-    return { ok: false, erro: "alvoId é obrigatório." };
+  if (input.alvoId !== undefined && (typeof input.alvoId !== "string" || !input.alvoId.trim())) {
+    return { ok: false, erro: "alvoId, se informado, não pode ser vazio." };
   }
   if (!ehCentavosValido(input.valorInvestidoCentavos)) {
     return { ok: false, erro: "valorInvestidoCentavos deve ser um inteiro em centavos ≥ 0." };
@@ -112,9 +120,6 @@ export async function editarPosicaoManual(
   }
   if (input.descricao !== undefined && (typeof input.descricao !== "string" || !input.descricao.trim())) {
     return { ok: false, erro: "descricao, se informada, não pode ser vazia." };
-  }
-  if (input.alvoId !== undefined && (typeof input.alvoId !== "string" || !input.alvoId.trim())) {
-    return { ok: false, erro: "alvoId, se informado, não pode ser vazio." };
   }
 
   try {
@@ -194,6 +199,91 @@ export async function criarOuAtualizarAjuste(
 export async function listarAjustesAtivos(): Promise<ActionResult<AjusteAtivoListItem[]>> {
   try {
     const data = await listarAjustesAtivosService();
+    return { ok: true, data };
+  } catch (erro) {
+    return { ok: false, erro: mensagemDeErro(erro) };
+  }
+}
+
+/**
+ * Leitura dos quatro baldes (pendentes/vinculadas/foraDaCarteira/
+ * reservaEmergencia) de posições manuais, para a tela /vinculos unificar
+ * com `listarVinculos` (mesmo layout, mesma máquina de estados de
+ * `ativo_mapeado` — ver relatório do desenvolvedor-ui desta task).
+ */
+export async function listarPosicoesManuaisParaVinculo(): Promise<
+  ActionResult<ListarPosicoesManuaisParaVinculoOutput>
+> {
+  try {
+    const data = await listarPosicoesManuaisParaVinculoService();
+    return { ok: true, data };
+  } catch (erro) {
+    return { ok: false, erro: mensagemDeErro(erro) };
+  }
+}
+
+/**
+ * Resolve o vínculo de uma `posicao_manual` (mesmo contrato de union
+ * discriminada de `vincularAtivo`/`vinculos.ts`, mas com 4 formas — sem
+ * "ignorar", que é conceito exclusivo de `ativo_mapeado`/CSV e não se aplica
+ * a uma posição manual).
+ */
+export async function vincularPosicaoManual(
+  input: VincularPosicaoManualInput,
+): Promise<ActionResult<VinculoPosicaoManualAtualizado>> {
+  if (!input || typeof input.posicaoManualId !== "string" || !input.posicaoManualId.trim()) {
+    return { ok: false, erro: "posicaoManualId é obrigatório." };
+  }
+
+  if ("novoAlvo" in input) {
+    if (!input.novoAlvo || typeof input.novoAlvo.nome !== "string" || !input.novoAlvo.nome.trim()) {
+      return { ok: false, erro: "Informe o nome do novo alvo." };
+    }
+    if (
+      !Number.isInteger(input.novoAlvo.percentualBps) ||
+      !(input.novoAlvo.percentualBps > 0)
+    ) {
+      return { ok: false, erro: "Percentual do novo alvo deve ser um inteiro positivo (bps)." };
+    }
+  } else if ("alvoId" in input) {
+    if (typeof input.alvoId !== "string" || !input.alvoId.trim()) {
+      return { ok: false, erro: "alvoId é obrigatório para vincular a um alvo existente." };
+    }
+  } else if ("foraDaCarteira" in input) {
+    if (input.foraDaCarteira !== true) {
+      return { ok: false, erro: "Input inválido: informe alvoId, novoAlvo, foraDaCarteira ou reservaEmergencia." };
+    }
+  } else if (!("reservaEmergencia" in input) || input.reservaEmergencia !== true) {
+    return { ok: false, erro: "Input inválido: informe alvoId, novoAlvo, foraDaCarteira ou reservaEmergencia." };
+  }
+
+  try {
+    const data = await vincularPosicaoManualService(input);
+    return { ok: true, data };
+  } catch (erro) {
+    return { ok: false, erro: mensagemDeErro(erro) };
+  }
+}
+
+/**
+ * Atualiza os valores (investido/atual) de uma `posicao_manual` na sessão
+ * VIGENTE mais recente — usado pelo diálogo "Editar" da tela /posicoes-manuais.
+ */
+export async function atualizarValoresPosicaoManual(
+  input: AtualizarValoresPosicaoManualInput,
+): Promise<ActionResult<PosicaoManualValorOutput>> {
+  if (!input || typeof input.posicaoManualId !== "string" || !input.posicaoManualId.trim()) {
+    return { ok: false, erro: "posicaoManualId é obrigatório." };
+  }
+  if (!ehCentavosValido(input.valorInvestidoCentavos)) {
+    return { ok: false, erro: "valorInvestidoCentavos deve ser um inteiro em centavos ≥ 0." };
+  }
+  if (!ehCentavosValido(input.valorAtualCentavos)) {
+    return { ok: false, erro: "valorAtualCentavos deve ser um inteiro em centavos ≥ 0." };
+  }
+
+  try {
+    const data = await atualizarValoresPosicaoManualService(input);
     return { ok: true, data };
   } catch (erro) {
     return { ok: false, erro: mensagemDeErro(erro) };

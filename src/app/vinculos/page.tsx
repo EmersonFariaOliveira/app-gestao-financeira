@@ -7,16 +7,37 @@
  * Regras de camada (CLAUDE.md): esta página NUNCA acessa o banco nem
  * reimplementa a regra de exclusão mútua alvo/fora-da-carteira — ela apenas
  * chama `src/app/actions/vinculos.ts` (que delega a
- * `src/services/mapeamento-service.ts`/`alvo-service.ts`) e exibe o
- * resultado.
+ * `src/services/mapeamento-service.ts`/`alvo-service.ts`) e
+ * `src/app/actions/posicoes-manuais.ts` (que delega a
+ * `src/services/posicao-manual-service.ts`) e exibe o resultado.
+ *
+ * Unificação (extensão da feature 002-posicoes-manuais-ajustes): posições
+ * manuais cadastradas em "+ Nova posição manual" passam pela MESMA máquina
+ * de estados pendente → vinculado/fora-da-carteira/reserva-de-emergência que
+ * os ativos do CSV — misturadas nas MESMAS seções desta tela (não uma seção
+ * separada), com uma marcação visual simples ("Manual") para diferenciar a
+ * origem. `chaveExport` (espaço de identidade do CSV) e `posicaoManualId`
+ * (espaço de identidade das posições manuais) nunca colidem por construção,
+ * mas os `Record<string, ...>` de estado por linha (`formsPendentes`,
+ * `reatribuirAlvoId`) são chaveados com prefixo (`csv:`/`manual:`) para
+ * deixar essa distinção explícita e evitar qualquer colisão acidental caso
+ * os dois espaços um dia compartilhem o mesmo texto.
+ *
+ * Posições manuais NÃO têm um modo "ignorar" (exclusivo de
+ * `ativo_mapeado`/CSV — marca que um ativo do CSV foi substituído por uma
+ * posição manual; não se aplica a uma posição manual em si, que já É a
+ * substituição) nem um botão "Encerrar" aqui (ação irreversível, exclusiva
+ * da tela /posicoes-manuais, para não duplicar o diálogo de confirmação em
+ * dois lugares).
  *
  * Conteúdo (seção 6.3):
- * 1. Pendentes em destaque — chave do export → dropdown de alvo existente,
- *    criar alvo novo na hora, ou marcar "Fora da carteira alvo". É o que
- *    bloqueia a calculadora (FR-015/seção 6.5).
- * 2. Vinculados e Fora-da-carteira, também nesta tela, para revisão/
- *    correção (a tela serve tanto para resolver pendências quanto para
- *    editar vínculos existentes).
+ * 1. Pendentes em destaque — chave do export/posição manual → dropdown de
+ *    alvo existente, criar alvo novo na hora, ou marcar "Fora da carteira
+ *    alvo"/"Reserva de emergência". É o que bloqueia a calculadora (FR-015/
+ *    seção 6.5).
+ * 2. Vinculados, Fora-da-carteira e Reserva de emergência, também nesta
+ *    tela, para revisão/correção (a tela serve tanto para resolver
+ *    pendências quanto para editar vínculos existentes).
  *
  * Percentual do alvo novo: o campo aceita o mesmo formato decimal usado em
  * toda a UI ("12,5" = 12,5%). Como `percentual_alvo_bps` já usa a mesma
@@ -29,6 +50,10 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
+import {
+  listarPosicoesManuaisParaVinculo,
+  vincularPosicaoManual,
+} from "@/app/actions/posicoes-manuais";
 import {
   listarAlvosParaDropdown,
   listarVinculos,
@@ -57,13 +82,20 @@ import {
 import { formatBps, formatCentavosParaReais, parseDecimalParaCentavos } from "@/core/money";
 import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { ListarVinculosOutput, VincularAtivoInput } from "@/services/mapeamento-service";
+import type {
+  ListarPosicoesManuaisParaVinculoOutput,
+  VincularPosicaoManualInput,
+} from "@/services/posicao-manual-service";
 
 type Fase = "carregando" | "erro" | "pronto";
+type Origem = "csv" | "manual";
 
 // "ignorar-existente"/"ignorar-novo" (feature 002, FR-001): mesma escolha de
 // alvo dos modos "existente"/"novo" (reaproveitam os campos do form), só que
 // gravam `ignorarNoImport: true` — o ativo some da consolidação do CSV
-// porque será substituído por uma posição manual.
+// porque será substituído por uma posição manual. Exclusivos de linhas CSV —
+// posições manuais nunca oferecem esses dois modos (ver cabeçalho do
+// arquivo).
 type ModoResolucao =
   | "existente"
   | "novo"
@@ -77,6 +109,23 @@ type ModoResolucao =
 // duplicar a explicação.
 const AVISO_IGNORAR =
   'Este valor deixa de ser lido do export em imports futuros. Cadastre a posição manual correspondente em seguida, na tela "Posições manuais".';
+
+/** Badge inline para marcar visualmente uma linha como posição manual (não ativo do CSV). */
+function BadgeManual() {
+  return (
+    <span className="ml-1 inline-flex items-center rounded border border-sky-400/60 bg-sky-400/10 px-1 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-700 dark:text-sky-300">
+      Manual
+    </span>
+  );
+}
+
+/** Prefixo de chave de estado por linha, para separar os dois espaços de identidade (CSV vs. posição manual). */
+function chaveCsv(chaveExport: string): string {
+  return `csv:${chaveExport}`;
+}
+function chaveManualKey(posicaoManualId: string): string {
+  return `manual:${posicaoManualId}`;
+}
 
 interface FormPendente {
   modo: ModoResolucao;
@@ -94,10 +143,26 @@ function formInicial(alvos: AlvoParaDropdown[]): FormPendente {
   };
 }
 
+/** Linha unificada CSV + posição manual para as seções Vinculados/Fora da carteira/Reserva de emergência. */
+interface LinhaSemAlvo {
+  key: string;
+  rawId: string;
+  origem: Origem;
+  rotulo: string;
+  valorAtualCentavos: number | null;
+}
+
+interface LinhaVinculada extends LinhaSemAlvo {
+  alvoId: string;
+  nomeAlvo: string;
+}
+
 export default function VinculosPage() {
   const [fase, setFase] = useState<Fase>("carregando");
   const [erro, setErro] = useState<string | null>(null);
   const [vinculos, setVinculos] = useState<ListarVinculosOutput | null>(null);
+  const [posicoesManuais, setPosicoesManuais] =
+    useState<ListarPosicoesManuaisParaVinculoOutput | null>(null);
   const [alvos, setAlvos] = useState<AlvoParaDropdown[]>([]);
 
   const [formsPendentes, setFormsPendentes] = useState<Record<string, FormPendente>>({});
@@ -107,9 +172,10 @@ export default function VinculosPage() {
   const [reatribuirAlvoId, setReatribuirAlvoId] = useState<Record<string, string>>({});
 
   const carregar = useCallback(async () => {
-    const [respVinculos, respAlvos] = await Promise.all([
+    const [respVinculos, respAlvos, respPosicoesManuais] = await Promise.all([
       listarVinculos(),
       listarAlvosParaDropdown(),
+      listarPosicoesManuaisParaVinculo(),
     ]);
 
     if (!respVinculos.ok) {
@@ -122,26 +188,52 @@ export default function VinculosPage() {
       setFase("erro");
       return;
     }
+    if (!respPosicoesManuais.ok) {
+      setErro(respPosicoesManuais.erro);
+      setFase("erro");
+      return;
+    }
 
     setVinculos(respVinculos.data);
     setAlvos(respAlvos.data);
+    setPosicoesManuais(respPosicoesManuais.data);
     setFormsPendentes((prev) => {
       const novo: Record<string, FormPendente> = {};
       for (const pendente of respVinculos.data.pendentes) {
-        novo[pendente.chaveExport] = prev[pendente.chaveExport] ?? formInicial(respAlvos.data);
+        const key = chaveCsv(pendente.chaveExport);
+        novo[key] = prev[key] ?? formInicial(respAlvos.data);
+      }
+      for (const pendente of respPosicoesManuais.data.pendentes) {
+        const key = chaveManualKey(pendente.posicaoManualId);
+        novo[key] = prev[key] ?? formInicial(respAlvos.data);
       }
       return novo;
     });
     setReatribuirAlvoId((prev) => {
       const novo: Record<string, string> = { ...prev };
       for (const v of respVinculos.data.vinculados) {
-        if (!novo[v.chaveExport]) novo[v.chaveExport] = v.alvoId;
+        const key = chaveCsv(v.chaveExport);
+        if (!novo[key]) novo[key] = v.alvoId;
       }
       for (const f of respVinculos.data.foraDaCarteira) {
-        if (!novo[f.chaveExport]) novo[f.chaveExport] = respAlvos.data[0]?.id ?? "";
+        const key = chaveCsv(f.chaveExport);
+        if (!novo[key]) novo[key] = respAlvos.data[0]?.id ?? "";
       }
       for (const r of respVinculos.data.reservaEmergencia) {
-        if (!novo[r.chaveExport]) novo[r.chaveExport] = respAlvos.data[0]?.id ?? "";
+        const key = chaveCsv(r.chaveExport);
+        if (!novo[key]) novo[key] = respAlvos.data[0]?.id ?? "";
+      }
+      for (const v of respPosicoesManuais.data.vinculadas) {
+        const key = chaveManualKey(v.posicaoManualId);
+        if (!novo[key]) novo[key] = v.alvoId ?? respAlvos.data[0]?.id ?? "";
+      }
+      for (const f of respPosicoesManuais.data.foraDaCarteira) {
+        const key = chaveManualKey(f.posicaoManualId);
+        if (!novo[key]) novo[key] = respAlvos.data[0]?.id ?? "";
+      }
+      for (const r of respPosicoesManuais.data.reservaEmergencia) {
+        const key = chaveManualKey(r.posicaoManualId);
+        if (!novo[key]) novo[key] = respAlvos.data[0]?.id ?? "";
       }
       return novo;
     });
@@ -152,15 +244,19 @@ export default function VinculosPage() {
     void carregar();
   }, [carregar]);
 
-  function atualizarFormPendente(chave: string, patch: Partial<FormPendente>) {
+  function atualizarFormPendente(key: string, patch: Partial<FormPendente>) {
     setFormsPendentes((prev) => ({
       ...prev,
-      [chave]: { ...(prev[chave] ?? formInicial(alvos)), ...patch },
+      [key]: { ...(prev[key] ?? formInicial(alvos)), ...patch },
     }));
   }
 
-  async function executarVinculo(chaveExport: string, input: VincularAtivoInput) {
-    setSalvandoChave(chaveExport);
+  async function executarVinculoCsv(
+    key: string,
+    chaveExport: string,
+    input: VincularAtivoInput,
+  ) {
+    setSalvandoChave(key);
     try {
       const resp = await vincularAtivo(input);
       if (!resp.ok) {
@@ -182,16 +278,36 @@ export default function VinculosPage() {
     }
   }
 
-  async function handleResolverPendente(chaveExport: string) {
-    const form = formsPendentes[chaveExport] ?? formInicial(alvos);
+  async function executarVinculoManual(
+    key: string,
+    rotulo: string,
+    input: VincularPosicaoManualInput,
+  ) {
+    setSalvandoChave(key);
+    try {
+      const resp = await vincularPosicaoManual(input);
+      if (!resp.ok) {
+        toast.error(resp.erro);
+        return;
+      }
+      toast.success(`"${rotulo}" vinculado com sucesso.`);
+      await carregar();
+    } finally {
+      setSalvandoChave(null);
+    }
+  }
+
+  async function handleResolverPendenteCsv(chaveExport: string) {
+    const key = chaveCsv(chaveExport);
+    const form = formsPendentes[key] ?? formInicial(alvos);
 
     if (form.modo === "fora") {
-      await executarVinculo(chaveExport, { chaveExport, foraDaCarteira: true });
+      await executarVinculoCsv(key, chaveExport, { chaveExport, foraDaCarteira: true });
       return;
     }
 
     if (form.modo === "reserva") {
-      await executarVinculo(chaveExport, { chaveExport, reservaEmergencia: true });
+      await executarVinculoCsv(key, chaveExport, { chaveExport, reservaEmergencia: true });
       return;
     }
 
@@ -202,7 +318,8 @@ export default function VinculosPage() {
         toast.error("Selecione um alvo existente.");
         return;
       }
-      await executarVinculo(
+      await executarVinculoCsv(
+        key,
         chaveExport,
         ignorarNoImport
           ? { chaveExport, ignorarNoImport: true, alvoId: form.alvoId }
@@ -227,7 +344,8 @@ export default function VinculosPage() {
       toast.error("Percentual do novo alvo deve ser maior que zero.");
       return;
     }
-    await executarVinculo(
+    await executarVinculoCsv(
+      key,
       chaveExport,
       ignorarNoImport
         ? {
@@ -239,56 +357,177 @@ export default function VinculosPage() {
     );
   }
 
-  async function handleReatribuir(chaveExport: string) {
-    const alvoId = reatribuirAlvoId[chaveExport];
+  async function handleResolverPendenteManual(posicaoManualId: string, rotulo: string) {
+    const key = chaveManualKey(posicaoManualId);
+    const form = formsPendentes[key] ?? formInicial(alvos);
+
+    if (form.modo === "fora") {
+      await executarVinculoManual(key, rotulo, { posicaoManualId, foraDaCarteira: true });
+      return;
+    }
+
+    if (form.modo === "reserva") {
+      await executarVinculoManual(key, rotulo, { posicaoManualId, reservaEmergencia: true });
+      return;
+    }
+
+    if (form.modo === "existente") {
+      if (!form.alvoId) {
+        toast.error("Selecione um alvo existente.");
+        return;
+      }
+      await executarVinculoManual(key, rotulo, { posicaoManualId, alvoId: form.alvoId });
+      return;
+    }
+
+    // modo === "novo"
+    if (!form.novoNome.trim()) {
+      toast.error("Informe o nome do novo alvo.");
+      return;
+    }
+    let percentualBps: number;
+    try {
+      percentualBps = parseDecimalParaCentavos(form.novoPercentualTexto);
+    } catch {
+      toast.error("Percentual inválido — use um decimal (ex.: 12,5).");
+      return;
+    }
+    if (!(percentualBps > 0)) {
+      toast.error("Percentual do novo alvo deve ser maior que zero.");
+      return;
+    }
+    await executarVinculoManual(key, rotulo, {
+      posicaoManualId,
+      novoAlvo: { nome: form.novoNome.trim(), percentualBps },
+    });
+  }
+
+  async function handleReatribuirCsv(chaveExport: string) {
+    const key = chaveCsv(chaveExport);
+    const alvoId = reatribuirAlvoId[key];
     if (!alvoId) {
       toast.error("Selecione um alvo.");
       return;
     }
-    await executarVinculo(chaveExport, { chaveExport, alvoId });
+    await executarVinculoCsv(key, chaveExport, { chaveExport, alvoId });
   }
 
-  async function handleMarcarForaDaCarteira(chaveExport: string) {
-    await executarVinculo(chaveExport, { chaveExport, foraDaCarteira: true });
+  async function handleReatribuirManual(posicaoManualId: string, rotulo: string) {
+    const key = chaveManualKey(posicaoManualId);
+    const alvoId = reatribuirAlvoId[key];
+    if (!alvoId) {
+      toast.error("Selecione um alvo.");
+      return;
+    }
+    await executarVinculoManual(key, rotulo, { posicaoManualId, alvoId });
   }
 
-  // Simétrico a `handleMarcarForaDaCarteira`, para o novo balde isolado
-  // "reserva de emergência" — reaproveitado tanto pelas ações das seções
-  // Vinculados/Fora-da-carteira quanto (indiretamente, via
-  // `handleResolverPendente`) pelo modo "reserva" de Pendentes.
-  async function handleMarcarReservaEmergencia(chaveExport: string) {
-    await executarVinculo(chaveExport, { chaveExport, reservaEmergencia: true });
+  async function handleMarcarForaDaCarteiraCsv(chaveExport: string) {
+    const key = chaveCsv(chaveExport);
+    await executarVinculoCsv(key, chaveExport, { chaveExport, foraDaCarteira: true });
+  }
+
+  async function handleMarcarForaDaCarteiraManual(posicaoManualId: string, rotulo: string) {
+    const key = chaveManualKey(posicaoManualId);
+    await executarVinculoManual(key, rotulo, { posicaoManualId, foraDaCarteira: true });
+  }
+
+  // Simétrico a `handleMarcarForaDaCarteira*`, para o balde isolado "reserva
+  // de emergência" — reaproveitado tanto pelas ações das seções Vinculados/
+  // Fora-da-carteira quanto (indiretamente, via `handleResolverPendente*`)
+  // pelo modo "reserva" de Pendentes.
+  async function handleMarcarReservaEmergenciaCsv(chaveExport: string) {
+    const key = chaveCsv(chaveExport);
+    await executarVinculoCsv(key, chaveExport, { chaveExport, reservaEmergencia: true });
+  }
+
+  async function handleMarcarReservaEmergenciaManual(posicaoManualId: string, rotulo: string) {
+    const key = chaveManualKey(posicaoManualId);
+    await executarVinculoManual(key, rotulo, { posicaoManualId, reservaEmergencia: true });
   }
 
   // "Ignorar (substituído por posição manual)" a partir das seções
   // Vinculados/Fora da carteira (feature 002, FR-001) — mesma chamada usada
   // no modo "ignorar-existente" de Pendentes, reaproveitando o dropdown de
-  // alvo que já existe na linha.
+  // alvo que já existe na linha. Exclusivo de linhas CSV.
   async function handleIgnorar(chaveExport: string) {
-    const alvoId = reatribuirAlvoId[chaveExport];
+    const key = chaveCsv(chaveExport);
+    const alvoId = reatribuirAlvoId[key];
     if (!alvoId) {
       toast.error("Selecione um alvo.");
       return;
     }
-    await executarVinculo(chaveExport, { chaveExport, ignorarNoImport: true, alvoId });
+    await executarVinculoCsv(key, chaveExport, { chaveExport, ignorarNoImport: true, alvoId });
   }
 
-  // Hooks de ordenação chamados incondicionalmente (regra dos hooks) — usam
-  // fallback `[]` enquanto `vinculos` ainda não carregou; a coluna
-  // "Reatribuir para"/"Vincular a" (select) e "Ações" ficam de fora por não
-  // terem valor estável para ordenar.
-  const vinculadosOrdenados = useSortableRows(vinculos?.vinculados ?? [], {
-    chaveExport: (v) => v.chaveExport,
-    valorAtualCentavos: (v) => v.valorAtualCentavos,
+  // Linhas unificadas CSV + posição manual para as três tabelas de baixo —
+  // hooks de ordenação chamados incondicionalmente (regra dos hooks), com
+  // fallback `[]` enquanto os dados ainda não carregaram.
+  const linhasVinculadas: LinhaVinculada[] = [
+    ...(vinculos?.vinculados ?? []).map((v) => ({
+      key: chaveCsv(v.chaveExport),
+      rawId: v.chaveExport,
+      origem: "csv" as const,
+      rotulo: v.chaveExport,
+      alvoId: v.alvoId,
+      nomeAlvo: v.nomeAlvo,
+      valorAtualCentavos: v.valorAtualCentavos,
+    })),
+    ...(posicoesManuais?.vinculadas ?? []).map((p) => ({
+      key: chaveManualKey(p.posicaoManualId),
+      rawId: p.posicaoManualId,
+      origem: "manual" as const,
+      rotulo: p.chaveManual,
+      alvoId: p.alvoId ?? "",
+      nomeAlvo: p.nomeAlvo ?? "",
+      valorAtualCentavos: p.valorAtualCentavos,
+    })),
+  ];
+  const linhasForaDaCarteira: LinhaSemAlvo[] = [
+    ...(vinculos?.foraDaCarteira ?? []).map((f) => ({
+      key: chaveCsv(f.chaveExport),
+      rawId: f.chaveExport,
+      origem: "csv" as const,
+      rotulo: f.chaveExport,
+      valorAtualCentavos: f.valorAtualCentavos,
+    })),
+    ...(posicoesManuais?.foraDaCarteira ?? []).map((p) => ({
+      key: chaveManualKey(p.posicaoManualId),
+      rawId: p.posicaoManualId,
+      origem: "manual" as const,
+      rotulo: p.chaveManual,
+      valorAtualCentavos: p.valorAtualCentavos,
+    })),
+  ];
+  const linhasReservaEmergencia: LinhaSemAlvo[] = [
+    ...(vinculos?.reservaEmergencia ?? []).map((r) => ({
+      key: chaveCsv(r.chaveExport),
+      rawId: r.chaveExport,
+      origem: "csv" as const,
+      rotulo: r.chaveExport,
+      valorAtualCentavos: r.valorAtualCentavos,
+    })),
+    ...(posicoesManuais?.reservaEmergencia ?? []).map((p) => ({
+      key: chaveManualKey(p.posicaoManualId),
+      rawId: p.posicaoManualId,
+      origem: "manual" as const,
+      rotulo: p.chaveManual,
+      valorAtualCentavos: p.valorAtualCentavos,
+    })),
+  ];
+
+  const vinculadosOrdenados = useSortableRows(linhasVinculadas, {
+    rotulo: (v) => v.rotulo,
+    valorAtualCentavos: (v) => v.valorAtualCentavos ?? -1,
     nomeAlvo: (v) => v.nomeAlvo,
   });
-  const foraDaCarteiraOrdenados = useSortableRows(vinculos?.foraDaCarteira ?? [], {
-    chaveExport: (f) => f.chaveExport,
-    valorAtualCentavos: (f) => f.valorAtualCentavos,
+  const foraDaCarteiraOrdenados = useSortableRows(linhasForaDaCarteira, {
+    rotulo: (f) => f.rotulo,
+    valorAtualCentavos: (f) => f.valorAtualCentavos ?? -1,
   });
-  const reservaEmergenciaOrdenados = useSortableRows(vinculos?.reservaEmergencia ?? [], {
-    chaveExport: (r) => r.chaveExport,
-    valorAtualCentavos: (r) => r.valorAtualCentavos,
+  const reservaEmergenciaOrdenados = useSortableRows(linhasReservaEmergencia, {
+    rotulo: (r) => r.rotulo,
+    valorAtualCentavos: (r) => r.valorAtualCentavos ?? -1,
   });
   const ignoradosOrdenados = useSortableRows(vinculos?.ignorados ?? [], {
     chaveExport: (i) => i.chaveExport,
@@ -305,7 +544,7 @@ export default function VinculosPage() {
     );
   }
 
-  if (fase === "erro" || !vinculos) {
+  if (fase === "erro" || !vinculos || !posicoesManuais) {
     return (
       <div className="flex flex-col gap-6">
         <Cabecalho />
@@ -319,31 +558,34 @@ export default function VinculosPage() {
     );
   }
 
-  const { pendentes, vinculados, foraDaCarteira, reservaEmergencia, ignorados } = vinculos;
+  const { pendentes, ignorados } = vinculos;
+  const pendentesManuais = posicoesManuais.pendentes;
+  const totalPendentes = pendentes.length + pendentesManuais.length;
 
   return (
     <div className="flex flex-col gap-6">
       <Cabecalho />
 
-      <Card className={pendentes.length > 0 ? "border-amber-400/60" : undefined}>
+      <Card className={totalPendentes > 0 ? "border-amber-400/60" : undefined}>
         <CardHeader>
           <CardTitle>
-            Pendentes de vínculo {pendentes.length > 0 && `(${pendentes.length})`}
+            Pendentes de vínculo {totalPendentes > 0 && `(${totalPendentes})`}
           </CardTitle>
           <CardDescription>
-            {pendentes.length > 0
+            {totalPendentes > 0
               ? "Enquanto houver pendências, a calculadora de aporte fica bloqueada — uma pendência distorceria os déficits silenciosamente."
               : "Nenhum ativo pendente de vínculo. A calculadora de aporte está liberada."}
           </CardDescription>
         </CardHeader>
-        {pendentes.length > 0 && (
+        {totalPendentes > 0 && (
           <CardContent className="flex flex-col gap-4">
             {pendentes.map((pendente) => {
-              const form = formsPendentes[pendente.chaveExport] ?? formInicial(alvos);
-              const salvando = salvandoChave === pendente.chaveExport;
+              const key = chaveCsv(pendente.chaveExport);
+              const form = formsPendentes[key] ?? formInicial(alvos);
+              const salvando = salvandoChave === key;
               return (
                 <div
-                  key={pendente.chaveExport}
+                  key={key}
                   className="flex flex-col gap-3 rounded-lg border border-amber-400/40 bg-amber-400/5 p-3"
                 >
                   <p className="font-medium">
@@ -355,13 +597,13 @@ export default function VinculosPage() {
 
                   <div className="flex flex-wrap items-end gap-3">
                     <Field className="w-auto">
-                      <FieldLabel htmlFor={`modo-${pendente.chaveExport}`}>Resolução</FieldLabel>
+                      <FieldLabel htmlFor={`modo-${key}`}>Resolução</FieldLabel>
                       <select
-                        id={`modo-${pendente.chaveExport}`}
+                        id={`modo-${key}`}
                         className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
                         value={form.modo}
                         onChange={(e) =>
-                          atualizarFormPendente(pendente.chaveExport, {
+                          atualizarFormPendente(key, {
                             modo: e.target.value as ModoResolucao,
                           })
                         }
@@ -381,13 +623,13 @@ export default function VinculosPage() {
 
                     {(form.modo === "existente" || form.modo === "ignorar-existente") && (
                       <Field className="w-auto">
-                        <FieldLabel htmlFor={`alvo-${pendente.chaveExport}`}>Alvo</FieldLabel>
+                        <FieldLabel htmlFor={`alvo-${key}`}>Alvo</FieldLabel>
                         <select
-                          id={`alvo-${pendente.chaveExport}`}
+                          id={`alvo-${key}`}
                           className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
                           value={form.alvoId}
                           onChange={(e) =>
-                            atualizarFormPendente(pendente.chaveExport, { alvoId: e.target.value })
+                            atualizarFormPendente(key, { alvoId: e.target.value })
                           }
                         >
                           {alvos.length === 0 && <option value="">Nenhum alvo cadastrado</option>}
@@ -403,32 +645,32 @@ export default function VinculosPage() {
                     {(form.modo === "novo" || form.modo === "ignorar-novo") && (
                       <>
                         <Field className="w-auto">
-                          <FieldLabel htmlFor={`nome-${pendente.chaveExport}`}>
+                          <FieldLabel htmlFor={`nome-${key}`}>
                             Nome do alvo
                           </FieldLabel>
                           <Input
-                            id={`nome-${pendente.chaveExport}`}
+                            id={`nome-${key}`}
                             className="w-40"
                             value={form.novoNome}
                             onChange={(e) =>
-                              atualizarFormPendente(pendente.chaveExport, {
+                              atualizarFormPendente(key, {
                                 novoNome: e.target.value,
                               })
                             }
                           />
                         </Field>
                         <Field className="w-auto">
-                          <FieldLabel htmlFor={`percentual-${pendente.chaveExport}`}>
+                          <FieldLabel htmlFor={`percentual-${key}`}>
                             Percentual (%)
                           </FieldLabel>
                           <Input
-                            id={`percentual-${pendente.chaveExport}`}
+                            id={`percentual-${key}`}
                             className="w-24"
                             inputMode="decimal"
                             placeholder="12,5"
                             value={form.novoPercentualTexto}
                             onChange={(e) =>
-                              atualizarFormPendente(pendente.chaveExport, {
+                              atualizarFormPendente(key, {
                                 novoPercentualTexto: e.target.value,
                               })
                             }
@@ -440,7 +682,7 @@ export default function VinculosPage() {
                     <Button
                       size="sm"
                       disabled={salvando}
-                      onClick={() => void handleResolverPendente(pendente.chaveExport)}
+                      onClick={() => void handleResolverPendenteCsv(pendente.chaveExport)}
                     >
                       {salvando ? "Salvando…" : "Confirmar"}
                     </Button>
@@ -451,29 +693,142 @@ export default function VinculosPage() {
                 </div>
               );
             })}
+
+            {pendentesManuais.map((pendente) => {
+              const key = chaveManualKey(pendente.posicaoManualId);
+              const form = formsPendentes[key] ?? formInicial(alvos);
+              const salvando = salvandoChave === key;
+              return (
+                <div
+                  key={key}
+                  className="flex flex-col gap-3 rounded-lg border border-amber-400/40 bg-amber-400/5 p-3"
+                >
+                  <p className="font-medium">
+                    {pendente.chaveManual}
+                    <BadgeManual />{" "}
+                    <span className="font-normal text-muted-foreground">
+                      — {pendente.descricao} ({pendente.instituicao}) —{" "}
+                      {pendente.valorAtualCentavos !== null
+                        ? formatCentavosParaReais(pendente.valorAtualCentavos)
+                        : "—"}
+                    </span>
+                  </p>
+
+                  <div className="flex flex-wrap items-end gap-3">
+                    <Field className="w-auto">
+                      <FieldLabel htmlFor={`modo-${key}`}>Resolução</FieldLabel>
+                      <select
+                        id={`modo-${key}`}
+                        className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
+                        value={form.modo}
+                        onChange={(e) =>
+                          atualizarFormPendente(key, {
+                            modo: e.target.value as ModoResolucao,
+                          })
+                        }
+                      >
+                        <option value="existente">Vincular a alvo existente</option>
+                        <option value="novo">Criar novo alvo</option>
+                        <option value="fora">Marcar fora da carteira</option>
+                        <option value="reserva">Marcar como reserva de emergência</option>
+                      </select>
+                    </Field>
+
+                    {form.modo === "existente" && (
+                      <Field className="w-auto">
+                        <FieldLabel htmlFor={`alvo-${key}`}>Alvo</FieldLabel>
+                        <select
+                          id={`alvo-${key}`}
+                          className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
+                          value={form.alvoId}
+                          onChange={(e) =>
+                            atualizarFormPendente(key, { alvoId: e.target.value })
+                          }
+                        >
+                          {alvos.length === 0 && <option value="">Nenhum alvo cadastrado</option>}
+                          {alvos.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.nome} ({formatBps(a.percentualAlvoBps)})
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                    )}
+
+                    {form.modo === "novo" && (
+                      <>
+                        <Field className="w-auto">
+                          <FieldLabel htmlFor={`nome-${key}`}>Nome do alvo</FieldLabel>
+                          <Input
+                            id={`nome-${key}`}
+                            className="w-40"
+                            value={form.novoNome}
+                            onChange={(e) =>
+                              atualizarFormPendente(key, {
+                                novoNome: e.target.value,
+                              })
+                            }
+                          />
+                        </Field>
+                        <Field className="w-auto">
+                          <FieldLabel htmlFor={`percentual-${key}`}>Percentual (%)</FieldLabel>
+                          <Input
+                            id={`percentual-${key}`}
+                            className="w-24"
+                            inputMode="decimal"
+                            placeholder="12,5"
+                            value={form.novoPercentualTexto}
+                            onChange={(e) =>
+                              atualizarFormPendente(key, {
+                                novoPercentualTexto: e.target.value,
+                              })
+                            }
+                          />
+                        </Field>
+                      </>
+                    )}
+
+                    <Button
+                      size="sm"
+                      disabled={salvando}
+                      onClick={() =>
+                        void handleResolverPendenteManual(
+                          pendente.posicaoManualId,
+                          pendente.chaveManual,
+                        )
+                      }
+                    >
+                      {salvando ? "Salvando…" : "Confirmar"}
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
           </CardContent>
         )}
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Vinculados {vinculados.length > 0 && `(${vinculados.length})`}</CardTitle>
+          <CardTitle>
+            Vinculados {linhasVinculadas.length > 0 && `(${linhasVinculadas.length})`}
+          </CardTitle>
           <CardDescription>
             Ativos já vinculados a um alvo. Revise ou corrija o vínculo se necessário.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {vinculados.length === 0 ? (
+          {linhasVinculadas.length === 0 ? (
             <p className="text-sm text-muted-foreground">Nenhum ativo vinculado ainda.</p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
                   <SortableTableHead
-                    sortDirection={vinculadosOrdenados.sortDirectionFor("chaveExport")}
-                    onSort={() => vinculadosOrdenados.toggleSort("chaveExport")}
+                    sortDirection={vinculadosOrdenados.sortDirectionFor("rotulo")}
+                    onSort={() => vinculadosOrdenados.toggleSort("rotulo")}
                   >
-                    Chave do export
+                    Ativo
                   </SortableTableHead>
                   <SortableTableHead
                     sortDirection={vinculadosOrdenados.sortDirectionFor("valorAtualCentavos")}
@@ -493,22 +848,27 @@ export default function VinculosPage() {
               </TableHeader>
               <TableBody>
                 {vinculadosOrdenados.sortedRows.map((v) => {
-                  const salvando = salvandoChave === v.chaveExport;
+                  const salvando = salvandoChave === v.key;
                   return (
-                    <TableRow key={v.chaveExport}>
+                    <TableRow key={v.key}>
                       <TableCell className="max-w-48 whitespace-normal break-words">
-                        {v.chaveExport}
+                        {v.rotulo}
+                        {v.origem === "manual" && <BadgeManual />}
                       </TableCell>
-                      <TableCell>{formatCentavosParaReais(v.valorAtualCentavos)}</TableCell>
+                      <TableCell>
+                        {v.valorAtualCentavos !== null
+                          ? formatCentavosParaReais(v.valorAtualCentavos)
+                          : "—"}
+                      </TableCell>
                       <TableCell>{v.nomeAlvo}</TableCell>
                       <TableCell>
                         <select
                           className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
-                          value={reatribuirAlvoId[v.chaveExport] ?? v.alvoId}
+                          value={reatribuirAlvoId[v.key] ?? v.alvoId}
                           onChange={(e) =>
                             setReatribuirAlvoId((prev) => ({
                               ...prev,
-                              [v.chaveExport]: e.target.value,
+                              [v.key]: e.target.value,
                             }))
                           }
                         >
@@ -525,7 +885,11 @@ export default function VinculosPage() {
                             size="sm"
                             variant="outline"
                             disabled={salvando}
-                            onClick={() => void handleReatribuir(v.chaveExport)}
+                            onClick={() =>
+                              void (v.origem === "csv"
+                                ? handleReatribuirCsv(v.rawId)
+                                : handleReatribuirManual(v.rawId, v.rotulo))
+                            }
                           >
                             Salvar
                           </Button>
@@ -533,7 +897,11 @@ export default function VinculosPage() {
                             size="sm"
                             variant="ghost"
                             disabled={salvando}
-                            onClick={() => void handleMarcarForaDaCarteira(v.chaveExport)}
+                            onClick={() =>
+                              void (v.origem === "csv"
+                                ? handleMarcarForaDaCarteiraCsv(v.rawId)
+                                : handleMarcarForaDaCarteiraManual(v.rawId, v.rotulo))
+                            }
                           >
                             Marcar fora da carteira
                           </Button>
@@ -541,19 +909,25 @@ export default function VinculosPage() {
                             size="sm"
                             variant="ghost"
                             disabled={salvando}
-                            onClick={() => void handleMarcarReservaEmergencia(v.chaveExport)}
+                            onClick={() =>
+                              void (v.origem === "csv"
+                                ? handleMarcarReservaEmergenciaCsv(v.rawId)
+                                : handleMarcarReservaEmergenciaManual(v.rawId, v.rotulo))
+                            }
                           >
                             Marcar reserva de emergência
                           </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={salvando || alvos.length === 0}
-                            title={AVISO_IGNORAR}
-                            onClick={() => void handleIgnorar(v.chaveExport)}
-                          >
-                            Ignorar (substituído por posição manual)
-                          </Button>
+                          {v.origem === "csv" && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={salvando || alvos.length === 0}
+                              title={AVISO_IGNORAR}
+                              onClick={() => void handleIgnorar(v.rawId)}
+                            >
+                              Ignorar (substituído por posição manual)
+                            </Button>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -568,7 +942,8 @@ export default function VinculosPage() {
       <Card>
         <CardHeader>
           <CardTitle>
-            Fora da carteira alvo {foraDaCarteira.length > 0 && `(${foraDaCarteira.length})`}
+            Fora da carteira alvo{" "}
+            {linhasForaDaCarteira.length > 0 && `(${linhasForaDaCarteira.length})`}
           </CardTitle>
           <CardDescription>
             Ativos legados reconhecidos mas que não participam dos cálculos nem recebem
@@ -576,17 +951,17 @@ export default function VinculosPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {foraDaCarteira.length === 0 ? (
+          {linhasForaDaCarteira.length === 0 ? (
             <p className="text-sm text-muted-foreground">Nenhum ativo marcado como fora da carteira.</p>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
                   <SortableTableHead
-                    sortDirection={foraDaCarteiraOrdenados.sortDirectionFor("chaveExport")}
-                    onSort={() => foraDaCarteiraOrdenados.toggleSort("chaveExport")}
+                    sortDirection={foraDaCarteiraOrdenados.sortDirectionFor("rotulo")}
+                    onSort={() => foraDaCarteiraOrdenados.toggleSort("rotulo")}
                   >
-                    Chave do export
+                    Ativo
                   </SortableTableHead>
                   <SortableTableHead
                     sortDirection={foraDaCarteiraOrdenados.sortDirectionFor("valorAtualCentavos")}
@@ -600,21 +975,26 @@ export default function VinculosPage() {
               </TableHeader>
               <TableBody>
                 {foraDaCarteiraOrdenados.sortedRows.map((f) => {
-                  const salvando = salvandoChave === f.chaveExport;
+                  const salvando = salvandoChave === f.key;
                   return (
-                    <TableRow key={f.chaveExport}>
+                    <TableRow key={f.key}>
                       <TableCell className="max-w-48 whitespace-normal break-words">
-                        {f.chaveExport}
+                        {f.rotulo}
+                        {f.origem === "manual" && <BadgeManual />}
                       </TableCell>
-                      <TableCell>{formatCentavosParaReais(f.valorAtualCentavos)}</TableCell>
+                      <TableCell>
+                        {f.valorAtualCentavos !== null
+                          ? formatCentavosParaReais(f.valorAtualCentavos)
+                          : "—"}
+                      </TableCell>
                       <TableCell>
                         <select
                           className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
-                          value={reatribuirAlvoId[f.chaveExport] ?? alvos[0]?.id ?? ""}
+                          value={reatribuirAlvoId[f.key] ?? alvos[0]?.id ?? ""}
                           onChange={(e) =>
                             setReatribuirAlvoId((prev) => ({
                               ...prev,
-                              [f.chaveExport]: e.target.value,
+                              [f.key]: e.target.value,
                             }))
                           }
                         >
@@ -632,7 +1012,11 @@ export default function VinculosPage() {
                             size="sm"
                             variant="outline"
                             disabled={salvando || alvos.length === 0}
-                            onClick={() => void handleReatribuir(f.chaveExport)}
+                            onClick={() =>
+                              void (f.origem === "csv"
+                                ? handleReatribuirCsv(f.rawId)
+                                : handleReatribuirManual(f.rawId, f.rotulo))
+                            }
                           >
                             Vincular
                           </Button>
@@ -640,19 +1024,25 @@ export default function VinculosPage() {
                             size="sm"
                             variant="ghost"
                             disabled={salvando}
-                            onClick={() => void handleMarcarReservaEmergencia(f.chaveExport)}
+                            onClick={() =>
+                              void (f.origem === "csv"
+                                ? handleMarcarReservaEmergenciaCsv(f.rawId)
+                                : handleMarcarReservaEmergenciaManual(f.rawId, f.rotulo))
+                            }
                           >
                             Marcar reserva de emergência
                           </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={salvando || alvos.length === 0}
-                            title={AVISO_IGNORAR}
-                            onClick={() => void handleIgnorar(f.chaveExport)}
-                          >
-                            Ignorar (substituído por posição manual)
-                          </Button>
+                          {f.origem === "csv" && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={salvando || alvos.length === 0}
+                              title={AVISO_IGNORAR}
+                              onClick={() => void handleIgnorar(f.rawId)}
+                            >
+                              Ignorar (substituído por posição manual)
+                            </Button>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -668,7 +1058,7 @@ export default function VinculosPage() {
         <CardHeader>
           <CardTitle>
             Reserva de emergência{" "}
-            {reservaEmergencia.length > 0 && `(${reservaEmergencia.length})`}
+            {linhasReservaEmergencia.length > 0 && `(${linhasReservaEmergencia.length})`}
           </CardTitle>
           <CardDescription>
             Ativos reconhecidos do export, mas isolados tanto da carteira alvo quanto do
@@ -677,7 +1067,7 @@ export default function VinculosPage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {reservaEmergencia.length === 0 ? (
+          {linhasReservaEmergencia.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               Nenhum ativo marcado como reserva de emergência.
             </p>
@@ -686,10 +1076,10 @@ export default function VinculosPage() {
               <TableHeader>
                 <TableRow>
                   <SortableTableHead
-                    sortDirection={reservaEmergenciaOrdenados.sortDirectionFor("chaveExport")}
-                    onSort={() => reservaEmergenciaOrdenados.toggleSort("chaveExport")}
+                    sortDirection={reservaEmergenciaOrdenados.sortDirectionFor("rotulo")}
+                    onSort={() => reservaEmergenciaOrdenados.toggleSort("rotulo")}
                   >
-                    Chave do export
+                    Ativo
                   </SortableTableHead>
                   <SortableTableHead
                     sortDirection={reservaEmergenciaOrdenados.sortDirectionFor(
@@ -705,21 +1095,26 @@ export default function VinculosPage() {
               </TableHeader>
               <TableBody>
                 {reservaEmergenciaOrdenados.sortedRows.map((r) => {
-                  const salvando = salvandoChave === r.chaveExport;
+                  const salvando = salvandoChave === r.key;
                   return (
-                    <TableRow key={r.chaveExport}>
+                    <TableRow key={r.key}>
                       <TableCell className="max-w-48 whitespace-normal break-words">
-                        {r.chaveExport}
+                        {r.rotulo}
+                        {r.origem === "manual" && <BadgeManual />}
                       </TableCell>
-                      <TableCell>{formatCentavosParaReais(r.valorAtualCentavos)}</TableCell>
+                      <TableCell>
+                        {r.valorAtualCentavos !== null
+                          ? formatCentavosParaReais(r.valorAtualCentavos)
+                          : "—"}
+                      </TableCell>
                       <TableCell>
                         <select
                           className="h-8 rounded-lg border border-input bg-background px-2 text-sm"
-                          value={reatribuirAlvoId[r.chaveExport] ?? alvos[0]?.id ?? ""}
+                          value={reatribuirAlvoId[r.key] ?? alvos[0]?.id ?? ""}
                           onChange={(e) =>
                             setReatribuirAlvoId((prev) => ({
                               ...prev,
-                              [r.chaveExport]: e.target.value,
+                              [r.key]: e.target.value,
                             }))
                           }
                         >
@@ -737,7 +1132,11 @@ export default function VinculosPage() {
                             size="sm"
                             variant="outline"
                             disabled={salvando || alvos.length === 0}
-                            onClick={() => void handleReatribuir(r.chaveExport)}
+                            onClick={() =>
+                              void (r.origem === "csv"
+                                ? handleReatribuirCsv(r.rawId)
+                                : handleReatribuirManual(r.rawId, r.rotulo))
+                            }
                           >
                             Vincular
                           </Button>
@@ -745,7 +1144,11 @@ export default function VinculosPage() {
                             size="sm"
                             variant="ghost"
                             disabled={salvando}
-                            onClick={() => void handleMarcarForaDaCarteira(r.chaveExport)}
+                            onClick={() =>
+                              void (r.origem === "csv"
+                                ? handleMarcarForaDaCarteiraCsv(r.rawId)
+                                : handleMarcarForaDaCarteiraManual(r.rawId, r.rotulo))
+                            }
                           >
                             Marcar fora da carteira
                           </Button>
@@ -837,8 +1240,9 @@ function Cabecalho() {
     <div>
       <h1 className="text-2xl font-heading font-semibold tracking-tight">Vínculo de ativos</h1>
       <p className="text-sm text-muted-foreground">
-        Cada ativo do export precisa apontar para um alvo da carteira, ou ser marcado como
-        fora da carteira ou reserva de emergência, antes de calcular o aporte.
+        Cada ativo do export ou posição manual precisa apontar para um alvo da carteira, ou
+        ser marcado como fora da carteira ou reserva de emergência, antes de calcular o
+        aporte.
       </p>
     </div>
   );

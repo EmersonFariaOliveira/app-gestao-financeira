@@ -317,9 +317,8 @@ describe("posicao-manual-service", () => {
       return posicaoManual;
     }
 
-    it("atualiza apenas campos cadastrais (instituicao, descricao, alvoId)", async () => {
+    it("atualiza apenas campos cadastrais (instituicao, descricao) — alvo_id não é tocado", async () => {
       const alvoOriginal = await criarAlvo("Pós-fixado", 3000);
-      const alvoNovo = await criarAlvo("Tesouro IPCA+", 2000);
       const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
       const posicaoManual = await criarPosicaoManualComSnapshot(alvoOriginal.id, sessao.id);
 
@@ -327,19 +326,20 @@ describe("posicao-manual-service", () => {
         posicaoManualId: posicaoManual.id,
         instituicao: "Nubank",
         descricao: "CDB Itaú 120% CDI 2029 (renegociado)",
-        alvoId: alvoNovo.id,
       });
 
       expect(resultado.instituicao).toBe("Nubank");
       expect(resultado.descricao).toBe("CDB Itaú 120% CDI 2029 (renegociado)");
-      expect(resultado.alvoId).toBe(alvoNovo.id);
+      // alvo_id não faz parte de EditarPosicaoManualInput — permanece
+      // inalterado (transição de vínculo é exclusiva de vincularPosicaoManual).
+      expect(resultado.alvoId).toBe(alvoOriginal.id);
 
       const noBanco = await prisma.posicao_manual.findUniqueOrThrow({
         where: { id: posicaoManual.id },
       });
       expect(noBanco.instituicao).toBe("Nubank");
       expect(noBanco.descricao).toBe("CDB Itaú 120% CDI 2029 (renegociado)");
-      expect(noBanco.alvo_id).toBe(alvoNovo.id);
+      expect(noBanco.alvo_id).toBe(alvoOriginal.id);
       // chave_manual é imutável — nunca alterada por editarPosicaoManual.
       expect(noBanco.chave_manual).toBe("CDB-ITAU-2029");
     });
@@ -2084,6 +2084,467 @@ describe("posicao-manual-service", () => {
         valorPendenteCentavos: 75_000,
         elegiveis: [],
       });
+    });
+  });
+
+  // Cobertura de lacunas (engenheiro-testes, extensão 002-posicoes-manuais-ajustes):
+  // posicao_manual passa a ter a MESMA máquina de estados de ativo_mapeado
+  // (alvo_id | fora_da_carteira | reserva_emergencia, mutuamente exclusivos).
+  // Estilo espelhado de tests/services/mapeamento-service.test.ts (describes
+  // "invariante alvo_id ⊕ fora_da_carteira" e "balde reserva de emergência").
+  describe("vincularPosicaoManual (mesma máquina de estados de ativo_mapeado/vincularAtivo)", () => {
+    async function criarPosicaoManualPendente(chaveManual = "CDB-PENDENTE") {
+      return prisma.posicao_manual.create({
+        data: { chave_manual: chaveManual, instituicao: "Itaú", descricao: "CDB pendente", ativo: true },
+      });
+    }
+
+    it("{posicaoManualId, alvoId} vincula a um alvo existente, zerando fora_da_carteira/reserva_emergencia", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const posicaoManual = await criarPosicaoManualPendente();
+
+      const resultado = await posicaoManualService.vincularPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        alvoId: alvo.id,
+      });
+
+      expect(resultado).toEqual({
+        posicaoManualId: posicaoManual.id,
+        alvoId: alvo.id,
+        nomeAlvo: "Pós-fixado",
+        foraDaCarteira: false,
+        reservaEmergencia: false,
+      });
+
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: posicaoManual.id } });
+      expect(registro.alvo_id).toBe(alvo.id);
+      expect(registro.fora_da_carteira).toBe(false);
+      expect(registro.reserva_emergencia).toBe(false);
+    });
+
+    it("{posicaoManualId, novoAlvo} cria o alvo na vigência aberta e vincula na mesma operação", async () => {
+      const posicaoManual = await criarPosicaoManualPendente();
+      const antesCount = await prisma.alvo.count();
+
+      const resultado = await posicaoManualService.vincularPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        novoAlvo: { nome: "Multimercado", percentualBps: 2500 },
+      });
+
+      expect(await prisma.alvo.count()).toBe(antesCount + 1);
+      expect(resultado.foraDaCarteira).toBe(false);
+      expect(resultado.reservaEmergencia).toBe(false);
+      expect(resultado.nomeAlvo).toBe("Multimercado");
+
+      const alvoCriado = await prisma.alvo.findUniqueOrThrow({ where: { id: resultado.alvoId! } });
+      expect(alvoCriado.percentual_alvo_bps).toBe(2500);
+      expect(alvoCriado.vigencia_fim).toBeNull();
+
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: posicaoManual.id } });
+      expect(registro.alvo_id).toBe(alvoCriado.id);
+    });
+
+    it("{posicaoManualId, foraDaCarteira: true} marca fora_da_carteira, zerando alvo_id/reserva_emergencia", async () => {
+      const alvo = await criarAlvo("Ações BR", 10000);
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-VINCULADO", instituicao: "Itaú", descricao: "CDB", alvo_id: alvo.id, ativo: true },
+      });
+
+      const resultado = await posicaoManualService.vincularPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        foraDaCarteira: true,
+      });
+
+      expect(resultado).toEqual({
+        posicaoManualId: posicaoManual.id,
+        alvoId: null,
+        nomeAlvo: null,
+        foraDaCarteira: true,
+        reservaEmergencia: false,
+      });
+
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: posicaoManual.id } });
+      expect(registro.alvo_id).toBeNull();
+      expect(registro.fora_da_carteira).toBe(true);
+      expect(registro.reserva_emergencia).toBe(false);
+    });
+
+    it("{posicaoManualId, reservaEmergencia: true} marca reserva_emergencia, zerando alvo_id/fora_da_carteira", async () => {
+      const alvo = await criarAlvo("Ações BR", 10000);
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-VINCULADO-2", instituicao: "Itaú", descricao: "CDB", alvo_id: alvo.id, ativo: true },
+      });
+
+      const resultado = await posicaoManualService.vincularPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        reservaEmergencia: true,
+      });
+
+      expect(resultado).toEqual({
+        posicaoManualId: posicaoManual.id,
+        alvoId: null,
+        nomeAlvo: null,
+        foraDaCarteira: false,
+        reservaEmergencia: true,
+      });
+
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: posicaoManual.id } });
+      expect(registro.alvo_id).toBeNull();
+      expect(registro.fora_da_carteira).toBe(false);
+      expect(registro.reserva_emergencia).toBe(true);
+    });
+
+    it("vincular a um alvo depois de 'fora da carteira' limpa fora_da_carteira (exclusão mútua)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const posicaoManual = await criarPosicaoManualPendente();
+      await posicaoManualService.vincularPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        foraDaCarteira: true,
+      });
+
+      const resultado = await posicaoManualService.vincularPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        alvoId: alvo.id,
+      });
+
+      expect(resultado.alvoId).toBe(alvo.id);
+      expect(resultado.foraDaCarteira).toBe(false);
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: posicaoManual.id } });
+      expect(registro.fora_da_carteira).toBe(false);
+      expect(registro.alvo_id).toBe(alvo.id);
+    });
+
+    it("marcar reserva de emergência depois de vinculado a um alvo zera alvo_id", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-X", instituicao: "Itaú", descricao: "CDB", alvo_id: alvo.id, ativo: true },
+      });
+
+      const resultado = await posicaoManualService.vincularPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        reservaEmergencia: true,
+      });
+
+      expect(resultado.alvoId).toBeNull();
+      expect(resultado.reservaEmergencia).toBe(true);
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: posicaoManual.id } });
+      expect(registro.alvo_id).toBeNull();
+      expect(registro.reserva_emergencia).toBe(true);
+    });
+
+    it("marcar fora-da-carteira depois de reserva de emergência limpa reserva_emergencia (exclusão no outro sentido)", async () => {
+      const posicaoManual = await criarPosicaoManualPendente();
+      await posicaoManualService.vincularPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        reservaEmergencia: true,
+      });
+
+      const resultado = await posicaoManualService.vincularPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        foraDaCarteira: true,
+      });
+
+      expect(resultado.foraDaCarteira).toBe(true);
+      expect(resultado.reservaEmergencia).toBe(false);
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: posicaoManual.id } });
+      expect(registro.reserva_emergencia).toBe(false);
+      expect(registro.fora_da_carteira).toBe(true);
+    });
+
+    it("nunca deixa alvo_id setado e fora_da_carteira=true simultaneamente após uma sequência de operações", async () => {
+      const alvoA = await criarAlvo("Alvo A", 5000);
+      const alvoB = await criarAlvo("Alvo B", 5000);
+      const posicaoManual = await criarPosicaoManualPendente();
+
+      await posicaoManualService.vincularPosicaoManual({ posicaoManualId: posicaoManual.id, alvoId: alvoA.id });
+      await posicaoManualService.vincularPosicaoManual({ posicaoManualId: posicaoManual.id, reservaEmergencia: true });
+      await posicaoManualService.vincularPosicaoManual({ posicaoManualId: posicaoManual.id, foraDaCarteira: true });
+      await posicaoManualService.vincularPosicaoManual({ posicaoManualId: posicaoManual.id, alvoId: alvoB.id });
+
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: posicaoManual.id } });
+      expect(registro.alvo_id).toBe(alvoB.id);
+      expect(registro.fora_da_carteira).toBe(false);
+      expect(registro.reserva_emergencia).toBe(false);
+    });
+
+    it("{posicaoManualId, alvoId} com alvoId inexistente na vigência aberta lança erro e não altera o registro", async () => {
+      const posicaoManual = await criarPosicaoManualPendente();
+
+      await expect(
+        posicaoManualService.vincularPosicaoManual({
+          posicaoManualId: posicaoManual.id,
+          alvoId: "id-inexistente",
+        }),
+      ).rejects.toThrow();
+
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: posicaoManual.id } });
+      expect(registro.alvo_id).toBeNull();
+    });
+
+    it("{posicaoManualId, alvoId} com alvo de vigência já fechada lança erro", async () => {
+      const posicaoManual = await criarPosicaoManualPendente();
+      const alvoFechado = await prisma.alvo.create({
+        data: {
+          nome: "Antigo",
+          percentual_alvo_bps: 10000,
+          vigencia_inicio: new Date("2025-01-01"),
+          vigencia_fim: new Date("2025-12-31"),
+        },
+      });
+
+      await expect(
+        posicaoManualService.vincularPosicaoManual({
+          posicaoManualId: posicaoManual.id,
+          alvoId: alvoFechado.id,
+        }),
+      ).rejects.toThrow();
+    });
+  });
+
+  describe("listarPosicoesManuaisParaVinculo", () => {
+    it("classifica corretamente nos 4 baldes: pendentes/vinculadas/foraDaCarteira/reservaEmergencia", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-PENDENTE", instituicao: "Itaú", descricao: "Pendente", ativo: true },
+      });
+      await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-VINCULADO",
+          instituicao: "Itaú",
+          descricao: "Vinculado",
+          alvo_id: alvo.id,
+          ativo: true,
+        },
+      });
+      await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-FORA",
+          instituicao: "Itaú",
+          descricao: "Fora da carteira",
+          fora_da_carteira: true,
+          ativo: true,
+        },
+      });
+      await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-RESERVA",
+          instituicao: "Itaú",
+          descricao: "Reserva",
+          reserva_emergencia: true,
+          ativo: true,
+        },
+      });
+
+      const resultado = await posicaoManualService.listarPosicoesManuaisParaVinculo();
+
+      expect(resultado.pendentes.map((p) => p.chaveManual)).toEqual(["CDB-PENDENTE"]);
+      expect(resultado.vinculadas.map((p) => p.chaveManual)).toEqual(["CDB-VINCULADO"]);
+      expect(resultado.foraDaCarteira.map((p) => p.chaveManual)).toEqual(["CDB-FORA"]);
+      expect(resultado.reservaEmergencia.map((p) => p.chaveManual)).toEqual(["CDB-RESERVA"]);
+      expect(resultado.vinculadas[0].alvoId).toBe(alvo.id);
+      expect(resultado.vinculadas[0].nomeAlvo).toBe("Pós-fixado");
+    });
+
+    it("só retorna posições ativo:true — posições encerradas somem de todos os baldes", async () => {
+      await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-ENCERRADO", instituicao: "Itaú", descricao: "Encerrado", ativo: false },
+      });
+
+      const resultado = await posicaoManualService.listarPosicoesManuaisParaVinculo();
+
+      expect(resultado.pendentes).toEqual([]);
+      expect(resultado.vinculadas).toEqual([]);
+      expect(resultado.foraDaCarteira).toEqual([]);
+      expect(resultado.reservaEmergencia).toEqual([]);
+    });
+
+    it("valorAtualCentavos é null quando a posição nunca teve posicao_manual_valor (nenhum snapshot)", async () => {
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-SEM-SNAPSHOT", instituicao: "Itaú", descricao: "Sem snapshot", ativo: true },
+      });
+
+      const resultado = await posicaoManualService.listarPosicoesManuaisParaVinculo();
+
+      const item = resultado.pendentes.find((p) => p.posicaoManualId === posicaoManual.id);
+      expect(item?.valorAtualCentavos).toBeNull();
+    });
+
+    it("valorAtualCentavos traz o último snapshot conhecido quando existe", async () => {
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-COM-SNAPSHOT", instituicao: "Itaú", descricao: "Com snapshot", ativo: true },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManual.id,
+          sessao_import_id: sessao.id,
+          valor_investido_centavos: 100_000,
+          valor_atual_centavos: 110_000,
+        },
+      });
+
+      const resultado = await posicaoManualService.listarPosicoesManuaisParaVinculo();
+
+      const item = resultado.pendentes.find((p) => p.posicaoManualId === posicaoManual.id);
+      expect(item?.valorAtualCentavos).toBe(110_000);
+    });
+  });
+
+  describe("atualizarValoresPosicaoManual", () => {
+    it("cria o posicao_manual_valor da sessão VIGENTE quando ainda não existe", async () => {
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-NOVO-VALOR", instituicao: "Itaú", descricao: "CDB", ativo: true },
+      });
+
+      const resultado = await posicaoManualService.atualizarValoresPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        valorInvestidoCentavos: 500_000,
+        valorAtualCentavos: 520_000,
+      });
+
+      expect(resultado).toEqual({
+        posicaoManualId: posicaoManual.id,
+        valorInvestidoCentavos: 500_000,
+        valorAtualCentavos: 520_000,
+      });
+      const linhas = await prisma.posicao_manual_valor.findMany({
+        where: { posicao_manual_id: posicaoManual.id, sessao_import_id: sessao.id },
+      });
+      expect(linhas).toHaveLength(1);
+    });
+
+    it("chamar duas vezes na MESMA sessão vigente atualiza a linha existente, nunca duplica (upsert)", async () => {
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-UPSERT", instituicao: "Itaú", descricao: "CDB", ativo: true },
+      });
+
+      await posicaoManualService.atualizarValoresPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        valorInvestidoCentavos: 100_000,
+        valorAtualCentavos: 100_000,
+      });
+      const resultado = await posicaoManualService.atualizarValoresPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        valorInvestidoCentavos: 200_000,
+        valorAtualCentavos: 210_000,
+      });
+
+      expect(resultado.valorInvestidoCentavos).toBe(200_000);
+      expect(resultado.valorAtualCentavos).toBe(210_000);
+      const linhas = await prisma.posicao_manual_valor.findMany({
+        where: { posicao_manual_id: posicaoManual.id, sessao_import_id: sessao.id },
+      });
+      expect(linhas).toHaveLength(1);
+      expect(linhas[0].valor_investido_centavos).toBe(200_000);
+      expect(linhas[0].valor_atual_centavos).toBe(210_000);
+    });
+
+    it("falha alto com a mensagem correta quando não há sessão VIGENTE", async () => {
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-SEM-SESSAO", instituicao: "Itaú", descricao: "CDB", ativo: true },
+      });
+
+      await expect(
+        posicaoManualService.atualizarValoresPosicaoManual({
+          posicaoManualId: posicaoManual.id,
+          valorInvestidoCentavos: 100_000,
+          valorAtualCentavos: 100_000,
+        }),
+      ).rejects.toThrow(
+        "Nenhuma sessão de import VIGENTE encontrada — realize um import antes de calcular o aporte.",
+      );
+      expect(await prisma.posicao_manual_valor.count()).toBe(0);
+    });
+
+    it("nunca cria/altera linha em outra sessão — só a sessão VIGENTE mais recente é tocada", async () => {
+      const sessaoAntiga = await criarSessao("2026-06", "2026-06-28", "SUBSTITUIDO");
+      const posicaoManual = await prisma.posicao_manual.create({
+        data: { chave_manual: "CDB-OUTRA-SESSAO", instituicao: "Itaú", descricao: "CDB", ativo: true },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManual.id,
+          sessao_import_id: sessaoAntiga.id,
+          valor_investido_centavos: 1,
+          valor_atual_centavos: 1,
+        },
+      });
+      const sessaoVigente = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+
+      await posicaoManualService.atualizarValoresPosicaoManual({
+        posicaoManualId: posicaoManual.id,
+        valorInvestidoCentavos: 300_000,
+        valorAtualCentavos: 300_000,
+      });
+
+      const linhaAntiga = await prisma.posicao_manual_valor.findUniqueOrThrow({
+        where: {
+          posicao_manual_id_sessao_import_id: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: sessaoAntiga.id,
+          },
+        },
+      });
+      expect(linhaAntiga.valor_investido_centavos).toBe(1);
+
+      const linhaVigente = await prisma.posicao_manual_valor.findUniqueOrThrow({
+        where: {
+          posicao_manual_id_sessao_import_id: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: sessaoVigente.id,
+          },
+        },
+      });
+      expect(linhaVigente.valor_investido_centavos).toBe(300_000);
+    });
+  });
+
+  describe("criarPosicaoManual sem alvoId (pendente de vínculo)", () => {
+    it("cria a posição com alvo_id: null e o snapshot inicial funciona normalmente", async () => {
+      const sessao = await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+
+      const resultado = await posicaoManualService.criarPosicaoManual({
+        chaveManual: "CDB-SEM-ALVO",
+        instituicao: "Itaú",
+        descricao: "CDB ainda sem vínculo",
+        valorInvestidoCentavos: 300_000,
+        valorAtualCentavos: 310_000,
+      });
+
+      expect(resultado.alvoId).toBeNull();
+
+      const registro = await prisma.posicao_manual.findUniqueOrThrow({ where: { id: resultado.id } });
+      expect(registro.alvo_id).toBeNull();
+      expect(registro.fora_da_carteira).toBe(false);
+      expect(registro.reserva_emergencia).toBe(false);
+
+      const snapshot = await prisma.posicao_manual_valor.findUniqueOrThrow({
+        where: {
+          posicao_manual_id_sessao_import_id: {
+            posicao_manual_id: resultado.id,
+            sessao_import_id: sessao.id,
+          },
+        },
+      });
+      expect(snapshot.valor_investido_centavos).toBe(300_000);
+      expect(snapshot.valor_atual_centavos).toBe(310_000);
+    });
+
+    it("posição criada sem alvoId aparece no balde 'pendentes' de listarPosicoesManuaisParaVinculo", async () => {
+      await criarSessao("2026-07", "2026-07-28", "VIGENTE");
+
+      const resultado = await posicaoManualService.criarPosicaoManual({
+        chaveManual: "CDB-PENDENTE-2",
+        instituicao: "Itaú",
+        descricao: "CDB pendente",
+        valorInvestidoCentavos: 100_000,
+        valorAtualCentavos: 100_000,
+      });
+
+      const vinculos = await posicaoManualService.listarPosicoesManuaisParaVinculo();
+      expect(vinculos.pendentes.map((p) => p.posicaoManualId)).toContain(resultado.id);
     });
   });
 });

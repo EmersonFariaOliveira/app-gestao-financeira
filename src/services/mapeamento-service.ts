@@ -155,10 +155,13 @@ async function obterValorAtualPorChave(): Promise<Map<string, number>> {
  */
 async function obterAlvoIdsComPosicaoManualAtiva(): Promise<Set<string>> {
   const posicoesManuaisAtivas = await prisma.posicao_manual.findMany({
-    where: { ativo: true },
+    where: { ativo: true, alvo_id: { not: null } },
     select: { alvo_id: true },
   });
-  return new Set(posicoesManuaisAtivas.map((p) => p.alvo_id));
+  // `alvo_id` nunca é null aqui (filtrado acima) — posições manuais
+  // "pendentes" (feature posicao_manual_pendente) não têm alvo, logo não
+  // entram nesta heurística.
+  return new Set(posicoesManuaisAtivas.map((p) => p.alvo_id as string));
 }
 
 /**

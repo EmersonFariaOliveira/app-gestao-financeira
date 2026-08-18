@@ -147,14 +147,47 @@ async function listarPendenciasDaSessao(sessaoId: string): Promise<string[]> {
 }
 
 /**
- * Pendências da sessão vigente mais recente. Sem sessão vigente nenhuma,
- * retorna `[]` (não há o que bloquear por vínculo — `montarContextoEntradaMotor`
- * falha por outro motivo, "sem sessão", nesse caso).
+ * Pendências de `posicao_manual` (data-model.md: mesmo critério "pendente"
+ * de `ativo_mapeado` — `alvo_id = null AND fora_da_carteira = false AND
+ * reserva_emergencia = false`). Identificadas por `chave_manual`, mesma
+ * lista de strings usada para `chave_export` (a mensagem de erro em
+ * `calcular()` só faz `.join(", ")`, sem distinguir origem).
+ *
+ * Deliberadamente INDEPENDENTE de sessão de import: `posicao_manual` não é
+ * filha de `sessao_import` (data-model.md, seção 4.1) — uma posição manual
+ * pendente bloqueia a calculadora mesmo que não haja nenhuma sessão vigente
+ * (não seria coerente exigir sessão para enxergar uma pendência que não
+ * depende de sessão nenhuma). Função irmã de `listarPendenciasDaSessao`
+ * em vez de query embutida nela — mantém o nome "DaSessao" fiel ao que a
+ * função faz, e deixa explícito nos dois pontos de chamada
+ * (`listarPendencias` e `montarContextoEntradaMotor`) que são duas fontes
+ * de pendência distintas sendo combinadas.
+ */
+async function listarPendenciasPosicoesManuais(): Promise<string[]> {
+  const pendentes = await prisma.posicao_manual.findMany({
+    where: { ativo: true, alvo_id: null, fora_da_carteira: false, reserva_emergencia: false },
+    select: { chave_manual: true },
+  });
+  return pendentes.map((p) => p.chave_manual);
+}
+
+/**
+ * Pendências da sessão vigente mais recente, combinadas com as pendências
+ * de posição manual (independentes de sessão — ver
+ * `listarPendenciasPosicoesManuais`). Sem sessão vigente nenhuma, as
+ * pendências de `ativo_mapeado`/CSV são `[]` (não há o que cruzar sem
+ * posições importadas — `montarContextoEntradaMotor` falha por outro
+ * motivo, "sem sessão", nesse caso), mas as pendências de posição manual
+ * continuam sendo retornadas normalmente.
  */
 export async function listarPendencias(): Promise<string[]> {
-  const sessao = await obterSessaoVigenteMaisRecente();
-  if (!sessao) return [];
-  return listarPendenciasDaSessao(sessao.id);
+  const [sessao, pendenciasManuais] = await Promise.all([
+    obterSessaoVigenteMaisRecente(),
+    listarPendenciasPosicoesManuais(),
+  ]);
+  if (!sessao) return pendenciasManuais;
+  const pendenciasSessao = await listarPendenciasDaSessao(sessao.id);
+  return [...pendenciasSessao, ...pendenciasManuais];
 }
 
 /** Soma quantidades decimais (string) B3; retorna `null` se o total não for inteiro (não deveria ocorrer em B3 — research.md R6). */
@@ -189,7 +222,15 @@ async function montarContextoEntradaMotor(): Promise<ContextoEntradaMotor> {
     );
   }
 
-  const pendencias = await listarPendenciasDaSessao(sessao.id);
+  // Combina pendências de ativo_mapeado/CSV (da sessão) com pendências de
+  // posicao_manual (independentes de sessão — ver
+  // listarPendenciasPosicoesManuais) — mesmo bloqueio (FR-015) para as duas
+  // origens, mesma mensagem de erro.
+  const [pendenciasSessao, pendenciasManuais] = await Promise.all([
+    listarPendenciasDaSessao(sessao.id),
+    listarPendenciasPosicoesManuais(),
+  ]);
+  const pendencias = [...pendenciasSessao, ...pendenciasManuais];
   if (pendencias.length > 0) {
     throw new Error(
       `Calculadora bloqueada: ${pendencias.length} ativo(s) pendente(s) de vínculo (${pendencias.join(", ")}). Resolva em /vinculos antes de calcular.`,
@@ -289,6 +330,13 @@ async function montarContextoEntradaMotor(): Promise<ContextoEntradaMotor> {
   // posicao_manual ativa SEM snapshot na sessão vigente (§2.3) é omitida
   // silenciosamente (não é erro): ainda não existe dado suficiente para
   // ela entrar no cálculo deste mês.
+  //
+  // posicao_manual tem a MESMA máquina de estados que ativo_mapeado
+  // (alvo_id: string | null, fora_da_carteira, reserva_emergencia,
+  // mutuamente exclusivos) — o tratamento abaixo espelha exatamente o
+  // bloco do CSV acima: reserva_emergencia exclui inteiramente de
+  // posicoes[]; alvo_id null (pendente) ou fora_da_carteira entram em
+  // posicoes[] mas não participam da agregação de tipos/cotação por alvo.
   const chavesConsolidadasDoCsv = new Set(consolidadoPorChave.keys());
   const chavesManuaisInseridas = new Set<string>();
   const posicoesManuaisAtivas = await prisma.posicao_manual.findMany({
@@ -313,6 +361,9 @@ async function montarContextoEntradaMotor(): Promise<ContextoEntradaMotor> {
       // uma chave_manual não pode coincidir com um chave_export já
       // consolidado do CSV nem com outra chave_manual já inserida — nunca
       // somar silenciosamente duas posições distintas sob a mesma chave.
+      // Checada ANTES de qualquer `continue` de reserva/pendente/fora da
+      // carteira — mesmo uma posição manual que não vai para o déficit
+      // precisa ser validada quanto à colisão de identidade.
       if (
         chavesConsolidadasDoCsv.has(posicaoManual.chave_manual) ||
         chavesManuaisInseridas.has(posicaoManual.chave_manual)
@@ -323,17 +374,34 @@ async function montarContextoEntradaMotor(): Promise<ContextoEntradaMotor> {
       }
       chavesManuaisInseridas.add(posicaoManual.chave_manual);
 
+      // Mesma máquina de estados de ativo_mapeado (bloco CSV acima):
+      // reserva_emergencia exclui INTEIRAMENTE de posicoes[] — nem
+      // pendente nem fora-da-carteira chegam a esse ponto se forem
+      // reserva de emergência (mutuamente exclusivo com alvo_id/fora_da_carteira
+      // por invariante de aplicação, mas o `continue` aqui documenta a
+      // exclusão explicitamente, no mesmo padrão do bloco CSV).
+      if (posicaoManual.reserva_emergencia) continue;
+
+      const alvoId = posicaoManual.alvo_id;
+      const foraDaCarteira = posicaoManual.fora_da_carteira;
+
       posicoes.push({
         chaveExport: posicaoManual.chave_manual,
-        alvoId: posicaoManual.alvo_id,
-        foraDaCarteira: false,
+        alvoId,
+        foraDaCarteira,
         valorCentavos: snapshot.valor_atual_centavos,
         tipoGrupo: posicaoManual.tipo_grupo,
       });
 
-      const tipos = tiposGrupoPorAlvoId.get(posicaoManual.alvo_id) ?? new Set<string>();
+      // Mesmo `if (!alvoId || foraDaCarteira) continue;` do bloco CSV:
+      // posição manual pendente (alvoId null) ou fora da carteira entra em
+      // posicoes[] mas não participa da agregação de tipos/cotação por
+      // alvo (regra 4).
+      if (!alvoId || foraDaCarteira) continue;
+
+      const tipos = tiposGrupoPorAlvoId.get(alvoId) ?? new Set<string>();
       tipos.add(posicaoManual.tipo_grupo);
-      tiposGrupoPorAlvoId.set(posicaoManual.alvo_id, tipos);
+      tiposGrupoPorAlvoId.set(alvoId, tipos);
       // Nunca entra em candidatosCotacaoPorAlvo: GRUPOS_B3 não inclui
       // RENDA_FIXA_MANUAL, então posições manuais nunca são candidatas ao
       // arredondamento por lote (regra 7 — "não se aplica a posições

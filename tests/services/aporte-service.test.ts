@@ -919,6 +919,302 @@ describe("aporte-service", () => {
     });
   });
 
+  describe("posicao_manual com máquina de estados de ativo_mapeado (alvo_id null | fora_da_carteira | reserva_emergencia)", () => {
+    it("posicao_manual pendente (alvo_id null, fora_da_carteira=false, reserva_emergencia=false) bloqueia calcular(), citando a chave_manual na mensagem de erro", async () => {
+      const { sessao } = await criarCenarioSemPendencia();
+
+      const posicaoManualPendente = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-PENDENTE-VINCULO",
+          instituicao: "Itaú",
+          alvo_id: null,
+          descricao: "CDB recém-cadastrado, ainda sem vínculo",
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManualPendente.id,
+          sessao_import_id: sessao.id,
+          valor_investido_centavos: 10_000,
+          valor_atual_centavos: 10_000,
+        },
+      });
+
+      const preparo = await aporteService.prepararCalculadora();
+      expect(preparo.bloqueada).toBe(true);
+      expect(preparo.pendencias).toContain("CDB-PENDENTE-VINCULO");
+
+      await expect(
+        aporteService.calcular({
+          valorCentavos: 100_000,
+          incluirDividendos: false,
+          incluirTroco: false,
+          aporteMinimoCentavos: 50_000,
+        }),
+      ).rejects.toThrow(/CDB-PENDENTE-VINCULO/);
+    });
+
+    it("posicao_manual pendente bloqueia prepararCalculadora MESMO sem nenhuma sessão de import vigente (pendência independente de sessão)", async () => {
+      // Nenhuma sessao_import criada neste teste — listarPendencias() ainda
+      // assim deve enxergar a pendência de posicao_manual.
+      await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-SEM-SESSAO",
+          instituicao: "Itaú",
+          alvo_id: null,
+          descricao: "CDB cadastrado antes de qualquer import",
+        },
+      });
+
+      const preparo = await aporteService.prepararCalculadora();
+      expect(preparo.bloqueada).toBe(true);
+      expect(preparo.pendencias).toEqual(["CDB-SEM-SESSAO"]);
+    });
+
+    it("posicao_manual com fora_da_carteira=true entra em posicoes[] (não bloqueia, checagem de colisão continua ativa) mas é excluída da base de déficit", async () => {
+      const alvoAcoes = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessao.id,
+          chave_export: "PRIO3",
+          instituicao: "Itaú",
+          quantidade: "100",
+          patrimonio_hoje_centavos: 100_000,
+          tipo_grupo: "ACOES",
+          data_ultima_cotacao: new Date("2026-07-28"),
+        },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+      });
+
+      const posicaoManualForaCarteira = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-LEGADO-FORA-CARTEIRA",
+          instituicao: "Itaú",
+          alvo_id: null,
+          fora_da_carteira: true,
+          descricao: "CDB legado que não faz parte da carteira alvo",
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManualForaCarteira.id,
+          sessao_import_id: sessao.id,
+          valor_investido_centavos: 1,
+          valor_atual_centavos: 200_000,
+        },
+      });
+
+      const preparo = await aporteService.prepararCalculadora();
+      expect(preparo.bloqueada).toBe(false);
+      expect(preparo.pendencias).toEqual([]);
+
+      const calculo = await aporteService.calcular({
+        valorCentavos: 50_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 100,
+      });
+
+      // Base do motor não inclui os 200_000 fora-da-carteira (regra 4).
+      expect(calculo.resultado.patrimonioBaseCentavos).toBe(100_000);
+    });
+
+    it("posicao_manual com reserva_emergencia=true é excluída de posicoes[]/base do motor e NÃO bloqueia a calculadora", async () => {
+      const alvoAcoes = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessao.id,
+          chave_export: "PRIO3",
+          instituicao: "Itaú",
+          quantidade: "100",
+          patrimonio_hoje_centavos: 100_000,
+          tipo_grupo: "ACOES",
+          data_ultima_cotacao: new Date("2026-07-28"),
+        },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+      });
+
+      const posicaoManualReserva = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-RESERVA-EMERGENCIA",
+          instituicao: "Itaú",
+          alvo_id: null,
+          reserva_emergencia: true,
+          descricao: "CDB dedicado à reserva de emergência",
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManualReserva.id,
+          sessao_import_id: sessao.id,
+          valor_investido_centavos: 1,
+          valor_atual_centavos: 300_000,
+        },
+      });
+
+      const preparo = await aporteService.prepararCalculadora();
+      expect(preparo.bloqueada).toBe(false);
+      expect(preparo.pendencias).toEqual([]);
+
+      const calculo = await aporteService.calcular({
+        valorCentavos: 50_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 100,
+      });
+
+      // Base do motor não inclui os 300_000 da reserva de emergência.
+      expect(calculo.resultado.patrimonioBaseCentavos).toBe(100_000);
+    });
+
+    it("colisão de identidade continua sendo checada para posicao_manual fora_da_carteira=true (não-pendente), antes do continue de estado", async () => {
+      const alvoAcoes = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+      // PRIO3 vinculado normalmente (não pendente) — isola a asserção na
+      // checagem de COLISÃO, sem que a pendência de ativo_mapeado dispare
+      // primeiro (o que tornaria a asserção sobre a mensagem ambígua).
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessao.id,
+          chave_export: "PRIO3",
+          instituicao: "Itaú",
+          quantidade: "100",
+          patrimonio_hoje_centavos: 300_000,
+          tipo_grupo: "ACOES",
+          data_ultima_cotacao: new Date("2026-07-28"),
+        },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+      });
+
+      // Colisão: chave_manual igual a um chave_export já consolidado do
+      // CSV. `fora_da_carteira: true` (em vez de pendente) garante que
+      // NENHUMA pendência é disparada antes — a única falha possível é a
+      // colisão de identidade, checada antes do `continue` de estado.
+      const posicaoManualColidenteForaCarteira = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "PRIO3",
+          instituicao: "Itaú",
+          alvo_id: null,
+          fora_da_carteira: true,
+          descricao: "Posição manual colidente, fora da carteira",
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManualColidenteForaCarteira.id,
+          sessao_import_id: sessao.id,
+          valor_investido_centavos: 500_000,
+          valor_atual_centavos: 520_000,
+        },
+      });
+
+      await expect(
+        aporteService.calcular({
+          valorCentavos: 50_000,
+          incluirDividendos: false,
+          incluirTroco: false,
+          aporteMinimoCentavos: 100,
+        }),
+      ).rejects.toThrow(/Colisão de identidade.*PRIO3/);
+    });
+
+    it("pendência de ativo_mapeado E de posicao_manual ao mesmo tempo: prepararCalculadora combina as duas em pendencias[], e calcular() cita ambas na mensagem", async () => {
+      const { sessao } = await criarCenarioSemPendencia();
+
+      // Segunda pendência: um ativo_mapeado novo, sem vínculo (CSV).
+      await prisma.posicao.create({
+        data: {
+          sessao_import_id: sessao.id,
+          chave_export: "ATIVO-NOVO-CSV",
+          instituicao: "Itaú",
+          quantidade: "10",
+          patrimonio_hoje_centavos: 10_000,
+          tipo_grupo: "ACOES",
+          data_ultima_cotacao: new Date("2026-07-28"),
+        },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "ATIVO-NOVO-CSV", alvo_id: null, fora_da_carteira: false },
+      });
+
+      // Terceira pendência: uma posicao_manual ainda sem vínculo.
+      const posicaoManualPendente = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-PENDENTE-COMBINADO",
+          instituicao: "Itaú",
+          alvo_id: null,
+          descricao: "CDB recém-cadastrado, ainda sem vínculo",
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posicaoManualPendente.id,
+          sessao_import_id: sessao.id,
+          valor_investido_centavos: 10_000,
+          valor_atual_centavos: 10_000,
+        },
+      });
+
+      const preparo = await aporteService.prepararCalculadora();
+      expect(preparo.bloqueada).toBe(true);
+      expect(preparo.pendencias.sort()).toEqual(
+        ["ATIVO-NOVO-CSV", "CDB-PENDENTE-COMBINADO"].sort(),
+      );
+
+      await expect(
+        aporteService.calcular({
+          valorCentavos: 100_000,
+          incluirDividendos: false,
+          incluirTroco: false,
+          aporteMinimoCentavos: 50_000,
+        }),
+      ).rejects.toThrow(/ATIVO-NOVO-CSV/);
+      await expect(
+        aporteService.calcular({
+          valorCentavos: 100_000,
+          incluirDividendos: false,
+          incluirTroco: false,
+          aporteMinimoCentavos: 50_000,
+        }),
+      ).rejects.toThrow(/CDB-PENDENTE-COMBINADO/);
+    });
+  });
+
   describe("ajuste_valor_investido — nunca lido por montarContextoEntradaMotor (T014, US2, SC-004/FR-006)", () => {
     it("calcular() produz resultado IDÊNTICO antes e depois de um ajuste_valor_investido sobre a mesma posição", async () => {
       const { sessao } = await criarCenarioSemPendencia();

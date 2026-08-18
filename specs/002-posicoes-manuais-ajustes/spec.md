@@ -124,7 +124,7 @@ Ao registrar um aporte como executado, o valor investido das posições manuais 
 
 ## Assumptions
 
-- Cada posição manual está vinculada a exatamente um alvo da carteira (relação N-para-1, como nos ativos mapeados do CSV) — não há posição manual sem alvo.
+- Uma posição manual pode nascer sem alvo definido ("pendente") — mesma máquina de estados já usada por `ativo_mapeado`: `alvo_id` preenchido (vinculada a um alvo da carteira), `fora_da_carteira = true` ou `reserva_emergencia = true`, mutuamente exclusivos. Resolução unificada na tela de vínculos (/vinculos, seção 6.3), o mesmo fluxo usado para ativos do CSV — não existe uma tela de vínculo separada para posições manuais. Uma posição manual pendente, fora-da-carteira ou reserva-de-emergência é excluída do cálculo de déficit (FR-015), mesma regra já aplicada a `ativo_mapeado` nesses estados.
 - Um ajuste de valor investido pode ser criado/exibido tanto para um `chave_export` vinculado a um alvo ativo quanto para um marcado "fora da carteira" (sem alvo) — só ativos pendentes de vínculo, ignorados ou em reserva de emergência ficam de fora. O INCREMENTO AUTOMÁTICO por aporte executado, porém, continua exigindo alvo (FR-015): um ajuste fora-da-carteira nunca recebe incremento automático, só correção manual pontual. Um ajuste histórico não é apagado se o vínculo mudar depois.
 - Uma posição manual encerrada não pode ser reativada — se o mesmo ativo precisar voltar a ser acompanhado, o usuário cadastra uma nova posição manual. Reativação fica fora do escopo desta funcionalidade.
 - Quando não existe sessão de import anterior vigente (primeira posição manual ou primeiro ajuste cadastrado fora do fluxo de import), não há carry-forward a aplicar — os valores iniciais são os informados no cadastro.

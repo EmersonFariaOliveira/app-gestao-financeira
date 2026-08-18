@@ -32,8 +32,10 @@ import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 
 import {
+  atualizarValoresPosicaoManual,
   criarOuAtualizarAjuste,
   criarPosicaoManual,
+  editarPosicaoManual,
   encerrarPosicaoManual,
   listarAjustesAtivos,
   listarPosicoesManuaisAtivas,
@@ -118,6 +120,16 @@ function PosicoesManuaisContent() {
   );
   const [encerrando, setEncerrando] = useState(false);
 
+  // Diálogo "Editar" (só campos cadastrais + valores — o alvo só muda em
+  // /vinculos, ver `vincularPosicaoManual`).
+  const [posicaoParaEditar, setPosicaoParaEditar] = useState<PosicaoManualListItem | null>(null);
+  const [editInstituicaoTexto, setEditInstituicaoTexto] = useState("");
+  const [editDescricaoTexto, setEditDescricaoTexto] = useState("");
+  const [editValorInvestidoTexto, setEditValorInvestidoTexto] = useState("");
+  const [editValorAtualTexto, setEditValorAtualTexto] = useState("");
+  const [erroFormEditar, setErroFormEditar] = useState<string | null>(null);
+  const [salvandoEdicao, setSalvandoEdicao] = useState(false);
+
   // Seção "Ajustes de fundos" (T017, User Story 2): correção pontual do
   // valor investido de um chave_export que continua vindo do CSV — nunca
   // toca valor_atual/déficit (FR-006). `vinculados` + `foraDaCarteira`
@@ -188,7 +200,7 @@ function PosicoesManuaisContent() {
     chaveManual: (p) => p.chaveManual,
     instituicao: (p) => p.instituicao,
     descricao: (p) => p.descricao,
-    nomeAlvo: (p) => p.nomeAlvo,
+    nomeAlvo: (p) => p.nomeAlvo ?? "",
     valorInvestidoCentavos: (p) => p.valorInvestidoCentavos ?? 0,
     valorAtualCentavos: (p) => p.valorAtualCentavos ?? 0,
   });
@@ -294,10 +306,6 @@ function PosicoesManuaisContent() {
       setErroForm("Informe a descrição.");
       return;
     }
-    if (!alvoIdSelecionado) {
-      setErroForm("Selecione o alvo desta posição.");
-      return;
-    }
 
     let valorInvestidoCentavos: number;
     let valorAtualCentavos: number;
@@ -325,7 +333,7 @@ function PosicoesManuaisContent() {
         chaveManual: chaveManualTexto.trim(),
         instituicao: instituicaoTexto.trim(),
         descricao: descricaoTexto.trim(),
-        alvoId: alvoIdSelecionado,
+        alvoId: alvoIdSelecionado || undefined,
         valorInvestidoCentavos,
         valorAtualCentavos,
       });
@@ -355,6 +363,87 @@ function PosicoesManuaisContent() {
       await carregar();
     } finally {
       setEncerrando(false);
+    }
+  }
+
+  function handleAbrirEditar(p: PosicaoManualListItem) {
+    setPosicaoParaEditar(p);
+    setEditInstituicaoTexto(p.instituicao);
+    setEditDescricaoTexto(p.descricao);
+    setEditValorInvestidoTexto(
+      p.valorInvestidoCentavos !== null ? (p.valorInvestidoCentavos / 100).toFixed(2).replace(".", ",") : "",
+    );
+    setEditValorAtualTexto(
+      p.valorAtualCentavos !== null ? (p.valorAtualCentavos / 100).toFixed(2).replace(".", ",") : "",
+    );
+    setErroFormEditar(null);
+  }
+
+  function limparFormularioEditar() {
+    setPosicaoParaEditar(null);
+    setEditInstituicaoTexto("");
+    setEditDescricaoTexto("");
+    setEditValorInvestidoTexto("");
+    setEditValorAtualTexto("");
+    setErroFormEditar(null);
+  }
+
+  async function handleSalvarEdicao() {
+    if (!posicaoParaEditar) return;
+    if (!editInstituicaoTexto.trim()) {
+      setErroFormEditar("Informe a instituição.");
+      return;
+    }
+    if (!editDescricaoTexto.trim()) {
+      setErroFormEditar("Informe a descrição.");
+      return;
+    }
+
+    let valorInvestidoCentavos: number;
+    let valorAtualCentavos: number;
+    try {
+      valorInvestidoCentavos = parseDecimalParaCentavos(editValorInvestidoTexto);
+    } catch {
+      setErroFormEditar("Valor investido inválido — use um decimal (ex.: 1000,00).");
+      return;
+    }
+    try {
+      valorAtualCentavos = parseDecimalParaCentavos(editValorAtualTexto);
+    } catch {
+      setErroFormEditar("Valor atual inválido — use um decimal (ex.: 1050,00).");
+      return;
+    }
+    if (valorInvestidoCentavos < 0 || valorAtualCentavos < 0) {
+      setErroFormEditar("Valores não podem ser negativos.");
+      return;
+    }
+
+    setSalvandoEdicao(true);
+    setErroFormEditar(null);
+    try {
+      const respCadastral = await editarPosicaoManual({
+        posicaoManualId: posicaoParaEditar.id,
+        instituicao: editInstituicaoTexto.trim(),
+        descricao: editDescricaoTexto.trim(),
+      });
+      if (!respCadastral.ok) {
+        setErroFormEditar(respCadastral.erro);
+        return;
+      }
+      const respValores = await atualizarValoresPosicaoManual({
+        posicaoManualId: posicaoParaEditar.id,
+        valorInvestidoCentavos,
+        valorAtualCentavos,
+      });
+      if (!respValores.ok) {
+        setErroFormEditar(respValores.erro);
+        return;
+      }
+      toast.success(`Posição manual "${respCadastral.data.descricao}" atualizada.`);
+      limparFormularioEditar();
+      await carregar();
+    } finally {
+      setSalvandoEdicao(false);
     }
   }
 
@@ -435,13 +524,16 @@ function PosicoesManuaisContent() {
                     value={alvoIdSelecionado}
                     onChange={(e) => setAlvoIdSelecionado(e.target.value)}
                   >
-                    <option value="">Selecione…</option>
+                    <option value="">Sem alvo (deixar pendente)</option>
                     {alvos.map((a) => (
                       <option key={a.id} value={a.id}>
                         {a.nome}
                       </option>
                     ))}
                   </select>
+                  <p className="text-xs text-muted-foreground">
+                    Opcional — deixe em branco para vincular depois na tela de Vínculos.
+                  </p>
                 </Field>
                 <Field className="w-36">
                   <FieldLabel htmlFor="pm-valor-investido">Valor investido</FieldLabel>
@@ -548,7 +640,13 @@ function PosicoesManuaisContent() {
                     <TableCell className="max-w-56 whitespace-normal break-words">
                       {p.descricao}
                     </TableCell>
-                    <TableCell>{p.nomeAlvo}</TableCell>
+                    <TableCell>
+                      {p.nomeAlvo ?? (
+                        <span className="inline-flex items-center gap-1 rounded border border-amber-400/60 bg-amber-400/10 px-1.5 py-0.5 text-xs">
+                          Pendente de vínculo
+                        </span>
+                      )}
+                    </TableCell>
                     <TableCell>
                       {p.valorInvestidoCentavos !== null
                         ? formatCentavosParaReais(p.valorInvestidoCentavos)
@@ -560,13 +658,18 @@ function PosicoesManuaisContent() {
                         : "—"}
                     </TableCell>
                     <TableCell>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => setPosicaoParaEncerrar(p)}
-                      >
-                        Encerrar
-                      </Button>
+                      <div className="flex flex-wrap gap-1">
+                        <Button size="sm" variant="outline" onClick={() => handleAbrirEditar(p)}>
+                          Editar
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => setPosicaoParaEncerrar(p)}
+                        >
+                          Encerrar
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -732,6 +835,76 @@ function PosicoesManuaisContent() {
               disabled={encerrando}
             >
               {encerrando ? "Encerrando…" : "Confirmar encerramento"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={posicaoParaEditar !== null}
+        onOpenChange={(aberto) => {
+          if (!aberto) limparFormularioEditar();
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Editar posição manual</DialogTitle>
+            <DialogDescription>
+              {posicaoParaEditar && (
+                <>
+                  Chave manual: <strong>{posicaoParaEditar.chaveManual}</strong> (imutável). Para
+                  alterar o alvo desta posição, use a tela de Vínculos.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-4">
+            <Field>
+              <FieldLabel htmlFor="edit-instituicao">Instituição</FieldLabel>
+              <Input
+                id="edit-instituicao"
+                value={editInstituicaoTexto}
+                onChange={(e) => setEditInstituicaoTexto(e.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="edit-descricao">Descrição</FieldLabel>
+              <Input
+                id="edit-descricao"
+                value={editDescricaoTexto}
+                onChange={(e) => setEditDescricaoTexto(e.target.value)}
+              />
+            </Field>
+            <div className="flex flex-wrap gap-4">
+              <Field className="w-36">
+                <FieldLabel htmlFor="edit-valor-investido">Valor investido</FieldLabel>
+                <Input
+                  id="edit-valor-investido"
+                  inputMode="decimal"
+                  placeholder="1000,00"
+                  value={editValorInvestidoTexto}
+                  onChange={(e) => setEditValorInvestidoTexto(e.target.value)}
+                />
+              </Field>
+              <Field className="w-36">
+                <FieldLabel htmlFor="edit-valor-atual">Valor atual</FieldLabel>
+                <Input
+                  id="edit-valor-atual"
+                  inputMode="decimal"
+                  placeholder="1050,00"
+                  value={editValorAtualTexto}
+                  onChange={(e) => setEditValorAtualTexto(e.target.value)}
+                />
+              </Field>
+            </div>
+            {erroFormEditar && <FieldError>{erroFormEditar}</FieldError>}
+          </div>
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" />} disabled={salvandoEdicao}>
+              Cancelar
+            </DialogClose>
+            <Button onClick={() => void handleSalvarEdicao()} disabled={salvandoEdicao}>
+              {salvandoEdicao ? "Salvando…" : "Salvar"}
             </Button>
           </DialogFooter>
         </DialogContent>

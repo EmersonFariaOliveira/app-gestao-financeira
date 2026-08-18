@@ -166,7 +166,10 @@ model posicao_manual {
   /// — trocar a chave é cadastrar uma posição manual nova.
   chave_manual        String   @unique
   instituicao         String
-  alvo_id             String
+  /// null = pendente de vínculo (mesma máquina de estados de
+  /// ativo_mapeado.alvo_id — ver fora_da_carteira/reserva_emergencia
+  /// abaixo). Resolvido pela tela /vinculos, mesmo fluxo dos ativos do CSV.
+  alvo_id             String?
   descricao           String
   /// String livre (sem enum), como posicao.tipo_grupo; não entra no
   /// arredondamento por lote (regra 7 do motor).
@@ -174,13 +177,24 @@ model posicao_manual {
   /// chave_export (ativo_mapeado) marcado ignorar_no_import que esta
   /// posição substitui; null quando cadastrada sem CSV de origem.
   chave_export_origem String?
+  /// true = posição manual excluída da consolidação por alvo, marcada
+  /// explicitamente como fora da carteira alvo (mesmo estado de
+  /// ativo_mapeado.fora_da_carteira). Mutuamente exclusivo com alvo_id
+  /// preenchido e reserva_emergencia=true (validado na aplicação).
+  fora_da_carteira    Boolean  @default(false)
+  /// true = posição manual que é reserva de emergência: não entra em
+  /// nenhum déficit/alocação por alvo (mesmo tratamento de exclusão que
+  /// fora_da_carteira) mas é um balde ISOLADO próprio (mesmo estado de
+  /// ativo_mapeado.reserva_emergencia). Mutuamente exclusivo com alvo_id
+  /// preenchido e fora_da_carteira=true (validado na aplicação).
+  reserva_emergencia  Boolean  @default(false)
   /// false = encerrada (FR-004) — some do carry-forward e do cálculo de
   /// déficit, histórico preservado; transição unidirecional (true -> false
   /// apenas), sem reativação.
   ativo               Boolean  @default(true)
   criado_em           DateTime @default(now())
 
-  alvo                 alvo           @relation(fields: [alvo_id], references: [id], onDelete: Restrict)
+  alvo                 alvo?          @relation(fields: [alvo_id], references: [id], onDelete: Restrict)
   ativo_mapeado_origem ativo_mapeado? @relation(fields: [chave_export_origem], references: [chave_export])
 
   valores     posicao_manual_valor[]
