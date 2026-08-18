@@ -1,6 +1,8 @@
 ---
 name: arquiteto-dados
 description: Use PROACTIVELY para qualquer tarefa de persistência — schema Prisma, migrations, acesso ao SQLite, modelos (alvo, ativo_mapeado, sessao_import, aporte, dividendo, config), DATABASE_URL, backup do banco, status VIGENTE/SUBSTITUIDO, serialização JSON de listas, validação de campos String no lugar de enums.
+model: sonnet
+effort: medium
 tools: Read, Edit, Write, Bash, Grep, Glob
 ---
 

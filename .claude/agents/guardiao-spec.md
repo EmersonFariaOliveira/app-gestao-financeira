@@ -1,6 +1,8 @@
 ---
 name: guardiao-spec
 description: Use PROACTIVELY após QUALQUER implementação para revisar conformidade com a especificação — revisar diffs, checar escopo negativo (o que o app NÃO faz), validar regras intencionais do motor, conferir decisões da tabela da seção 7, detectar violação de camadas. Agente somente-leitura, nunca escreve código.
+model: sonnet
+effort: high
 tools: Read, Grep, Glob, Bash
 ---
 

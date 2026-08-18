@@ -1,6 +1,8 @@
 ---
 name: calculista-aporte
 description: Use PROACTIVELY para qualquer lógica do cálculo de aporte — déficit por alvo, fila de prioridade, divisão do aporte, transbordo proporcional, aporte mínimo por transação, arredondamento por lote (B3), banda de tolerância, redistribuição após veto humano, inclusão de dividendos no aporte. Lógica pura, sem I/O.
+model: sonnet
+effort: high
 tools: Read, Edit, Write, Bash, Grep, Glob
 ---
 

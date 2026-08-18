@@ -27,6 +27,7 @@ Ele faz isso comparando a **carteira real** (importada via export CSV do MyCapit
 | Coletar valor atual de cada ativo manualmente | Import dos CSVs do MyCapital (1 arquivo por instituição, arrasta e pronto) |
 | Calcular preço médio de compras fracionadas | Desnecessário para decidir aporte; já vem no export se precisar exibir |
 | Saber se a carteira está convergindo para o alvo | Histórico de imports mês a mês + visão de desvio por ativo/grupo |
+| CDBs e fundos com dados incorretos no export do MyCapital | Posições manuais e ajustes de valor investido, com carry-forward mês a mês — ver seção 5.2 |
 
 ---
 
@@ -34,7 +35,7 @@ Ele faz isso comparando a **carteira real** (importada via export CSV do MyCapit
 
 1. Exportar os CSVs do MyCapital (um por instituição).
 2. Arrastar todos os arquivos para o app (eles formam uma **sessão de import**; re-exportar dias depois no mesmo mês simplesmente cria uma sessão nova que passa a ser a vigente).
-3. App consolida posições, casa com os alvos e sinaliza ativos novos sem vínculo (se houver, o usuário vincula na hora — o vínculo fica memorizado).
+3. App consolida posições, casa com os alvos, sinaliza ativos novos sem vínculo (se houver, o usuário vincula na hora — o vínculo fica memorizado) e apresenta a lista de **posições manuais e ajustes de valor investido** para revisão, já pré-preenchida com os valores do mês anterior (ver seção 6.9).
 4. Usuário digita o valor do aporte do mês (ex.: R$ 2.000).
 5. App devolve a **fila de prioridade por déficit** e a **divisão sugerida do aporte**, editável.
 6. Usuário ajusta se quiser (veto humano), registra o que de fato executou.
@@ -59,7 +60,7 @@ Ele faz isso comparando a **carteira real** (importada via export CSV do MyCapit
 - **Sem enums:** Prisma + SQLite não suporta enum. Campos como `status` (VIGENTE | SUBSTITUIDO) são `String` com validação na camada de aplicação (e/ou CHECK constraint via migration SQL).
 - **Sem listas escalares:** campos como `instituicoes[]` viram coluna `String` com JSON serializado (uso é apenas a checagem de completude — não precisa de tabela relacional).
 - **Valores monetários:** evitar float; armazenar como inteiro em centavos, convertendo na borda da aplicação.
-- **Backup:** o arquivo `.db` é o backup completo (histórico, alvos, vínculos, dividendos). Copiá-lo para nuvem/pendrive = backup total. O export JSON de configuração (alvos + vínculos + settings) permanece como formato portável complementar.
+- **Backup:** o arquivo `.db` é o backup completo (histórico, alvos, vínculos, dividendos, posições manuais). Copiá-lo para nuvem/pendrive = backup total. O export JSON de configuração (alvos + vínculos + settings) permanece como formato portável complementar.
 - **Localização do arquivo:** fora da pasta do build, em caminho configurável via env (`DATABASE_URL="file:./data/app.db"`), incluído no `.gitignore`.
 
 ### Camadas lógicas (isolamento intencional)
@@ -73,7 +74,9 @@ Ele faz isso comparando a **carteira real** (importada via export CSV do MyCapit
 │  déficit → fila de prioridade → divisão     │
 ├─────────────────────────────────────────────┤
 │  Mapeamento (de-para ativo → alvo)          │
-│  relação N-para-1, memorizada               │
+│  relação N-para-1, memorizada; também       │
+│  resolve ativos ignorados do CSV e sua      │
+│  posição manual substituta                  │
 ├─────────────────────────────────────────────┤
 │  Parser CSV MyCapital (camada isolada)      │
 │  único ponto que conhece o formato do export│
@@ -95,6 +98,7 @@ Ele faz isso comparando a **carteira real** (importada via export CSV do MyCapit
 - Identificação mista: ticker limpo para listados (PRIO3, XPML11), nome por extenso para fundos e Tesouro ("Kinea Atlas Multimercado") — a chave de vínculo é a string como vem no arquivo; mudanças de grafia aparecem como "ativo novo" (comportamento desejado: avisar em vez de errar).
 - Nome da instituição extraível do nome do arquivo (`..._Itaú.csv`).
 - **Ativos internacionais (validado com export da Avenue):** mesmo schema, `Tipo de Grupo = EXTERIOR` + coluna `tipoAtivoInternacional` (STOCK, etc.). O `Patrimônio Hoje` **já vem convertido em BRL** (colunas em dólar preenchidas em paralelo, apenas informativas) → o motor usa uma única coluna em reais para toda a carteira, sem conversão cambial própria. Quantidades são **fracionadas** (ex.: 0.14451 ações) → arredondamento por lote não se aplica a EXTERIOR. O `tipoAtivoInternacional` é tratado como **string opaca**: o parser aceita qualquer valor sem validar (só STOCK foi observado; REIT/ETF/BOND ou outros são exibidos como vierem, sem impacto no motor).
+- **Problemas conhecidos de qualidade em dois grupos** (motivam a seção 5.2): CDBs de pelo menos uma instituição não vêm corretos no export (tratados como ignorados no parser, substituídos por posição manual); fundos de investimento (`FUNDOS_INVESTIMENTO`) vêm com `Patrimônio Hoje` correto, mas o campo de valor investido do export sempre igual ao valor atual (corrigido via `ajuste_valor_investido`).
 
 ---
 
@@ -118,6 +122,11 @@ ativo_mapeado (asset_mapping)
 │                        dos percentuais, nunca recebe aporte, exibido
 │                        à parte. (alvo_id null + fora_da_carteira
 │                        false = pendente de vínculo)
+├─ ignorar_no_import     bool — ativo lido do CSV mas excluído da
+│                        consolidação porque o export vem incorreto
+│                        (ex.: CDB); substituído por uma posicao_manual
+│                        vinculada ao mesmo alvo (ver seção 4.1).
+│                        Evita o alarme de "ativo novo" a cada import
 └─ criado_em             ex.: Tesouro Selic 2027 e 2031 → alvo "Pós-fixado"
 
 sessao_import (snapshot)
@@ -150,6 +159,8 @@ aporte (contribution)
 ├─ sugestao[]            o que o motor sugeriu (alvo, valor)
 └─ executado[]           o que o usuário registrou ter feito
                          → permite auditar "sugerido vs. executado"
+                         → também dispara os incrementos pendentes
+                           de valor investido (ver seção 4.1)
 
 dividendo (dividend)
 ├─ id
@@ -168,12 +179,64 @@ config (settings)        chave-valor em JSON
 └─ ...                   exportável/importável como backup manual
 ```
 
+### 4.1 Posições manuais e ajustes de valor investido
+
+```
+posicao_manual                    identidade memorizada de um ativo que
+├─ id                              não vem (ou não deve vir) do CSV
+├─ chave_manual          definida pelo usuário, ex.: "CDB-ITAU-2029"
+├─ instituicao
+├─ alvo_id (FK)          vínculo memorizado, igual ativo_mapeado
+├─ descricao             ex.: "CDB Itaú 120% CDI 2029"
+├─ tipo_grupo             fixo "RENDA_FIXA_MANUAL" — valor livre,
+│                         não entra no arredondamento por lote
+├─ ativo (bool)          false = encerrado (CDB vencido), some da
+│                         lista de carry-forward sem apagar histórico
+└─ criado_em
+
+posicao_manual_valor              snapshot por sessão — o que muda
+├─ id                              mês a mês numa posição manual
+├─ posicao_manual_id (FK)
+├─ sessao_import_id (FK)
+├─ valor_investido        pré-preenchido: anterior + incremento
+│                         pendente aplicado (editável)
+├─ valor_atual            pré-preenchido: valor da sessão anterior,
+│                         sem cálculo (editável — vem do extrato)
+└─ criado_em
+
+ajuste_valor_investido            correção pontual do valor_investido
+├─ id                              de um ativo que VEM do CSV (fundos)
+├─ chave_export (FK)      ativo_mapeado existente
+├─ sessao_import_id (FK)
+├─ valor_investido_corrigido   pré-preenchido: anterior + incremento
+│                              pendente aplicado (editável)
+└─ criado_em                       valor_atual continua vindo do CSV,
+                                    não duplicado aqui
+
+incremento_valor_investido_pendente   gerado ao registrar aporte
+├─ id                                  executado; consumido no próximo
+├─ alvo_id (FK)                        import
+├─ chave_export (FK, null)     preenchido se o alvo mapeia
+│                              exclusivamente 1 fundo (CSV)
+├─ posicao_manual_id (FK, null)  preenchido se o alvo mapeia
+│                                exclusivamente 1 posição manual
+│                                (no máximo um dos dois FKs acima
+│                                é preenchido; ambos null = alvo
+│                                ambíguo, distribuição manual)
+├─ aporte_id (FK)               proveniência, auditável
+├─ valor_incremento
+├─ aplicado (bool)              false até o próximo import consumir
+└─ criado_em
+```
+
 Observações:
 - **Imports são imutáveis; a vigência mensal é que muda de mãos.** Cada sessão de import é um registro novo, nunca sobrescrito. Quando entra uma sessão nova do mesmo `mes_referencia`, a anterior é marcada como SUBSTITUIDO (não deletada) e a nova vira VIGENTE — regra automática, sem perguntar ao usuário, apenas com aviso no preview.
 - **Histórico e cálculos usam sempre a sessão vigente de cada mês** → série mensal limpa (um ponto por mês). Sessões substituídas ficam acessíveis numa visão de auditoria.
 - **Aportes ficam amarrados à sessão sobre a qual foram calculados**, mesmo que ela seja substituída depois. Substituição de vigência nunca reescreve nem re-vincula aportes passados — a sugestão só faz sentido à luz dos dados daquele momento. Reabrir a calculadora após um novo import gera um novo cálculo sobre a nova sessão vigente.
 - Posições do mesmo ativo em instituições diferentes são **somadas pela chave** antes da comparação com o alvo.
 - A soma dos percentuais dos alvos vigentes deve ser validada (= 100%, com tolerância) na tela de alvos.
+- **Posições manuais participam do cálculo de déficit como qualquer posição do CSV** — a diferença é só a origem do dado (manual vs. export), não o tratamento pelo motor.
+- **`valor_investido` (manual ou corrigido) nunca é usado pelo motor de aporte** — é puramente informativo, para dashboard e histórico; não é (e não vira) cálculo de rentabilidade.
 
 ---
 
@@ -185,9 +248,9 @@ Observações:
 4. **Ativos "Fora da carteira alvo" não participam:** posições vinculadas ao marcador especial *Fora da carteira* (ver 6.3) são excluídas da base de cálculo do patrimônio usado nos percentuais e nunca recebem aporte. São exibidas à parte no dashboard. Sem isso, ativos legados que não existem na carteira Finclass corromperiam todos os déficits.
 5. **Aporte mínimo por transação (configurável, ex.: R$ 500):** se a fatia destinada a um alvo ficar abaixo do mínimo, ela não é criada — o valor é realocado para o topo da fila. Elimina micro-transações por definição.
 6. **Sugestão editável (veto humano):** o usuário pode zerar ou alterar qualquer linha; o app redistribui o restante seguindo as mesmas regras.
-7. **Arredondamento por lote (v1):** para ativos B3 (ações/FIIs/ETFs), arredondar para cotas inteiras usando a cotação do export; sobras de troco vão para o alvo de renda fixa (que aceita valor quebrado) ou ficam registradas para o mês seguinte. **Não se aplica a EXTERIOR** (compra fracionada) nem a renda fixa/Tesouro (valor livre). Nota: a cotação do export pode estar defasada — o registro do executado aceita os valores reais da ordem.
+7. **Arredondamento por lote (v1):** para ativos B3 (ações/FIIs/ETFs), arredondar para cotas inteiras usando a cotação do export; sobras de troco vão para o alvo de renda fixa (que aceita valor quebrado) ou ficam registradas para o mês seguinte. **Não se aplica a EXTERIOR** (compra fracionada), a renda fixa/Tesouro (valor livre), nem a posições manuais (também valor livre — ver seção 5.2). Nota: a cotação do export pode estar defasada — o registro do executado aceita os valores reais da ordem.
 8. **Banda de tolerância (padrão ±1,5 p.p., configurável):** usada no dashboard para colorir desvios (dentro/fora da banda). É apenas visual — o motor sempre usa o déficit bruto para ordenar a fila, mesmo com todos os alvos dentro da banda.
-9. **Posições só mudam via import (intencional):** registrar um aporte executado NÃO atualiza as posições — a fonte única da verdade é o export do MyCapital. O dashboard reflete o aporte apenas no import seguinte. Não "corrigir" este comportamento na implementação.
+9. **Posições só mudam via import (intencional):** registrar um aporte executado NÃO atualiza as posições — a fonte única da verdade é o export do MyCapital (ou, no caso das posições manuais, o valor informado na tela de import). O dashboard reflete o aporte apenas no import seguinte. Não "corrigir" este comportamento na implementação.
 
 ### 5.1 Dividendos (lançamento manual)
 
@@ -197,6 +260,17 @@ Dividendo é tratado como **dinheiro novo em caixa** — insumo da calculadora d
 - **Integração com a calculadora:** ao calcular o aporte do mês, o app oferece *"incluir R$ X de dividendos ainda não utilizados"* — somando ao valor digitado. **Controle de utilização:** quando incluído num aporte registrado, o dividendo ganha vínculo com esse aporte (`aporte_id`) e nunca mais é oferecido. Dividendos lançados e não utilizados permanecem disponíveis nos meses seguintes (não expiram, não são contados duas vezes).
 - **Histórico:** série de renda mensal por ativo/alvo como subproduto (gráfico simples na tela de histórico).
 - Dividendos lançados são independentes das sessões de import (não são substituídos por re-imports).
+
+### 5.2 Posições manuais e ajuste de valor investido
+
+Resolve dois problemas de qualidade do export do MyCapital: CDBs que não vêm corretos, e fundos de investimento cujo valor investido sempre vem igual ao valor atual.
+
+- **CDBs (ou qualquer ativo que não deva vir do CSV):** o ativo é marcado como `ignorar_no_import` no vínculo (6.3) e passa a existir como `posicao_manual`, vinculada a um alvo. `valor_atual` é sempre informado manualmente a cada import (vem do extrato do banco, com os rendimentos do período); não há como automatizar esse campo.
+- **Fundos de investimento (ou qualquer ativo do CSV com `valor_investido` incorreto):** o `valor_atual` continua vindo do CSV normalmente — só o valor investido é corrigido, via `ajuste_valor_investido` ligado ao mesmo `chave_export`.
+- **Carry-forward mês a mês:** a cada nova sessão de import, os valores de `valor_investido` e (quando aplicável) `valor_atual` nascem copiados da sessão vigente anterior. O usuário só edita o que mudou — nunca preenche do zero, exceto no primeiro cadastro de cada ativo.
+- **Incremento automático de valor investido a partir do aporte executado:** ao registrar um aporte como executado (tela 6.5), para cada alvo do aporte o app verifica se ele mapeia **exclusivamente** a um único `chave_export` com ajuste ativo ou a uma única `posicao_manual` ativa. Se sim, cria um `incremento_valor_investido_pendente` com o valor executado daquele alvo. Se o alvo mapear mais de um ativo elegível, o incremento fica pendente no nível do alvo (sem `chave_export`/`posicao_manual_id`), para distribuição manual no próximo import.
+- **Consumo das pendências:** no import seguinte, a pendência pré-preenche o campo `valor_investido` correspondente (anterior + incremento) — sempre editável antes da confirmação da sessão, nunca aplicado silenciosamente. Uma vez `aplicado = true`, nunca mais oferecida (mesmo padrão de não-dupla-contagem já usado nos dividendos).
+- **`valor_atual` das posições manuais nunca recebe incremento automático** — é sempre digitado do zero a cada import, porque só o usuário sabe o rendimento real do CDB naquele momento.
 
 ---
 
@@ -215,12 +289,13 @@ A visão de 10 segundos: "como estou vs. onde deveria estar".
 - **Aviso de substituição:** se já existir sessão vigente no mesmo mês, exibir claramente — *"Já existe um import de julho (27/07). Este novo passará a ser o vigente."* — antes de confirmar.
 - **Checagem de completude:** comparar instituições com a sessão anterior. Se faltar alguma (*"o import anterior tinha Itaú + Nubank; este só tem Itaú"*), exibir **aviso forte + confirmação explícita** — não bloquear, pois encerramento de conta numa corretora é um caso legítimo.
 - Diff contra a sessão anterior: ativos novos, ativos que sumiram, variações grandes — como conferência antes de confirmar.
+- **Posições manuais e ajustes:** antes de confirmar a sessão, revisão da lista de posições manuais (CDBs) e ajustes de valor investido (fundos), pré-preenchida a partir da sessão anterior — ver seção 6.9.
 - **Backup automático:** antes de confirmar cada sessão de import, o app cria uma cópia datada do arquivo SQLite (ex.: `backups/app-2026-07-28.db`), com retenção configurável (sugestão: manter as últimas 12). O momento é ideal — o import é a única operação que altera dados em volume.
 - Erros de parse exibidos com clareza (linha/coluna), nunca falha silenciosa.
 
 ### 6.3 Vínculo de ativos (de-para)
 - Aparece automaticamente quando o import traz ativo sem vínculo.
-- Lista: chave do export → dropdown de alvos existentes, criar alvo novo na hora, **ou marcar como "Fora da carteira alvo"** (ativo legado que não participa dos cálculos nem recebe aporte).
+- Lista: chave do export → dropdown de alvos existentes, criar alvo novo na hora, marcar como **"Fora da carteira alvo"** (ativo legado que não participa dos cálculos nem recebe aporte), ou marcar como **"Ignorar (substituído por posição manual)"** (ativo cujo dado do export está incorreto — ex.: CDB — e que passa a ser representado por uma `posicao_manual` vinculada ao mesmo alvo; ver seção 6.9).
 - Vínculos memorizados; tela também acessível para revisão/correção.
 - A calculadora de aporte é **bloqueada enquanto houver ativos pendentes de vínculo** — pendência distorceria os déficits silenciosamente.
 
@@ -236,7 +311,7 @@ A visão de 10 segundos: "como estou vs. onde deveria estar".
 - Cada linha editável (zerar/alterar) com redistribuição automática do restante.
 - Arredondamento por lote aplicado a ativos B3 (cotas inteiras + destino do troco visível).
 - Simulação do "depois": como fica a alocação se o aporte for executado como sugerido.
-- Botão "registrar como executado" → grava sugerido + executado no snapshot.
+- Botão "registrar como executado" → grava sugerido + executado no snapshot e, silenciosamente, gera as pendências de incremento de valor investido (seção 5.2) para os alvos elegíveis — sem ação extra do usuário nesse momento; elas só aparecem na próxima tela de import (6.9).
 
 ### 6.6 Dividendos
 - Lançamento rápido: ativo (dropdown dos conhecidos) + mês + valor em R$.
@@ -253,6 +328,20 @@ A visão de 10 segundos: "como estou vs. onde deveria estar".
 - Banda de tolerância (padrão ±1,5 p.p.) e aporte mínimo por transação — editáveis.
 - Retenção de backups automáticos (padrão: últimas 12 cópias).
 - Backup: exportar/importar configuração (alvos, vínculos, settings) em JSON; exibir o caminho do arquivo SQLite e da pasta de backups, com lembrete de que copiar o `.db` é o backup completo do app.
+
+### 6.9 Posições Manuais e Ajustes
+Aparece dentro do fluxo de import (6.2), depois do parse do CSV e antes de confirmar a sessão — mesmo momento da checagem de completude.
+
+- **Lista de posições manuais** (CDBs e afins): uma linha por `posicao_manual` ativa, pré-preenchida com os valores da sessão anterior.
+  - `valor_investido`: se houver incremento pendente do aporte do mês, já chega somado — *"R$ 10.000 (anterior) + R$ 500 (aporte de 15/07) = R$ 10.500"* — editável.
+  - `valor_atual`: chega igual ao mês anterior, sem cálculo — o usuário substitui pelo extrato atualizado do banco.
+  - Botão **"+ Nova posição manual"**: instituição, descrição, alvo, valores iniciais.
+  - Ação **"Encerrar"**: marca `ativo = false`, some do carry-forward sem apagar histórico.
+- **Lista de ajustes de fundos**: uma linha por `chave_export` com `ajuste_valor_investido` ativo.
+  - Mesmo padrão de pré-preenchimento (anterior + incremento pendente, editável).
+  - Primeira vez que o fundo aparece: campo vazio ou com aviso visual de que o valor do CSV está incorreto, aguardando o valor real.
+- **Alvos com incremento ambíguo:** se um aporte executado caiu num alvo com mais de um ativo elegível, exibir o total pendente daquele alvo em destaque — *"R$ 500 aportados em 'Multimercado' sem fundo específico — distribua abaixo"* — para o usuário repartir manualmente entre os campos correspondentes.
+- Tela também acessível fora do fluxo de import, para cadastrar ou revisar posições manuais a qualquer momento.
 
 ---
 
@@ -274,7 +363,7 @@ A visão de 10 segundos: "como estou vs. onde deveria estar".
 | ORM | Prisma |
 | Autenticação | Nenhuma — app local em localhost; obrigatória apenas se um dia for hospedado remotamente |
 | Banda de tolerância | ±1,5 p.p. padrão, configurável |
-| Arredondamento por lote | Entra na **v1**; só para ativos B3 (EXTERIOR e renda fixa aceitam valor livre) |
+| Arredondamento por lote | Entra na **v1**; só para ativos B3 (EXTERIOR, renda fixa e posições manuais aceitam valor livre) |
 | Ativos internacionais | Validado com export Avenue: mesmo parser, `Patrimônio Hoje` já em BRL, sem conversão cambial própria |
 | Dividendos | Lançamento manual (ativo + mês + valor em R$); tratados como dinheiro novo que pode ser incluído no aporte do mês |
 | Backup de configuração | Export/import de alvos + vínculos + settings em JSON |
@@ -285,6 +374,11 @@ A visão de 10 segundos: "como estou vs. onde deveria estar".
 | Calculadora com vínculos pendentes | Bloqueada até resolver — pendência distorceria os déficits |
 | `tipoAtivoInternacional` | String opaca: parser aceita qualquer valor sem validar, exibe como veio (sem impacto no motor) |
 | Backup do banco | Cópia datada automática do `.db` antes de cada sessão de import, retenção configurável (padrão: 12) |
+| CDBs com export incorreto do MyCapital | Posição manual dedicada (`posicao_manual`), fora do CSV; `valor_atual` sempre manual (extrato do banco), `valor_investido` com incremento automático a partir do aporte executado quando o vínculo alvo→ativo é exclusivo |
+| Fundos com `valor_investido` sempre igual ao `valor_atual` no export | `valor_atual` continua vindo do CSV normalmente; `valor_investido` corrigido manualmente (`ajuste_valor_investido`), mesmo mecanismo de carry-forward e incremento automático dos CDBs |
+| Ativos que devem ser excluídos do parser | Novo estado no vínculo (6.3): "Ignorar (substituído por posição manual)" — CSV lido mas excluído da consolidação, sem alarme repetido de "ativo novo" |
+| Uso de `valor_investido` (manual ou corrigido) no motor | Nunca entra no cálculo de déficit — puramente informativo (dashboard/histórico), não é cálculo de rentabilidade |
+| Incremento de valor investido a partir de aporte executado | Automático quando o vínculo alvo→ativo é exclusivo (1 fundo ou 1 posição manual por alvo); pendente para distribuição manual quando ambíguo; sempre editável antes de confirmar, nunca aplicado silenciosamente |
 
 ## 8. Pendências para a fase de implementação
 
@@ -293,5 +387,5 @@ Nenhuma — todas as decisões de produto e arquitetura estão fechadas. Escolha
 ## 9. Roadmap sugerido
 
 1. **v0 (núcleo):** parser + alvos + vínculo + calculadora de aporte (com mínimo por transação). Sem histórico, sem dashboard. Já resolve a dor.
-2. **v1:** snapshots + dashboard atual vs. alvo (com banda configurável) + registro sugerido/executado + **arredondamento por lote** + **lançamento de dividendos com inclusão no aporte** + configurações com backup JSON.
+2. **v1:** snapshots + dashboard atual vs. alvo (com banda configurável) + registro sugerido/executado + **arredondamento por lote** + **lançamento de dividendos com inclusão no aporte** + **posições manuais e ajuste de valor investido (CDBs e fundos)** + configurações com backup JSON.
 3. **v2:** histórico de convergência, série de renda mensal, diff entre imports, versionamento de alvos com UI completa.

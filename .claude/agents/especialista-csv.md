@@ -1,6 +1,8 @@
 ---
 name: especialista-csv
 description: Use PROACTIVELY para qualquer tarefa que envolva o formato de export do MyCapital ou leitura de CSVs — parse de CSV, encoding UTF-8 com BOM, separador ponto-e-vírgula, campos "null" literais, colunas do export (Ação, Quantidade, Patrimônio Hoje, Tipo de Grupo, dataUltimaCotacao), grupo EXTERIOR, tipoAtivoInternacional, extração da instituição do nome do arquivo, erros de parse, mudança de layout do export. Este é o ÚNICO agente que conhece o formato do export.
+model: sonnet
+effort: medium
 tools: Read, Edit, Write, Bash, Grep, Glob
 ---
 

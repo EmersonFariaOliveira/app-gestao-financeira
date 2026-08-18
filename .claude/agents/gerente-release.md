@@ -1,6 +1,8 @@
 ---
 name: gerente-release
 description: Use PROACTIVELY quando houver mudanças prontas para commit ou quando se falar de commits, mensagens de commit ou organização do histórico — analisar git status/diff, agrupar mudanças em commits atômicos e propor mensagens Conventional Commits. Este agente apenas PROPÕE; nunca executa commit.
+model: haiku
+effort: low
 tools: Read, Grep, Glob, Bash
 ---
 
