@@ -130,12 +130,14 @@ describe("config-service — exportarConfigJson", () => {
     expect(vinculoFora.reservaEmergencia).toBe(false);
   });
 
-  it("inclui vínculo 'ignorado no import' (alvo_id preenchido + ignorar_no_import) com ignorarNoImport:true", async () => {
-    const acoes = await alvoService.criarAlvo({ nome: "Ações BR", percentualAlvoBps: 10000 });
+  it("inclui vínculo 'ignorado no import' (alvo_id=null + ignorar_no_import=true — invariante atual) com ignorarNoImport:true e alvoNome null", async () => {
+    // Invariante (data-model.md, mapeamento-service.ts): ignorar_no_import
+    // sempre com alvo_id=null — não carrega mais o alvo escolhido no
+    // registro ativo_mapeado (revertido; ver nota em mapeamento-service.ts).
     await prisma.ativo_mapeado.create({
       data: {
         chave_export: "PRIO3",
-        alvo_id: acoes.id,
+        alvo_id: null,
         fora_da_carteira: false,
         ignorar_no_import: true,
       },
@@ -146,7 +148,7 @@ describe("config-service — exportarConfigJson", () => {
     expect(json.vinculos).toHaveLength(1);
     const vinculo = json.vinculos[0]!;
     expect(vinculo.chaveExport).toBe("PRIO3");
-    expect(vinculo.alvoNome).toBe("Ações BR");
+    expect(vinculo.alvoNome).toBeNull();
     expect(vinculo.foraDaCarteira).toBe(false);
     expect(vinculo.ignorarNoImport).toBe(true);
     expect(vinculo.reservaEmergencia).toBe(false);
@@ -348,24 +350,27 @@ describe("config-service — importarConfigJson", () => {
     ).rejects.toThrow(/inválido/i);
   });
 
-  it("rejeita ignorarNoImport:true sem alvoNome preenchido (ignorado exige alvo vinculado)", async () => {
-    await expect(
-      configService.importarConfigJson({
-        versao: 1,
-        exportadoEm: new Date().toISOString(),
-        settings: { banda_tolerancia_bps: 150, aporte_minimo_centavos: 50000, retencao_backups: 12 },
-        alvos: [],
-        vinculos: [
-          {
-            chaveExport: "PRIO3",
-            alvoNome: null,
-            foraDaCarteira: false,
-            ignorarNoImport: true,
-            reservaEmergencia: false,
-          },
-        ],
-      }),
-    ).rejects.toThrow(/inválido/i);
+  it("aceita ignorarNoImport:true sem alvoNome preenchido — 'ignorado' não exige mais alvo (revertido, ver mapeamento-service.ts)", async () => {
+    const resultado = await configService.importarConfigJson({
+      versao: 1,
+      exportadoEm: new Date().toISOString(),
+      settings: { banda_tolerancia_bps: 150, aporte_minimo_centavos: 50000, retencao_backups: 12 },
+      alvos: [],
+      vinculos: [
+        {
+          chaveExport: "PRIO3",
+          alvoNome: null,
+          foraDaCarteira: false,
+          ignorarNoImport: true,
+          reservaEmergencia: false,
+        },
+      ],
+    });
+
+    expect(resultado.vinculosCriados).toBe(1);
+    const registro = await prisma.ativo_mapeado.findUniqueOrThrow({ where: { chave_export: "PRIO3" } });
+    expect(registro.alvo_id).toBeNull();
+    expect(registro.ignorar_no_import).toBe(true);
   });
 
   it("importa corretamente um vínculo 'ignorado no import' e um em 'reserva de emergência'", async () => {
@@ -377,7 +382,7 @@ describe("config-service — importarConfigJson", () => {
       vinculos: [
         {
           chaveExport: "PRIO3",
-          alvoNome: "Ações BR",
+          alvoNome: null,
           foraDaCarteira: false,
           ignorarNoImport: true,
           reservaEmergencia: false,
@@ -395,7 +400,7 @@ describe("config-service — importarConfigJson", () => {
     expect(resultado.vinculosCriados).toBe(2);
 
     const ignorado = await prisma.ativo_mapeado.findUniqueOrThrow({ where: { chave_export: "PRIO3" } });
-    expect(ignorado.alvo_id).not.toBeNull();
+    expect(ignorado.alvo_id).toBeNull();
     expect(ignorado.fora_da_carteira).toBe(false);
     expect(ignorado.ignorar_no_import).toBe(true);
     expect(ignorado.reserva_emergencia).toBe(false);
@@ -556,7 +561,7 @@ describe("config-service — importarConfigJson", () => {
     expect(atualizado.reserva_emergencia).toBe(true);
   });
 
-  it("UPDATE: importar troca um ativo_mapeado de 'fora da carteira' para 'ignorado no import' (troca os 4 campos, inclusive alvo_id de null para preenchido)", async () => {
+  it("UPDATE: importar troca um ativo_mapeado de 'fora da carteira' para 'ignorado no import' (troca fora_da_carteira/ignorar_no_import; alvo_id continua null nos dois estados)", async () => {
     // Estado inicial: fora da carteira (alvo_id null).
     await prisma.ativo_mapeado.create({
       data: { chave_export: "TESOURO-SELIC", alvo_id: null, fora_da_carteira: true },
@@ -566,11 +571,11 @@ describe("config-service — importarConfigJson", () => {
       versao: 1,
       exportadoEm: new Date().toISOString(),
       settings: { banda_tolerancia_bps: 150, aporte_minimo_centavos: 50000, retencao_backups: 12 },
-      alvos: [{ nome: "Ações BR", percentualAlvoBps: 10000 }],
+      alvos: [],
       vinculos: [
         {
           chaveExport: "TESOURO-SELIC",
-          alvoNome: "Ações BR",
+          alvoNome: null,
           foraDaCarteira: false,
           ignorarNoImport: true,
           reservaEmergencia: false,
@@ -582,7 +587,7 @@ describe("config-service — importarConfigJson", () => {
     expect(resultado.vinculosAtualizados).toBe(1);
 
     const atualizado = await prisma.ativo_mapeado.findUniqueOrThrow({ where: { chave_export: "TESOURO-SELIC" } });
-    expect(atualizado.alvo_id).not.toBeNull();
+    expect(atualizado.alvo_id).toBeNull();
     expect(atualizado.fora_da_carteira).toBe(false);
     expect(atualizado.ignorar_no_import).toBe(true);
     expect(atualizado.reserva_emergencia).toBe(false);
@@ -590,10 +595,13 @@ describe("config-service — importarConfigJson", () => {
 
   it("vínculo 'ignorado no import' com posicao_manual associada (chave_export_origem): import de config não toca posicao_manual e preserva o vínculo à origem", async () => {
     const alvo = await alvoService.criarAlvo({ nome: "Ações BR", percentualAlvoBps: 10000 });
+    // Invariante atual: ignorar_no_import sempre com alvo_id=null — o alvo
+    // "efetivo" do ignorado vem da posicao_manual substituta, via
+    // chave_export_origem, não de ativo_mapeado.alvo_id.
     await prisma.ativo_mapeado.create({
       data: {
         chave_export: "PRIO3",
-        alvo_id: alvo.id,
+        alvo_id: null,
         fora_da_carteira: false,
         ignorar_no_import: true,
       },
@@ -627,7 +635,7 @@ describe("config-service — importarConfigJson", () => {
     // para ele continua válida.
     const vinculoNoBanco = await prisma.ativo_mapeado.findUniqueOrThrow({ where: { chave_export: "PRIO3" } });
     expect(vinculoNoBanco.ignorar_no_import).toBe(true);
-    expect(vinculoNoBanco.alvo_id).not.toBeNull();
+    expect(vinculoNoBanco.alvo_id).toBeNull();
   });
 
   it("CRÍTICO: nunca toca sessao_import, posicao, aporte ou dividendo", async () => {
@@ -725,11 +733,12 @@ describe("config-service — importarConfigJson", () => {
     await prisma.ativo_mapeado.create({
       data: { chave_export: "TESOURO-SELIC", alvo_id: null, fora_da_carteira: true },
     });
-    // Estado 3: ignorado no import (alvo_id preenchido + ignorar_no_import).
+    // Estado 3: ignorado no import (alvo_id=null + ignorar_no_import=true —
+    // invariante atual, ver mapeamento-service.ts).
     await prisma.ativo_mapeado.create({
       data: {
         chave_export: "ATIVO-SUBSTITUIDO",
-        alvo_id: acoes.id,
+        alvo_id: null,
         fora_da_carteira: false,
         ignorar_no_import: true,
       },

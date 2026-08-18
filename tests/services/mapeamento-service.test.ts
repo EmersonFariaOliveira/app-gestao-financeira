@@ -65,8 +65,19 @@ async function resetDb() {
   await prisma.config.deleteMany();
 }
 
-/** Cria uma posicao_manual ATIVA vinculada a um alvo (heurística de posicaoManualPendente). */
-async function criarPosicaoManualAtiva(alvoId: string, chaveManual: string, ativo = true) {
+/**
+ * Cria uma posicao_manual ATIVA vinculada a um alvo. `chaveExportOrigem`
+ * (opcional) é o campo usado pelo match EXATO de `posicaoManualPendente`
+ * (mapeamento-service.ts, `existePosicaoManualSubstituta`) — sem ele, a
+ * posicao_manual não substitui nenhuma chave_export ignorada, mesmo que
+ * aponte para o mesmo alvo.
+ */
+async function criarPosicaoManualAtiva(
+  alvoId: string,
+  chaveManual: string,
+  ativo = true,
+  chaveExportOrigem?: string,
+) {
   return prisma.posicao_manual.create({
     data: {
       chave_manual: chaveManual,
@@ -74,6 +85,7 @@ async function criarPosicaoManualAtiva(alvoId: string, chaveManual: string, ativ
       alvo_id: alvoId,
       descricao: "CDB Itaú 120% CDI 2029",
       ativo,
+      chave_export_origem: chaveExportOrigem ?? null,
     },
   });
 }
@@ -455,12 +467,14 @@ describe("mapeamento-service", () => {
   });
 
   describe("balde ignorados (feature 002, FR-001, contracts/server-actions.md §vinculos.ts)", () => {
-    it("chave_export com ignorar_no_import=true vai para o balde ignorados, nunca para vinculados", async () => {
-      const alvo = await criarAlvo("Pós-fixado", 3000);
+    it("chave_export com ignorar_no_import=true vai para o balde ignorados, nunca para vinculados; sem posicao_manual substituta, alvoId/nomeAlvo são null", async () => {
+      // Invariante (data-model.md): ignorar_no_import=true sempre com alvo_id
+      // null — não é mais o registro `ativo_mapeado` que carrega o alvo do
+      // balde ignorados.
       await prisma.ativo_mapeado.create({
         data: {
           chave_export: "TESOURO-IGNORADO",
-          alvo_id: alvo.id,
+          alvo_id: null,
           fora_da_carteira: false,
           ignorar_no_import: true,
         },
@@ -473,8 +487,8 @@ describe("mapeamento-service", () => {
       expect(vinculos.ignorados).toEqual([
         {
           chaveExport: "TESOURO-IGNORADO",
-          alvoId: alvo.id,
-          nomeAlvo: "Pós-fixado",
+          alvoId: null,
+          nomeAlvo: null,
           valorAtualCentavos: 0,
           posicaoManualPendente: true,
         },
@@ -482,9 +496,8 @@ describe("mapeamento-service", () => {
     });
 
     it("valorAtualCentavos do balde ignorados é o valor bruto consolidado do CSV (só referência — motor usa a posicao_manual, não este campo)", async () => {
-      const alvo = await criarAlvo("Pós-fixado", 3000);
       await prisma.ativo_mapeado.create({
-        data: { chave_export: "TESOURO-IGNORADO", alvo_id: alvo.id, ignorar_no_import: true },
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
       });
       const sessao = await criarSessaoVigente("2026-07", "2026-07-28");
       await criarPosicao(sessao.id, "TESOURO-IGNORADO", 999_000);
@@ -494,58 +507,81 @@ describe("mapeamento-service", () => {
       expect(vinculos.ignorados[0].valorAtualCentavos).toBe(999_000);
     });
 
-    it("posicaoManualPendente=false quando existe uma posicao_manual ATIVA com o mesmo alvoId", async () => {
+    it("posicaoManualPendente=false e alvoId/nomeAlvo preenchidos quando existe posicao_manual ATIVA com chave_export_origem = chaveExport ignorada (match exato)", async () => {
       const alvo = await criarAlvo("Pós-fixado", 3000);
       await prisma.ativo_mapeado.create({
-        data: { chave_export: "TESOURO-IGNORADO", alvo_id: alvo.id, ignorar_no_import: true },
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
       });
-      await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+      await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029", true, "TESOURO-IGNORADO");
 
       const vinculos = await mapeamentoService.listarVinculos();
 
       expect(vinculos.ignorados[0].posicaoManualPendente).toBe(false);
+      expect(vinculos.ignorados[0].alvoId).toBe(alvo.id);
+      expect(vinculos.ignorados[0].nomeAlvo).toBe("Pós-fixado");
     });
 
-    it("posicaoManualPendente volta a true quando a posicao_manual do alvo está ENCERRADA (ativo=false)", async () => {
+    it("posicaoManualPendente volta a true (e alvoId/nomeAlvo voltam a null) quando a posicao_manual substituta está ENCERRADA (ativo=false)", async () => {
       const alvo = await criarAlvo("Pós-fixado", 3000);
       await prisma.ativo_mapeado.create({
-        data: { chave_export: "TESOURO-IGNORADO", alvo_id: alvo.id, ignorar_no_import: true },
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
       });
-      await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029", false);
+      await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029", false, "TESOURO-IGNORADO");
 
       const vinculos = await mapeamentoService.listarVinculos();
 
       expect(vinculos.ignorados[0].posicaoManualPendente).toBe(true);
+      expect(vinculos.ignorados[0].alvoId).toBeNull();
+      expect(vinculos.ignorados[0].nomeAlvo).toBeNull();
     });
 
-    it("posicaoManualPendente é calculado por alvoId — posicao_manual ativa de OUTRO alvo não conta", async () => {
-      const alvoIgnorado = await criarAlvo("Pós-fixado", 3000);
-      const alvoOutro = await criarAlvo("Ações BR", 7000);
+    it("posicaoManualPendente é calculado por match EXATO de chave_export_origem — posicao_manual ativa com chave_export_origem de OUTRA chave não conta", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
       await prisma.ativo_mapeado.create({
-        data: { chave_export: "TESOURO-IGNORADO", alvo_id: alvoIgnorado.id, ignorar_no_import: true },
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
       });
-      await criarPosicaoManualAtiva(alvoOutro.id, "CDB-OUTRO");
+      // `chave_export_origem` é FK para `ativo_mapeado.chave_export` — a
+      // "outra chave" precisa existir para a posicao_manual referenciá-la.
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "OUTRA-CHAVE-IGNORADA", alvo_id: null, ignorar_no_import: true },
+      });
+      // Substituta existe, mas aponta para outra chave_export_origem.
+      await criarPosicaoManualAtiva(alvo.id, "CDB-OUTRO", true, "OUTRA-CHAVE-IGNORADA");
+
+      const vinculos = await mapeamentoService.listarVinculos();
+      const tesouroIgnorado = vinculos.ignorados.find((i) => i.chaveExport === "TESOURO-IGNORADO")!;
+
+      expect(tesouroIgnorado.posicaoManualPendente).toBe(true);
+      expect(tesouroIgnorado.alvoId).toBeNull();
+    });
+
+    it("posicao_manual ativa SEM chave_export_origem (nunca vinculada a nenhum ignorado) não conta como substituta de ninguém", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
+      });
+      await criarPosicaoManualAtiva(alvo.id, "CDB-AVULSO"); // chaveExportOrigem omitida -> null
 
       const vinculos = await mapeamentoService.listarVinculos();
 
       expect(vinculos.ignorados[0].posicaoManualPendente).toBe(true);
+      expect(vinculos.ignorados[0].alvoId).toBeNull();
     });
   });
 
-  describe("vincularAtivo — forma ignorarNoImport (feature 002, FR-001)", () => {
-    it("{chaveExport, ignorarNoImport:true, alvoId} marca ignorar_no_import=true, preserva alvo_id e mantém fora_da_carteira=false", async () => {
-      const alvo = await criarAlvo("Pós-fixado", 3000);
-
+  describe("vincularAtivo — forma ignorarNoImport (feature 002, FR-001, revertido: sem sub-modo de alvo)", () => {
+    it("{chaveExport, ignorarNoImport:true} marca ignorar_no_import=true, alvo_id=null e fora_da_carteira=false — funciona mesmo sem NENHUM alvo pré-existente no banco", async () => {
+      // Nenhum alvo criado propositalmente: a forma "Ignorar" não recebe
+      // (nem exige) alvo algum — ação de um clique.
       const resultado = await mapeamentoService.vincularAtivo({
         chaveExport: "TESOURO-IGNORADO",
         ignorarNoImport: true,
-        alvoId: alvo.id,
       });
 
       expect(resultado).toEqual({
         chaveExport: "TESOURO-IGNORADO",
-        alvoId: alvo.id,
-        nomeAlvo: "Pós-fixado",
+        alvoId: null,
+        nomeAlvo: null,
         foraDaCarteira: false,
         reservaEmergencia: false,
         ignorarNoImport: true,
@@ -556,7 +592,7 @@ describe("mapeamento-service", () => {
         where: { chave_export: "TESOURO-IGNORADO" },
       });
       expect(registro.ignorar_no_import).toBe(true);
-      expect(registro.alvo_id).toBe(alvo.id);
+      expect(registro.alvo_id).toBeNull();
       expect(registro.fora_da_carteira).toBe(false);
 
       // Some do balde pendentes/vinculados; aparece só em ignorados.
@@ -566,38 +602,21 @@ describe("mapeamento-service", () => {
       expect(vinculos.ignorados.map((i) => i.chaveExport)).toEqual(["TESOURO-IGNORADO"]);
     });
 
-    it("posicaoManualPendente=false na resposta de vincularAtivo quando já existe posicao_manual ativa para o alvo escolhido", async () => {
+    it("posicaoManualPendente=false na resposta de vincularAtivo quando já existe posicao_manual ativa com chave_export_origem = chaveExport ignorada (match exato, não por alvo)", async () => {
       const alvo = await criarAlvo("Pós-fixado", 3000);
-      await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029");
+      // `chave_export_origem` é FK para `ativo_mapeado.chave_export` — precisa
+      // existir (mesmo que ainda pendente) antes da posicao_manual referenciá-la.
+      await prisma.ativo_mapeado.create({ data: { chave_export: "TESOURO-IGNORADO" } });
+      await criarPosicaoManualAtiva(alvo.id, "CDB-ITAU-2029", true, "TESOURO-IGNORADO");
 
       const resultado = await mapeamentoService.vincularAtivo({
         chaveExport: "TESOURO-IGNORADO",
         ignorarNoImport: true,
-        alvoId: alvo.id,
       });
 
       expect(resultado.posicaoManualPendente).toBe(false);
-    });
-
-    it("{chaveExport, ignorarNoImport:true, novoAlvo} cria o alvo e já marca ignorar_no_import=true na MESMA operação; posicaoManualPendente sempre true (alvo recém-criado nunca tem posicao_manual)", async () => {
-      const antesCount = await prisma.alvo.count();
-
-      const resultado = await mapeamentoService.vincularAtivo({
-        chaveExport: "TESOURO-IGNORADO-2",
-        ignorarNoImport: true,
-        novoAlvo: { nome: "Renda Fixa Nova", percentualBps: 2000 },
-      });
-
-      expect(await prisma.alvo.count()).toBe(antesCount + 1);
-      expect(resultado.ignorarNoImport).toBe(true);
-      expect(resultado.posicaoManualPendente).toBe(true);
-      expect(resultado.foraDaCarteira).toBe(false);
-
-      const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
-        where: { chave_export: "TESOURO-IGNORADO-2" },
-      });
-      expect(registro.ignorar_no_import).toBe(true);
-      expect(registro.alvo_id).toBe(resultado.alvoId);
+      expect(resultado.alvoId).toBe(alvo.id);
+      expect(resultado.nomeAlvo).toBe("Pós-fixado");
     });
 
     it("as 3 formas pré-existentes de vincularAtivo continuam sem os campos ignorarNoImport/posicaoManualPendente na resposta (shape preservado)", async () => {
@@ -622,20 +641,18 @@ describe("mapeamento-service", () => {
       expect(novoAlvo.posicaoManualPendente).toBeUndefined();
     });
 
-    it("ignorar um ativo já marcado fora-da-carteira (não só vinculado) também funciona — troca fora_da_carteira por ignorar_no_import mantendo o alvo escolhido (UI: botão Ignorar na seção 'Fora da carteira alvo')", async () => {
-      const alvo = await criarAlvo("Pós-fixado", 3000);
+    it("ignorar um ativo já marcado fora-da-carteira (não só vinculado) também funciona — troca fora_da_carteira por ignorar_no_import, alvo_id continua null (UI: botão Ignorar na seção 'Fora da carteira alvo')", async () => {
       await mapeamentoService.vincularAtivo({ chaveExport: "CDB-LEGADO", foraDaCarteira: true });
 
       const resultado = await mapeamentoService.vincularAtivo({
         chaveExport: "CDB-LEGADO",
         ignorarNoImport: true,
-        alvoId: alvo.id,
       });
 
       expect(resultado).toEqual({
         chaveExport: "CDB-LEGADO",
-        alvoId: alvo.id,
-        nomeAlvo: "Pós-fixado",
+        alvoId: null,
+        nomeAlvo: null,
         foraDaCarteira: false,
         reservaEmergencia: false,
         ignorarNoImport: true,
@@ -648,7 +665,7 @@ describe("mapeamento-service", () => {
       });
       expect(registro.fora_da_carteira).toBe(false);
       expect(registro.ignorar_no_import).toBe(true);
-      expect(registro.alvo_id).toBe(alvo.id);
+      expect(registro.alvo_id).toBeNull();
 
       // Some do balde fora-da-carteira; aparece só em ignorados.
       const vinculos = await mapeamentoService.listarVinculos();
@@ -656,32 +673,20 @@ describe("mapeamento-service", () => {
       expect(vinculos.ignorados.map((i) => i.chaveExport)).toEqual(["CDB-LEGADO"]);
     });
 
-    it("ignorar com alvoId inexistente lança erro, mesma validação da forma {chaveExport, alvoId} simples", async () => {
-      await expect(
-        mapeamentoService.vincularAtivo({
-          chaveExport: "TESOURO-X",
-          ignorarNoImport: true,
-          alvoId: "id-inexistente",
-        }),
-      ).rejects.toThrow();
-    });
-
-    it("re-ignorar uma chave já vinculada a outro alvo troca o alvo_id (upsert, sem duplicar ativo_mapeado)", async () => {
-      const alvoAntigo = await criarAlvo("Pós-fixado", 3000);
-      const alvoNovo = await criarAlvo("Tesouro IPCA+", 2000);
-      await mapeamentoService.vincularAtivo({ chaveExport: "TESOURO-IGNORADO", alvoId: alvoAntigo.id });
+    it("marcar ignorado (reverter) uma chave já vinculada a um alvo zera o alvo_id (upsert, sem duplicar ativo_mapeado)", async () => {
+      const alvo = await criarAlvo("Pós-fixado", 3000);
+      await mapeamentoService.vincularAtivo({ chaveExport: "TESOURO-IGNORADO", alvoId: alvo.id });
 
       await mapeamentoService.vincularAtivo({
         chaveExport: "TESOURO-IGNORADO",
         ignorarNoImport: true,
-        alvoId: alvoNovo.id,
       });
 
       expect(await prisma.ativo_mapeado.count({ where: { chave_export: "TESOURO-IGNORADO" } })).toBe(1);
       const registro = await prisma.ativo_mapeado.findUniqueOrThrow({
         where: { chave_export: "TESOURO-IGNORADO" },
       });
-      expect(registro.alvo_id).toBe(alvoNovo.id);
+      expect(registro.alvo_id).toBeNull();
       expect(registro.ignorar_no_import).toBe(true);
     });
   });
@@ -741,11 +746,9 @@ describe("mapeamento-service", () => {
     });
 
     it("marcar reserva de emergência depois de já estar ignorado (ignorar_no_import=true) zera ignorar_no_import e alvo_id (exclusão mútua)", async () => {
-      const alvo = await criarAlvo("Pós-fixado", 3000);
       await mapeamentoService.vincularAtivo({
         chaveExport: "CDB-ITAU",
         ignorarNoImport: true,
-        alvoId: alvo.id,
       });
 
       const resultado = await mapeamentoService.vincularAtivo({
@@ -773,20 +776,18 @@ describe("mapeamento-service", () => {
       expect(vinculos.reservaEmergencia.map((r) => r.chaveExport)).toEqual(["CDB-ITAU"]);
     });
 
-    it("marcar ignorado (ignorarNoImport:true) depois de já estar em reserva de emergência zera reserva_emergencia (exclusão mútua no outro sentido)", async () => {
-      const alvo = await criarAlvo("Pós-fixado", 3000);
+    it("marcar ignorado (ignorarNoImport:true) depois de já estar em reserva de emergência zera reserva_emergencia (exclusão mútua no outro sentido); alvo_id continua null", async () => {
       await mapeamentoService.vincularAtivo({ chaveExport: "CDB-ITAU", reservaEmergencia: true });
 
       const resultado = await mapeamentoService.vincularAtivo({
         chaveExport: "CDB-ITAU",
         ignorarNoImport: true,
-        alvoId: alvo.id,
       });
 
       expect(resultado).toEqual({
         chaveExport: "CDB-ITAU",
-        alvoId: alvo.id,
-        nomeAlvo: "Pós-fixado",
+        alvoId: null,
+        nomeAlvo: null,
         foraDaCarteira: false,
         reservaEmergencia: false,
         ignorarNoImport: true,
@@ -798,7 +799,7 @@ describe("mapeamento-service", () => {
       });
       expect(registro.reserva_emergencia).toBe(false);
       expect(registro.ignorar_no_import).toBe(true);
-      expect(registro.alvo_id).toBe(alvo.id);
+      expect(registro.alvo_id).toBeNull();
 
       const vinculos = await mapeamentoService.listarVinculos();
       expect(vinculos.reservaEmergencia).toEqual([]);
