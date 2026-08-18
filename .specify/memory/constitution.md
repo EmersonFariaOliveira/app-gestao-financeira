@@ -1,27 +1,21 @@
 <!--
 Sync Impact Report
 ==================
-Version change: [TEMPLATE] → 1.0.0 (initial ratification)
-Modified principles: n/a (first concrete version, replacing all template placeholders)
-Added sections:
-  - Core Principles I–X (Escopo Negativo é Lei; Camadas Isoladas; Fonte Única da
-    Verdade; Imutabilidade e Auditabilidade; Falhar Alto, Nunca em Silêncio;
-    Dinheiro é Inteiro; Local-First e Zero Infraestrutura; Veto Humano; Stack
-    Fixa; Conflitos Resolvem-se no Spec)
-  - Documento de Especificação (section 2)
-  - Fluxo de Desenvolvimento e Qualidade (section 3)
-  - Governance
-Removed sections: none (template placeholders only)
+Version change: 1.0.0 → 1.1.0
+Modified principles:
+  - I. Escopo Negativo é Lei — added an explicit, bounded exception permitting
+    "rendimento" as a simple value difference (valor_atual − valor_investido),
+    justified by feature 003 (specs/003-dashboard-analise-rendimento). Price
+    average, tax, IRR/XIRR/CAGR/TWR, automatic dividend fetching, and asset
+    recommendation remain fully prohibited — the exception does not reopen any
+    of those.
+Added sections: none (subsection added within existing Principle I)
+Removed sections: none
 Templates requiring follow-up:
-  - .specify/templates/plan-template.md — ⚠ pending manual review to confirm its
-    Constitution Check gates reference these 10 principles by name
-  - .specify/templates/spec-template.md — ⚠ pending manual review for alignment
-    with the negative-scope principle (I) when scoring feature requests
-  - .specify/templates/tasks-template.md — ⚠ pending manual review to confirm
-    task categorization (parser / motor / persistence) matches Principle II's
-    layer isolation
-Deferred items: none — all placeholder values were supplied by user input or
-  the project spec (docs/app-gestao-aportes.md).
+  - .specify/templates/plan-template.md — ⚠ pending manual review to confirm
+    its Constitution Check gate for feature 003 references this exception
+    (not a blanket Principle I violation)
+Deferred items: none
 -->
 
 # App de Gestão de Aportes Constitution
@@ -31,15 +25,39 @@ Deferred items: none — all placeholder values were supplied by user input or
 ### I. Escopo Negativo é Lei
 O app faz uma única coisa: matemática de convergência da carteira real ao alvo
 declarado. O app NÃO busca cotações em tempo real, NÃO calcula preço médio,
-NÃO calcula imposto, NÃO calcula rentabilidade ou performance, NÃO busca
-proventos automaticamente e NÃO recomenda ativos. Qualquer proposta de feature
-nessas direções DEVE ser rejeitada na revisão, mesmo que pareça útil ou
-tecnicamente simples de adicionar.
+NÃO calcula imposto, NÃO calcula taxa de retorno ponderada por tempo ou por
+fluxo de caixa (TIR/XIRR/CAGR/TWR) nem qualquer outra métrica de rentabilidade
+regulatória, NÃO busca proventos automaticamente e NÃO recomenda ativos.
+Qualquer proposta de feature nessas direções DEVE ser rejeitada na revisão,
+mesmo que pareça útil ou tecnicamente simples de adicionar.
+
+**Exceção explícita — rendimento como diferença simples de valor:** o app PODE
+calcular e exibir "rendimento" estritamente como `valor_atual − valor_investido`,
+em R$ (sempre exato) e em percentual sobre o valor investido no início de um
+período (razão simples, não ponderada pelo momento de cada aporte dentro do
+período). Esta exceção NÃO reabre preço médio, imposto, TIR/XIRR/CAGR/TWR,
+busca automática de proventos ou recomendação de ativos — nenhum deles passa a
+ser permitido por causa dela. Toda interface que exibir esse percentual DEVE
+evitar o termo "rentabilidade", usando linguagem como "ganho sobre capital
+investido", para não sugerir uma precisão (ponderação por tempo) que a fórmula
+simples não entrega.
 
 **Racional:** essas funções já são resolvidas por outras ferramentas
 (MyCapital para cotação/preço médio/imposto/performance/proventos, Finclass
 para seleção de ativos). Absorvê-las infla o escopo, duplica fontes de
 verdade e distrai do único problema que o app resolve.
+
+**Racional da exceção** (feature 003 —
+`specs/003-dashboard-analise-rendimento/spec.md`): o MyCapital não oferece a
+quebra de rendimento por reserva de emergência, por tag/carteira nem por
+ativos fora da carteira alvo que o usuário precisa para decidir onde alocar; o
+dado necessário ("Patrimônio Aplicado") já vem no próprio export do CSV, sem
+exigir integração nova nem cotação em tempo real — é o mesmo conceito de
+`valor_investido` já usado em posições manuais e ajustes (feature 002), agora
+também capturado para os ativos que já vinham do CSV. A diferença simples de
+valor não duplica o cálculo de rentabilidade do MyCapital porque não pretende
+ter a mesma precisão (sem ponderação por tempo, sem imposto) — é um proxy
+propositalmente limitado, e a UI é obrigada a se comunicar como tal.
 
 ### II. Camadas Isoladas
 O parser de CSV é o único módulo do sistema que conhece o formato do export
@@ -212,4 +230,4 @@ encontradas em runtime ou em revisão devem ser resolvidas atualizando o spec
 (Princípio X) e, se necessário, esta constitution — nunca silenciosamente
 no código.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-29 | **Last Amended**: 2026-07-29
+**Version**: 1.1.0 | **Ratified**: 2026-07-29 | **Last Amended**: 2026-08-18
