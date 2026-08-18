@@ -960,6 +960,529 @@ describe("rendimento-service", () => {
     });
   });
 
+  describe("calcularRendimentoPorBucket (US2 — segmentação por reserva/tag/alvo/fora-da-carteira)", () => {
+    async function criarSessao(mesReferencia: string) {
+      return prisma.sessao_import.create({
+        data: {
+          mes_referencia: mesReferencia,
+          data_export: new Date(`${mesReferencia}-28`),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+    }
+
+    async function criarPosicao(
+      sessaoId: string,
+      chaveExport: string,
+      patrimonioHojeCentavos: number,
+      patrimonioInvestidoCentavos: number | null,
+    ) {
+      return prisma.posicao.create({
+        data: {
+          sessao_import_id: sessaoId,
+          chave_export: chaveExport,
+          instituicao: "Itaú",
+          quantidade: "10",
+          patrimonio_hoje_centavos: patrimonioHojeCentavos,
+          patrimonio_investido_centavos: patrimonioInvestidoCentavos,
+          tipo_grupo: "ACOES",
+        },
+      });
+    }
+
+    it("reserva de emergência: soma todas as chaves com reserva_emergencia=true, casando o mesmo conjunto entre início/fim", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "RESERVA-CDB", reserva_emergencia: true },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "RESERVA-TESOURO", reserva_emergencia: true },
+      });
+      await criarPosicao(inicio.id, "RESERVA-CDB", 50_000, 50_000);
+      await criarPosicao(fim.id, "RESERVA-CDB", 52_000, 50_000);
+      await criarPosicao(inicio.id, "RESERVA-TESOURO", 30_000, 28_000);
+      await criarPosicao(fim.id, "RESERVA-TESOURO", 31_000, 28_000);
+      // Ativo normal (não reserva) não deve entrar neste bucket.
+      await prisma.ativo_mapeado.create({ data: { chave_export: "AAA11", fora_da_carteira: false } });
+      await criarPosicao(inicio.id, "AAA11", 100_000, 80_000);
+      await criarPosicao(fim.id, "AAA11", 110_000, 80_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      // início: 50_000 + 30_000 = 80_000 atual, 50_000 + 28_000 = 78_000 investido
+      // fim: 52_000 + 31_000 = 83_000 atual, mesmo investido 78_000
+      // rendimento(fim) = 83_000-78_000=5_000; rendimento(início)=80_000-78_000=2_000; delta=3_000
+      expect(buckets.reservaEmergencia.pontoInicio.valorAtualCentavos).toBe(80_000);
+      expect(buckets.reservaEmergencia.pontoInicio.valorInvestidoCentavos).toBe(78_000);
+      expect(buckets.reservaEmergencia.pontoFim.valorAtualCentavos).toBe(83_000);
+      expect(buckets.reservaEmergencia.rendimentoCentavos).toBe(3_000);
+    });
+
+    it("reserva de emergência sem nenhuma chave: rendimentoCentavos null (FR-010), nunca 0", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+      await prisma.ativo_mapeado.create({ data: { chave_export: "AAA11", fora_da_carteira: false } });
+      await criarPosicao(inicio.id, "AAA11", 100_000, 80_000);
+      await criarPosicao(fim.id, "AAA11", 110_000, 80_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.reservaEmergencia.rendimentoCentavos).toBeNull();
+      expect(buckets.reservaEmergencia.rendimentoPct).toBeNull();
+      expect(buckets.reservaEmergencia.pontoInicio.valorInvestidoCentavos).toBeNull();
+    });
+
+    it("porTag: agrupa TODOS os alvos com a mesma tag; porAlvo: cada alvo individualmente dentro da tag", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      const alvoAcao1 = await prisma.alvo.create({
+        data: {
+          nome: "Ação 1",
+          percentual_alvo_bps: 3000,
+          tag: "RENDA-VARIAVEL",
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+      const alvoAcao2 = await prisma.alvo.create({
+        data: {
+          nome: "Ação 2",
+          percentual_alvo_bps: 2000,
+          tag: "RENDA-VARIAVEL",
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+      const alvoRendaFixa = await prisma.alvo.create({
+        data: {
+          nome: "Tesouro",
+          percentual_alvo_bps: 5000,
+          tag: "RENDA-FIXA",
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+
+      await prisma.ativo_mapeado.create({ data: { chave_export: "ACAO1", alvo_id: alvoAcao1.id } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "ACAO2", alvo_id: alvoAcao2.id } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "TESOURO1", alvo_id: alvoRendaFixa.id } });
+
+      await criarPosicao(inicio.id, "ACAO1", 100_000, 80_000);
+      await criarPosicao(fim.id, "ACAO1", 120_000, 80_000);
+      await criarPosicao(inicio.id, "ACAO2", 50_000, 40_000);
+      await criarPosicao(fim.id, "ACAO2", 55_000, 40_000);
+      await criarPosicao(inicio.id, "TESOURO1", 200_000, 190_000);
+      await criarPosicao(fim.id, "TESOURO1", 205_000, 190_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      // porAlvo: 3 alvos, cada um com seu próprio rendimento.
+      expect(buckets.porAlvo).toHaveLength(3);
+      const porAlvoMap = new Map(buckets.porAlvo.map((a) => [a.alvoId, a]));
+      expect(porAlvoMap.get(alvoAcao1.id)).toMatchObject({
+        nomeAlvo: "Ação 1",
+        tag: "RENDA-VARIAVEL",
+      });
+      // ACAO1: rendimento(fim)=120_000-80_000=40_000; rendimento(início)=100_000-80_000=20_000; delta=20_000
+      expect(porAlvoMap.get(alvoAcao1.id)!.rendimento.rendimentoCentavos).toBe(20_000);
+      // ACAO2: rendimento(fim)=55_000-40_000=15_000; rendimento(início)=50_000-40_000=10_000; delta=5_000
+      expect(porAlvoMap.get(alvoAcao2.id)!.rendimento.rendimentoCentavos).toBe(5_000);
+      // TESOURO1: rendimento(fim)=205_000-190_000=15_000; rendimento(início)=200_000-190_000=10_000; delta=5_000
+      expect(porAlvoMap.get(alvoRendaFixa.id)!.rendimento.rendimentoCentavos).toBe(5_000);
+
+      // porTag: 2 tags, RENDA-VARIAVEL agrega ACAO1+ACAO2, RENDA-FIXA só TESOURO1.
+      expect(buckets.porTag).toHaveLength(2);
+      const porTagMap = new Map(buckets.porTag.map((t) => [t.tag, t]));
+      const rendaVariavel = porTagMap.get("RENDA-VARIAVEL")!;
+      expect(rendaVariavel.rendimento.pontoInicio.valorAtualCentavos).toBe(150_000); // 100_000+50_000
+      expect(rendaVariavel.rendimento.pontoInicio.valorInvestidoCentavos).toBe(120_000); // 80_000+40_000
+      expect(rendaVariavel.rendimento.pontoFim.valorAtualCentavos).toBe(175_000); // 120_000+55_000
+      // rendimento(fim)=175_000-120_000=55_000; rendimento(início)=150_000-120_000=30_000; delta=25_000
+      expect(rendaVariavel.rendimento.rendimentoCentavos).toBe(25_000);
+
+      const rendaFixa = porTagMap.get("RENDA-FIXA")!;
+      expect(rendaFixa.rendimento.rendimentoCentavos).toBe(5_000);
+    });
+
+    it("alvo sem tag: não aparece em porTag (só alvos com tag não-nula agregam), mas aparece em porAlvo com tag:null", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      const alvoSemTag = await prisma.alvo.create({
+        data: {
+          nome: "Alvo sem tag",
+          percentual_alvo_bps: 1000,
+          tag: null,
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "SEMTAG1", alvo_id: alvoSemTag.id } });
+      await criarPosicao(inicio.id, "SEMTAG1", 10_000, 8_000);
+      await criarPosicao(fim.id, "SEMTAG1", 11_000, 8_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.porTag).toHaveLength(0);
+      expect(buckets.porAlvo).toHaveLength(1);
+      expect(buckets.porAlvo[0]).toMatchObject({ alvoId: alvoSemTag.id, tag: null });
+    });
+
+    it("um alvo sem NENHUMA chave com dado completo nas duas pontas: rendimentoCentavos null (FR-010), nunca 0", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      const alvo = await prisma.alvo.create({
+        data: {
+          nome: "Alvo sem histórico",
+          percentual_alvo_bps: 1000,
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "SEMHIST", alvo_id: alvo.id } });
+      // Só existe na sessão de início (vendido antes do fim) — sem dado completo nas duas pontas.
+      await criarPosicao(inicio.id, "SEMHIST", 10_000, 8_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.porAlvo).toHaveLength(1);
+      expect(buckets.porAlvo[0].rendimento.rendimentoCentavos).toBeNull();
+      expect(buckets.porAlvo[0].rendimento.pontoInicio.valorInvestidoCentavos).toBeNull();
+    });
+
+    it("foraDaCarteira: um item por chave, NUNCA agregado num único número", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      await prisma.ativo_mapeado.create({ data: { chave_export: "FORA1", fora_da_carteira: true } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "FORA2", fora_da_carteira: true } });
+      await criarPosicao(inicio.id, "FORA1", 20_000, 15_000);
+      await criarPosicao(fim.id, "FORA1", 22_000, 15_000);
+      await criarPosicao(inicio.id, "FORA2", 5_000, 5_000);
+      await criarPosicao(fim.id, "FORA2", 4_000, 5_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.foraDaCarteira).toHaveLength(2);
+      const foraMap = new Map(buckets.foraDaCarteira.map((f) => [f.chaveExport, f.rendimento]));
+      // FORA1: rendimento(fim)=22_000-15_000=7_000; rendimento(início)=20_000-15_000=5_000; delta=2_000
+      expect(foraMap.get("FORA1")!.rendimentoCentavos).toBe(2_000);
+      // FORA2: rendimento(fim)=4_000-5_000=-1_000; rendimento(início)=5_000-5_000=0; delta=-1_000
+      expect(foraMap.get("FORA2")!.rendimentoCentavos).toBe(-1_000);
+    });
+
+    it("ativo ignorar_no_import continua excluído de todos os buckets (FR-012)", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "IGNORADO", ignorar_no_import: true, fora_da_carteira: false },
+      });
+      await criarPosicao(inicio.id, "IGNORADO", 10_000, 10_000);
+      await criarPosicao(fim.id, "IGNORADO", 10_000, 10_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.foraDaCarteira).toHaveLength(0);
+      expect(buckets.porAlvo).toHaveLength(0);
+      expect(buckets.porTag).toHaveLength(0);
+      expect(buckets.reservaEmergencia.rendimentoCentavos).toBeNull();
+    });
+
+    it("ativo pendente de vínculo (sem alvo_id/fora_da_carteira/reserva_emergencia) não influencia nenhum bucket (FR-017)", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      // Sem ativo_mapeado nenhum -> tratado como pendente (defensivo).
+      await criarPosicao(inicio.id, "PENDENTE1", 10_000, 10_000);
+      await criarPosicao(fim.id, "PENDENTE1", 11_000, 10_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.foraDaCarteira).toHaveLength(0);
+      expect(buckets.porAlvo).toHaveLength(0);
+      expect(buckets.porTag).toHaveLength(0);
+      expect(buckets.reservaEmergencia.rendimentoCentavos).toBeNull();
+    });
+
+    it("posicao_manual reserva_emergencia/fora_da_carteira/alvo entram nos buckets corretos, mesma máquina de estados do CSV", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      const alvo = await prisma.alvo.create({
+        data: {
+          nome: "CDB manual",
+          percentual_alvo_bps: 1000,
+          tag: "RENDA-FIXA",
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+
+      const posManualReserva = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "RESERVA-MANUAL",
+          instituicao: "Nubank",
+          descricao: "Reserva manual",
+          reserva_emergencia: true,
+        },
+      });
+      const posManualFora = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "FORA-MANUAL",
+          instituicao: "Nubank",
+          descricao: "Fora manual",
+          fora_da_carteira: true,
+        },
+      });
+      const posManualAlvo = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "ALVO-MANUAL",
+          instituicao: "Nubank",
+          descricao: "Alvo manual",
+          alvo_id: alvo.id,
+        },
+      });
+
+      for (const [posicaoManual, atualInicio, atualFim, investido] of [
+        [posManualReserva, 10_000, 10_500, 9_000],
+        [posManualFora, 5_000, 5_200, 4_500],
+        [posManualAlvo, 20_000, 20_800, 18_000],
+      ] as const) {
+        await prisma.posicao_manual_valor.create({
+          data: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: inicio.id,
+            valor_investido_centavos: investido,
+            valor_atual_centavos: atualInicio,
+          },
+        });
+        await prisma.posicao_manual_valor.create({
+          data: {
+            posicao_manual_id: posicaoManual.id,
+            sessao_import_id: fim.id,
+            valor_investido_centavos: investido,
+            valor_atual_centavos: atualFim,
+          },
+        });
+      }
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.reservaEmergencia.pontoInicio.valorAtualCentavos).toBe(10_000);
+      expect(buckets.reservaEmergencia.pontoFim.valorAtualCentavos).toBe(10_500);
+      expect(buckets.foraDaCarteira).toHaveLength(1);
+      expect(buckets.foraDaCarteira[0].chaveExport).toBe("FORA-MANUAL");
+      expect(buckets.porAlvo).toHaveLength(1);
+      expect(buckets.porAlvo[0]).toMatchObject({ alvoId: alvo.id, tag: "RENDA-FIXA" });
+      expect(buckets.porTag).toHaveLength(1);
+      expect(buckets.porTag[0].tag).toBe("RENDA-FIXA");
+    });
+
+    it("porAlvo: um alvo com MAIS de um ativo elegível (posicao CSV + posicao_manual) soma os dois no mesmo bucket", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      const alvo = await prisma.alvo.create({
+        data: {
+          nome: "Renda fixa mista",
+          percentual_alvo_bps: 4000,
+          tag: "RENDA-FIXA",
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "TESOURO-CSV", alvo_id: alvo.id } });
+      await criarPosicao(inicio.id, "TESOURO-CSV", 100_000, 90_000);
+      await criarPosicao(fim.id, "TESOURO-CSV", 108_000, 90_000);
+
+      const posManual = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "CDB-MANUAL",
+          instituicao: "Nubank",
+          descricao: "CDB manual do mesmo alvo",
+          alvo_id: alvo.id,
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posManual.id,
+          sessao_import_id: inicio.id,
+          valor_investido_centavos: 30_000,
+          valor_atual_centavos: 32_000,
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posManual.id,
+          sessao_import_id: fim.id,
+          valor_investido_centavos: 30_000,
+          valor_atual_centavos: 33_000,
+        },
+      });
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.porAlvo).toHaveLength(1);
+      const rendimentoAlvo = buckets.porAlvo[0].rendimento;
+      // início: 100_000+32_000=132_000 atual, 90_000+30_000=120_000 investido
+      // fim: 108_000+33_000=141_000 atual, mesmo investido 120_000
+      expect(rendimentoAlvo.pontoInicio.valorAtualCentavos).toBe(132_000);
+      expect(rendimentoAlvo.pontoInicio.valorInvestidoCentavos).toBe(120_000);
+      expect(rendimentoAlvo.pontoFim.valorAtualCentavos).toBe(141_000);
+      expect(rendimentoAlvo.pontoFim.valorInvestidoCentavos).toBe(120_000);
+      // rendimento(fim)=141_000-120_000=21_000; rendimento(início)=132_000-120_000=12_000; delta=9_000
+      expect(rendimentoAlvo.rendimentoCentavos).toBe(9_000);
+    });
+
+    it("reserva de emergência: mistura chave de ativo_mapeado.reserva_emergencia=true e posicao_manual.reserva_emergencia=true no MESMO bucket", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "RESERVA-CSV", reserva_emergencia: true },
+      });
+      await criarPosicao(inicio.id, "RESERVA-CSV", 20_000, 20_000);
+      await criarPosicao(fim.id, "RESERVA-CSV", 20_500, 20_000);
+
+      const posManualReserva = await prisma.posicao_manual.create({
+        data: {
+          chave_manual: "RESERVA-MANUAL-2",
+          instituicao: "Nubank",
+          descricao: "Reserva manual",
+          reserva_emergencia: true,
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posManualReserva.id,
+          sessao_import_id: inicio.id,
+          valor_investido_centavos: 15_000,
+          valor_atual_centavos: 15_000,
+        },
+      });
+      await prisma.posicao_manual_valor.create({
+        data: {
+          posicao_manual_id: posManualReserva.id,
+          sessao_import_id: fim.id,
+          valor_investido_centavos: 15_000,
+          valor_atual_centavos: 15_800,
+        },
+      });
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      // início: 20_000 (CSV) + 15_000 (manual) = 35_000 atual, 20_000+15_000=35_000 investido
+      // fim: 20_500 + 15_800 = 36_300 atual, mesmo investido 35_000
+      expect(buckets.reservaEmergencia.pontoInicio.valorAtualCentavos).toBe(35_000);
+      expect(buckets.reservaEmergencia.pontoInicio.valorInvestidoCentavos).toBe(35_000);
+      expect(buckets.reservaEmergencia.pontoFim.valorAtualCentavos).toBe(36_300);
+      // rendimento(fim)=36_300-35_000=1_300; rendimento(início)=35_000-35_000=0; delta=1_300
+      expect(buckets.reservaEmergencia.rendimentoCentavos).toBe(1_300);
+    });
+
+    it("SC-006: soma de TODOS os buckets (reserva + cada tag + fora da carteira) bate EXATAMENTE com o consolidado, quando há dado suficiente em tudo e não há pendentes de vínculo", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      const alvoAcao = await prisma.alvo.create({
+        data: {
+          nome: "Ações",
+          percentual_alvo_bps: 3000,
+          tag: "RENDA-VARIAVEL",
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+      const alvoFii = await prisma.alvo.create({
+        data: {
+          nome: "FIIs",
+          percentual_alvo_bps: 2000,
+          tag: "RENDA-VARIAVEL",
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+
+      await prisma.ativo_mapeado.create({ data: { chave_export: "RESERVA1", reserva_emergencia: true } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "FORA1", fora_da_carteira: true } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "ACAO1", alvo_id: alvoAcao.id } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "FII1", alvo_id: alvoFii.id } });
+
+      await criarPosicao(inicio.id, "RESERVA1", 40_000, 35_000);
+      await criarPosicao(fim.id, "RESERVA1", 41_000, 35_000);
+      await criarPosicao(inicio.id, "FORA1", 15_000, 12_000);
+      await criarPosicao(fim.id, "FORA1", 16_000, 12_000);
+      await criarPosicao(inicio.id, "ACAO1", 100_000, 80_000);
+      await criarPosicao(fim.id, "ACAO1", 115_000, 80_000);
+      await criarPosicao(inicio.id, "FII1", 60_000, 55_000);
+      await criarPosicao(fim.id, "FII1", 63_000, 55_000);
+
+      const resultado = await rendimentoService.dadosRendimento({
+        tipo: "CUSTOMIZADO",
+        sessaoInicioId: inicio.id,
+        sessaoFimId: fim.id,
+      });
+
+      const somaBuckets =
+        (resultado.reservaEmergencia.rendimentoCentavos ?? 0) +
+        resultado.foraDaCarteira.reduce((acc, f) => acc + (f.rendimento.rendimentoCentavos ?? 0), 0) +
+        resultado.porTag.reduce((acc, t) => acc + (t.rendimento.rendimentoCentavos ?? 0), 0);
+
+      expect(resultado.consolidado.rendimentoCentavos).not.toBeNull();
+      expect(somaBuckets).toBe(resultado.consolidado.rendimentoCentavos);
+
+      // Confirma também que porAlvo (RENDA-VARIAVEL) soma exatamente o mesmo que porTag daquela tag.
+      const somaPorAlvoRendaVariavel = resultado.porAlvo
+        .filter((a) => a.tag === "RENDA-VARIAVEL")
+        .reduce((acc, a) => acc + (a.rendimento.rendimentoCentavos ?? 0), 0);
+      const porTagRendaVariavel = resultado.porTag.find((t) => t.tag === "RENDA-VARIAVEL")!;
+      expect(somaPorAlvoRendaVariavel).toBe(porTagRendaVariavel.rendimento.rendimentoCentavos);
+    });
+
+    // [ACHADO FR-017/FR-014] originalmente documentava que
+    // `calcularRendimentoPorBucket` excluía chaves pendentes de vínculo de
+    // TODOS os campos de `RendimentoOutput`, quebrando a igualdade
+    // soma-dos-buckets == consolidado. Corrigido por arquiteto-dados
+    // adicionando o campo `pendentes` (mesmo shape de `foraDaCarteira`, um
+    // item por chave, nunca agregado) — agora a soma INCLUINDO `pendentes`
+    // bate exatamente com o consolidado, cumprindo FR-017 ("exibidos à
+    // parte, sem influenciar alvo/tag") e FR-014 (soma dos buckets ==
+    // consolidado, incluindo "pendentes com dado disponível").
+    it("[ACHADO FR-017/FR-014] chave pendente de vínculo com dado completo aparece em `pendentes` e a soma dos buckets (incluindo pendentes) bate com o consolidado", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      await prisma.ativo_mapeado.create({ data: { chave_export: "RESERVA1", reserva_emergencia: true } });
+      await criarPosicao(inicio.id, "RESERVA1", 40_000, 35_000);
+      await criarPosicao(fim.id, "RESERVA1", 41_000, 35_000);
+
+      // PENDENTE1 não tem ativo_mapeado nenhum -> classificado como
+      // "pendente" por classificarChavesPorBucket, mas tem dado completo nas
+      // duas pontas (entraria no consolidado normalmente).
+      await criarPosicao(inicio.id, "PENDENTE1", 10_000, 8_000);
+      await criarPosicao(fim.id, "PENDENTE1", 10_500, 8_000);
+
+      const resultado = await rendimentoService.dadosRendimento({
+        tipo: "CUSTOMIZADO",
+        sessaoInicioId: inicio.id,
+        sessaoFimId: fim.id,
+      });
+
+      const somaBuckets =
+        (resultado.reservaEmergencia.rendimentoCentavos ?? 0) +
+        resultado.foraDaCarteira.reduce((acc, f) => acc + (f.rendimento.rendimentoCentavos ?? 0), 0) +
+        resultado.porTag.reduce((acc, t) => acc + (t.rendimento.rendimentoCentavos ?? 0), 0) +
+        resultado.pendentes.reduce((acc, p) => acc + (p.rendimento.rendimentoCentavos ?? 0), 0);
+
+      // PENDENTE1 contribui rendimento(fim)=10_500-8_000=2_500,
+      // rendimento(início)=10_000-8_000=2_000, delta=500 — presente no
+      // consolidado E em `pendentes`, individualmente (nunca agregado a
+      // outro bucket).
+      expect(resultado.pendentes).toHaveLength(1);
+      expect(resultado.pendentes[0].chaveExport).toBe("PENDENTE1");
+      expect(resultado.pendentes[0].rendimento.rendimentoCentavos).toBe(500);
+      expect(resultado.consolidado.rendimentoCentavos).not.toBeNull();
+      expect(somaBuckets).toBe(resultado.consolidado.rendimentoCentavos);
+    });
+  });
+
   describe("integração: valor investido via posicao_manual (feature 002, inalterado)", () => {
     it("resolverValorInvestido para chave de posicao_manual usa sempre posicao_manual_valor.valor_investido_centavos", async () => {
       const sessao = await prisma.sessao_import.create({

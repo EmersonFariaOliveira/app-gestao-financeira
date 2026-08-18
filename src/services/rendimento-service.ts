@@ -324,10 +324,10 @@ export interface PeriodoDisponivel {
 
 /**
  * Resultado de `dadosRendimento` — subconjunto do `RendimentoOutput` do
- * contrato (contracts/server-actions.md), só com `consolidado` (US1). Os
- * campos `reservaEmergencia`/`porTag`/`porAlvo`/`foraDaCarteira`/`serie`
- * chegam em tasks futuras (US2/US3), quando o shape completo for
- * implementado.
+ * contrato (contracts/server-actions.md), com `consolidado` (US1) e a
+ * segmentação por bucket `reservaEmergencia`/`porTag`/`porAlvo`/
+ * `foraDaCarteira` (US2, `calcularRendimentoPorBucket`). O campo `serie`
+ * chega em task futura (US3), quando o shape completo for implementado.
  */
 export interface RendimentoOutput {
   /** true = nenhuma sessão VIGENTE existe ainda (mesmo padrão de `DashboardVazio`) — nunca "sem dado de valor investido", isso é tratado por `rendimentoCentavos: null` dentro de `consolidado`. */
@@ -351,6 +351,31 @@ export interface RendimentoOutput {
    * iguais a esse único ponto. Ver `semPeriodoAnteriorParaComparacao`.
    */
   consolidado: RendimentoPeriodo;
+  /** Rendimento de todas as chaves/posições manuais com `reserva_emergencia = true` (US2, FR-008). */
+  reservaEmergencia: RendimentoPeriodo;
+  /** Rendimento agrupado por `alvo.tag` (US2, FR-008) — só tags com pelo menos um alvo com chave elegível aparecem aqui. */
+  porTag: RendimentoPorTag[];
+  /** Rendimento de cada alvo individualmente (US2, FR-008/FR-009) — só alvos com pelo menos uma chave elegível aparecem aqui. */
+  porAlvo: RendimentoPorAlvo[];
+  /** Rendimento de CADA ativo/posição manual `fora_da_carteira = true`, um item por chave (US2, FR-009) — nunca agregado num único número. */
+  foraDaCarteira: RendimentoAtivoForaDaCarteira[];
+  /**
+   * Rendimento de CADA ativo/posição manual pendente de vínculo (sem
+   * `alvo_id`, `fora_da_carteira = false`, `reserva_emergencia = false`), um
+   * item por chave — nunca agregado (FR-017: "exibidos à parte na análise de
+   * rendimento, sem influenciar o rendimento de nenhum alvo/tag").
+   *
+   * Campo ausente do desenho original do contrato (`RendimentoOutput` não
+   * previa "pendentes" nesta fatia) — adicionado durante a implementação
+   * porque a metade "MUST ser exibidos à parte" de FR-017 e a soma exigida
+   * por FR-014 (consolidado == reservaEmergencia + ΣporTag + Σ
+   * foraDaCarteira + Σpendentes) não fecham sem ele: excluir pendentes de
+   * TODOS os campos cumpre "sem influenciar alvo/tag" mas não "exibidos à
+   * parte". Reaproveita o shape de `RendimentoAtivoForaDaCarteira`
+   * (`{ chaveExport, rendimento }`) em vez de duplicar um tipo idêntico —
+   * mesmo padrão "um item por chave, nunca agregado".
+   */
+  pendentes: RendimentoAtivoForaDaCarteira[];
   periodosDisponiveis: PeriodoDisponivel[];
   /**
    * `true` quando o período resolvido tem só UMA sessão VIGENTE disponível
@@ -447,46 +472,38 @@ async function chavesElegiveisDaSessao(sessaoId: string): Promise<Map<string, nu
 }
 
 /**
- * Consolida `valorAtualCentavos`/`valorInvestidoCentavos` de início e fim
- * para o cálculo de rendimento de um PERÍODO (duas sessões), garantindo que
- * as duas pontas somem exatamente o MESMO conjunto de chaves — nunca dois
- * conjuntos diferentes (o que fabricaria ganho/prejuízo falso ao subtrair
- * `fim - início`).
+ * Núcleo do algoritmo de matching por chave entre duas pontas de um período
+ * (R5/R11) — usado tanto pelo consolidado (US1) quanto por CADA bucket (US2:
+ * reserva de emergência, tag, alvo individual, ativo fora da carteira),
+ * SEMPRE sobre um SUBCONJUNTO pré-filtrado de `chavesElegiveisDaSessao`
+ * (nenhuma query de elegibilidade acontece aqui — só matching e resolução de
+ * valor investido). Extraído de forma que "consolidado" e "por bucket"
+ * nunca dupliquem esta lógica (mesma técnica, escopos de chave diferentes).
  *
- * Passos: (1) resolve as chaves elegíveis de cada sessão separadamente via
- * `chavesElegiveisDaSessao`; (2) monta a UNIÃO dessas chaves (uma chave pode
- * existir numa sessão e não na outra — ativo novo comprado ou vendido no
- * meio do período); (3) para cada chave da união, resolve
- * `valorInvestidoCentavos` em cada sessão onde ela está presente; (4) uma
+ * Passos: (1) monta a UNIÃO das chaves dos dois mapas recebidos (uma chave
+ * pode existir numa ponta e não na outra — ativo novo comprado ou vendido no
+ * meio do período); (2) para cada chave da união, resolve
+ * `valorInvestidoCentavos` em cada sessão onde ela está presente; (3) uma
  * chave só contribui para os totais de início E fim se tiver
  * `valorAtualCentavos` presente E `valorInvestidoCentavos` resolvível
  * (`resolverValorInvestido`) EM AMBAS as sessões — caso contrário, é
- * excluída dos DOIS totais, nunca só de um.
- *
- * IMPORTANTE — mudança de semântica em relação à antiga
- * `totalPatrimonioDaSessao`: os totais retornados NÃO são necessariamente o
- * patrimônio total absoluto de cada sessão. Quando alguma chave é excluída
- * por falta de dado numa das pontas, os totais refletem apenas o
- * SUBCONJUNTO de chaves rastreável nas DUAS pontas do período — é
- * intencional (única forma de uma subtração `fim - início` continuar
- * correta e não-enganosa quando o histórico é parcial, FR-010/FR-014).
+ * excluída dos DOIS totais, nunca só de um (nunca soma um total "cheio" de
+ * um lado contra um "parcial" do outro).
  *
  * Se, depois do filtro, nenhuma chave sobrar com dado em ambas as pontas,
  * `valorInvestidoCentavos` de início/fim é `null` (não 0) — "sem histórico
- * suficiente" genuíno, mesmo padrão do resto do serviço.
+ * suficiente" genuíno (FR-010), inclusive quando o subconjunto recebido já
+ * vem vazio (bucket sem NENHUMA chave, ex.: nenhum ativo fora da carteira).
  */
-async function consolidadoDoPeriodo(
+async function consolidarSubconjunto(
+  elegiveisInicio: Map<string, number>,
+  elegiveisFim: Map<string, number>,
   sessaoInicioId: string,
   sessaoFimId: string,
 ): Promise<{
   inicio: { valorAtualCentavos: number; valorInvestidoCentavos: number | null };
   fim: { valorAtualCentavos: number; valorInvestidoCentavos: number | null };
 }> {
-  const [elegiveisInicio, elegiveisFim] = await Promise.all([
-    chavesElegiveisDaSessao(sessaoInicioId),
-    chavesElegiveisDaSessao(sessaoFimId),
-  ]);
-
   const uniaoChaves = new Set<string>([...elegiveisInicio.keys(), ...elegiveisFim.keys()]);
 
   let valorAtualInicio = 0;
@@ -532,21 +549,338 @@ async function consolidadoDoPeriodo(
 }
 
 /**
- * Dados da tela 6.10 (análise de rendimento) — nesta fatia (US1/P1), só o
- * rendimento consolidado do patrimônio total num período selecionado
- * (FR-001/FR-002/FR-005/FR-006). Nunca lança exceção por ausência de dados:
- * sem NENHUMA sessão VIGENTE, retorna `{vazio: true, ...}` (mesmo padrão de
+ * Consolida `valorAtualCentavos`/`valorInvestidoCentavos` de início e fim
+ * para o cálculo de rendimento de um PERÍODO (duas sessões), garantindo que
+ * as duas pontas somem exatamente o MESMO conjunto de chaves — nunca dois
+ * conjuntos diferentes (o que fabricaria ganho/prejuízo falso ao subtrair
+ * `fim - início`). Resolve as chaves elegíveis de cada sessão via
+ * `chavesElegiveisDaSessao` e delega o matching a `consolidarSubconjunto`
+ * (sem nenhum filtro adicional — é o universo COMPLETO de chaves elegíveis,
+ * usado pelo consolidado/patrimônio total, US1).
+ *
+ * IMPORTANTE — mudança de semântica em relação à antiga
+ * `totalPatrimonioDaSessao`: os totais retornados NÃO são necessariamente o
+ * patrimônio total absoluto de cada sessão. Quando alguma chave é excluída
+ * por falta de dado numa das pontas, os totais refletem apenas o
+ * SUBCONJUNTO de chaves rastreável nas DUAS pontas do período — é
+ * intencional (única forma de uma subtração `fim - início` continuar
+ * correta e não-enganosa quando o histórico é parcial, FR-010/FR-014).
+ */
+async function consolidadoDoPeriodo(
+  sessaoInicioId: string,
+  sessaoFimId: string,
+): Promise<{
+  inicio: { valorAtualCentavos: number; valorInvestidoCentavos: number | null };
+  fim: { valorAtualCentavos: number; valorInvestidoCentavos: number | null };
+}> {
+  const [elegiveisInicio, elegiveisFim] = await Promise.all([
+    chavesElegiveisDaSessao(sessaoInicioId),
+    chavesElegiveisDaSessao(sessaoFimId),
+  ]);
+
+  return consolidarSubconjunto(elegiveisInicio, elegiveisFim, sessaoInicioId, sessaoFimId);
+}
+
+/**
+ * Monta um `RendimentoPeriodo` completo a partir de um SUBCONJUNTO de chaves
+ * elegíveis de início/fim (`consolidarSubconjunto`), aplicando o mesmo
+ * tratamento de "sessão única" já usado por `consolidado` (US1) a QUALQUER
+ * bucket (US2): quando `sessaoInicioId === sessaoFimId`, não existe um
+ * segundo ponto no tempo para subtrair — `calcularRendimentoPeriodo` sempre
+ * daria delta `0` para dois pontos idênticos, um número incorreto e
+ * enganoso (Princípio V). Nesse caso o resultado reflete o rendimento do
+ * PONTO único (`calcularRendimentoPonto`), com `pontoInicio`/`pontoFim`
+ * ambos iguais a ele — mesmo padrão de `dadosRendimento` (US1 Acceptance
+ * Scenario 2), agora reutilizável por `reservaEmergencia`/`porTag`/`porAlvo`/
+ * `foraDaCarteira` sem duplicar a lógica.
+ */
+async function calcularRendimentoPeriodoDeChaves(
+  elegiveisInicio: Map<string, number>,
+  elegiveisFim: Map<string, number>,
+  sessaoInicioId: string,
+  sessaoFimId: string,
+): Promise<RendimentoPeriodo> {
+  const { inicio, fim } = await consolidarSubconjunto(
+    elegiveisInicio,
+    elegiveisFim,
+    sessaoInicioId,
+    sessaoFimId,
+  );
+
+  if (sessaoInicioId === sessaoFimId) {
+    const ponto = calcularRendimentoPonto(inicio);
+    return {
+      sessaoInicioId,
+      sessaoFimId,
+      rendimentoCentavos: ponto.rendimentoCentavos,
+      rendimentoPct: ponto.rendimentoPct,
+      pontoInicio: ponto,
+      pontoFim: ponto,
+    };
+  }
+
+  return calcularRendimentoPeriodo({
+    sessaoInicioId,
+    sessaoFimId,
+    pontoInicio: inicio,
+    pontoFim: fim,
+  });
+}
+
+/**
+ * `chave_export`/`chave_manual` -> bucket de classificação (US2), MESMA
+ * ordem de prioridade já estabelecida por
+ * `dashboard-service.classificarPosicoesDaSessao` (reaproveitada, não
+ * reinventada): `fora_da_carteira` > `reserva_emergencia` > `alvo_id` >
+ * pendente. `ignorar_no_import` NUNCA aparece aqui — já foi excluído
+ * upstream por `chavesElegiveisDaSessao` (as chaves recebidas em `chaves`
+ * já são só as elegíveis). Chaves sem NENHUM `ativo_mapeado`/`posicao_manual`
+ * (defensivo, não deveria acontecer em dado consistente) caem em `pendente`.
+ */
+type ClassificacaoBucket =
+  | { tipo: "fora" }
+  | { tipo: "reserva" }
+  | { tipo: "alvo"; alvoId: string }
+  | { tipo: "pendente" };
+
+async function classificarChavesPorBucket(chaves: string[]): Promise<Map<string, ClassificacaoBucket>> {
+  const classificacao = new Map<string, ClassificacaoBucket>();
+  if (chaves.length === 0) return classificacao;
+
+  const mapeamentos = await prisma.ativo_mapeado.findMany({
+    where: { chave_export: { in: chaves } },
+    select: { chave_export: true, alvo_id: true, fora_da_carteira: true, reserva_emergencia: true },
+  });
+  for (const m of mapeamentos) {
+    if (m.fora_da_carteira) classificacao.set(m.chave_export, { tipo: "fora" });
+    else if (m.reserva_emergencia) classificacao.set(m.chave_export, { tipo: "reserva" });
+    else if (m.alvo_id !== null) classificacao.set(m.chave_export, { tipo: "alvo", alvoId: m.alvo_id });
+    else classificacao.set(m.chave_export, { tipo: "pendente" });
+  }
+
+  const posicoesManuais = await prisma.posicao_manual.findMany({
+    where: { chave_manual: { in: chaves } },
+    select: { chave_manual: true, alvo_id: true, fora_da_carteira: true, reserva_emergencia: true },
+  });
+  for (const p of posicoesManuais) {
+    if (p.fora_da_carteira) classificacao.set(p.chave_manual, { tipo: "fora" });
+    else if (p.reserva_emergencia) classificacao.set(p.chave_manual, { tipo: "reserva" });
+    else if (p.alvo_id !== null) classificacao.set(p.chave_manual, { tipo: "alvo", alvoId: p.alvo_id });
+    else classificacao.set(p.chave_manual, { tipo: "pendente" });
+  }
+
+  for (const chave of chaves) {
+    if (!classificacao.has(chave)) classificacao.set(chave, { tipo: "pendente" });
+  }
+
+  return classificacao;
+}
+
+/** Filtra um `Map<chave, valorCentavos>` para as chaves presentes em `chaves`. */
+function filtrarMapaPorChaves(mapa: Map<string, number>, chaves: Iterable<string>): Map<string, number> {
+  const conjunto = chaves instanceof Set ? chaves : new Set(chaves);
+  const resultado = new Map<string, number>();
+  for (const [chave, valor] of mapa) {
+    if (conjunto.has(chave)) resultado.set(chave, valor);
+  }
+  return resultado;
+}
+
+/** Rendimento por tag (agrupa todos os alvos com a mesma `alvo.tag`), contrato `server-actions.md`. */
+export interface RendimentoPorTag {
+  tag: string;
+  rendimento: RendimentoPeriodo;
+}
+
+/** Rendimento por alvo individual, contrato `server-actions.md`. */
+export interface RendimentoPorAlvo {
+  alvoId: string;
+  nomeAlvo: string;
+  tag: string | null;
+  rendimento: RendimentoPeriodo;
+}
+
+/** Rendimento de UM ativo fora da carteira (nunca agregado), contrato `server-actions.md`. */
+export interface RendimentoAtivoForaDaCarteira {
+  chaveExport: string;
+  rendimento: RendimentoPeriodo;
+}
+
+/** Resultado de `calcularRendimentoPorBucket` — os 5 campos de segmentação de `RendimentoOutput` (US2 + pendentes FR-017/FR-014). */
+export interface RendimentoPorBucket {
+  reservaEmergencia: RendimentoPeriodo;
+  porTag: RendimentoPorTag[];
+  porAlvo: RendimentoPorAlvo[];
+  foraDaCarteira: RendimentoAtivoForaDaCarteira[];
+  /** Ver `RendimentoOutput.pendentes` — mesma semântica, um item por chave pendente, nunca agregado. */
+  pendentes: RendimentoAtivoForaDaCarteira[];
+}
+
+/**
+ * Segmentação do rendimento consolidado por bucket (US2, FR-008/FR-009):
+ * reserva de emergência, cada tag, cada alvo individual dentro de uma tag, e
+ * cada ativo marcado como fora da carteira. Reaproveita EXATAMENTE a mesma
+ * técnica de matching por chave de `consolidadoDoPeriodo`
+ * (`consolidarSubconjunto`/`calcularRendimentoPeriodoDeChaves`), aplicada a
+ * um SUBCONJUNTO pré-filtrado de chaves elegíveis por bucket — nunca duplica
+ * a lógica de "nunca somar total cheio de um lado contra parcial do outro".
+ *
+ * Ativos pendentes de vínculo (sem `alvo_id`/`fora_da_carteira`/
+ * `reserva_emergencia`, FR-017) não entram em NENHUM bucket de
+ * `reservaEmergencia`/`porTag`/`porAlvo`/`foraDaCarteira` (não influenciam o
+ * rendimento de nenhum alvo/tag) — mas aparecem individualmente em
+ * `pendentes`, um item por chave, nunca agregado (FR-017 "exibidos à parte";
+ * FR-014 exige que a soma de todos os buckets, incluindo `pendentes`, bata
+ * com o consolidado).
+ *
+ * Quando um bucket inteiro não tem NENHUMA chave (ex.: nenhum ativo fora da
+ * carteira) ou nenhuma chave com dado completo nas duas pontas do período, o
+ * `rendimento` daquele bucket vem com `rendimentoCentavos: null` (FR-010,
+ * "sem histórico suficiente" — nunca 0).
+ */
+export async function calcularRendimentoPorBucket(
+  sessaoInicioId: string,
+  sessaoFimId: string,
+): Promise<RendimentoPorBucket> {
+  const [elegiveisInicio, elegiveisFim] = await Promise.all([
+    chavesElegiveisDaSessao(sessaoInicioId),
+    chavesElegiveisDaSessao(sessaoFimId),
+  ]);
+
+  const uniaoChaves = Array.from(new Set<string>([...elegiveisInicio.keys(), ...elegiveisFim.keys()]));
+  const classificacao = await classificarChavesPorBucket(uniaoChaves);
+
+  const chavesReserva = new Set<string>();
+  const chavesFora: string[] = [];
+  const chavesPendentes: string[] = [];
+  const chavesPorAlvoId = new Map<string, Set<string>>();
+
+  for (const chave of uniaoChaves) {
+    const c = classificacao.get(chave);
+    if (!c) continue;
+    if (c.tipo === "reserva") {
+      chavesReserva.add(chave);
+    } else if (c.tipo === "fora") {
+      chavesFora.push(chave);
+    } else if (c.tipo === "alvo") {
+      if (!chavesPorAlvoId.has(c.alvoId)) chavesPorAlvoId.set(c.alvoId, new Set());
+      chavesPorAlvoId.get(c.alvoId)!.add(chave);
+    } else {
+      // "pendente" (FR-017): fora do escopo de reservaEmergencia/porTag/
+      // porAlvo/foraDaCarteira — mas exposta individualmente em `pendentes`
+      // (FR-017 "exibidos à parte", FR-014 soma dos buckets == consolidado).
+      chavesPendentes.push(chave);
+    }
+  }
+
+  const reservaEmergencia = await calcularRendimentoPeriodoDeChaves(
+    filtrarMapaPorChaves(elegiveisInicio, chavesReserva),
+    filtrarMapaPorChaves(elegiveisFim, chavesReserva),
+    sessaoInicioId,
+    sessaoFimId,
+  );
+
+  const foraDaCarteira: RendimentoAtivoForaDaCarteira[] = [];
+  for (const chaveExport of chavesFora) {
+    const rendimento = await calcularRendimentoPeriodoDeChaves(
+      filtrarMapaPorChaves(elegiveisInicio, [chaveExport]),
+      filtrarMapaPorChaves(elegiveisFim, [chaveExport]),
+      sessaoInicioId,
+      sessaoFimId,
+    );
+    foraDaCarteira.push({ chaveExport, rendimento });
+  }
+
+  const pendentes: RendimentoAtivoForaDaCarteira[] = [];
+  for (const chaveExport of chavesPendentes) {
+    const rendimento = await calcularRendimentoPeriodoDeChaves(
+      filtrarMapaPorChaves(elegiveisInicio, [chaveExport]),
+      filtrarMapaPorChaves(elegiveisFim, [chaveExport]),
+      sessaoInicioId,
+      sessaoFimId,
+    );
+    pendentes.push({ chaveExport, rendimento });
+  }
+
+  const alvoIds = Array.from(chavesPorAlvoId.keys());
+  const alvos =
+    alvoIds.length > 0
+      ? await prisma.alvo.findMany({
+          where: { id: { in: alvoIds } },
+          select: { id: true, nome: true, tag: true },
+        })
+      : [];
+  const alvoPorId = new Map(alvos.map((a) => [a.id, a]));
+
+  const porAlvo: RendimentoPorAlvo[] = [];
+  const chavesPorTag = new Map<string, Set<string>>();
+
+  for (const alvoId of alvoIds) {
+    const alvo = alvoPorId.get(alvoId);
+    // Defensivo: alvo referenciado por ativo_mapeado/posicao_manual mas não
+    // encontrado (não deveria acontecer em dado consistente) — mantém a
+    // chave visível em vez de descartar o bucket silenciosamente.
+    const nomeAlvo = alvo?.nome ?? alvoId;
+    const tag = alvo?.tag ?? null;
+    const chavesDoAlvo = chavesPorAlvoId.get(alvoId)!;
+
+    const rendimento = await calcularRendimentoPeriodoDeChaves(
+      filtrarMapaPorChaves(elegiveisInicio, chavesDoAlvo),
+      filtrarMapaPorChaves(elegiveisFim, chavesDoAlvo),
+      sessaoInicioId,
+      sessaoFimId,
+    );
+    porAlvo.push({ alvoId, nomeAlvo, tag, rendimento });
+
+    if (tag !== null) {
+      if (!chavesPorTag.has(tag)) chavesPorTag.set(tag, new Set());
+      for (const chave of chavesDoAlvo) chavesPorTag.get(tag)!.add(chave);
+    }
+  }
+
+  const porTag: RendimentoPorTag[] = [];
+  for (const [tag, chaves] of chavesPorTag) {
+    const rendimento = await calcularRendimentoPeriodoDeChaves(
+      filtrarMapaPorChaves(elegiveisInicio, chaves),
+      filtrarMapaPorChaves(elegiveisFim, chaves),
+      sessaoInicioId,
+      sessaoFimId,
+    );
+    porTag.push({ tag, rendimento });
+  }
+
+  return { reservaEmergencia, porTag, porAlvo, foraDaCarteira, pendentes };
+}
+
+/** `RendimentoPeriodo` "vazio" (sem sessões concretas) — mesmo padrão de `PONTO_SEM_DADO`, reutilizado por `consolidado`/`reservaEmergencia` quando não há NENHUMA sessão VIGENTE. */
+const RENDIMENTO_PERIODO_SEM_DADO: RendimentoPeriodo = {
+  sessaoInicioId: "",
+  sessaoFimId: "",
+  rendimentoCentavos: null,
+  rendimentoPct: null,
+  pontoInicio: PONTO_SEM_DADO,
+  pontoFim: PONTO_SEM_DADO,
+};
+
+/**
+ * Dados da tela 6.10 (análise de rendimento): rendimento consolidado do
+ * patrimônio total (US1, FR-001/FR-002/FR-005/FR-006) e a segmentação por
+ * bucket — reserva de emergência, tag, alvo individual e ativos fora da
+ * carteira (US2, FR-008/FR-009, `calcularRendimentoPorBucket`) — num período
+ * selecionado. Nunca lança exceção por ausência de dados: sem NENHUMA sessão
+ * VIGENTE, retorna `{vazio: true, ...}` (mesmo padrão de
  * `dashboard-service.dadosDashboard`); com sessões mas sem valor investido
- * rastreável em alguma delas, `consolidado.rendimentoCentavos` vem `null`
- * (FR-010) — a UI decide como exibir "sem histórico suficiente".
+ * rastreável em alguma delas (ou em algum bucket), o respectivo
+ * `rendimentoCentavos` vem `null` (FR-010) — a UI decide como exibir "sem
+ * histórico suficiente".
  *
  * Caso especial — apenas UMA sessão VIGENTE (`resolverPeriodo` resolve
  * `sessaoInicioId === sessaoFimId`): não há um segundo ponto no tempo para
- * calcular uma variação. `consolidado` é montado com `calcularRendimentoPonto`
- * dessa sessão isolada (não `calcularRendimentoPeriodo`, que sempre daria
- * delta 0 para dois pontos idênticos — um número incorreto e enganoso).
- * `semPeriodoAnteriorParaComparacao: true` sinaliza esse caso para a UI
- * (spec.md US1 Acceptance Scenario 2).
+ * calcular uma variação, em NENHUM dos campos (consolidado ou buckets) —
+ * `calcularRendimentoPeriodoDeChaves` já trata esse caso genericamente
+ * (calcula o rendimento do PONTO único em vez de um delta 0 enganoso,
+ * Princípio V). `semPeriodoAnteriorParaComparacao: true` sinaliza esse caso
+ * para a UI (spec.md US1 Acceptance Scenario 2).
  */
 export async function dadosRendimento(input: PeriodoInput): Promise<RendimentoOutput> {
   const [periodo, sessoesVigentes] = await Promise.all([
@@ -568,57 +902,39 @@ export async function dadosRendimento(input: PeriodoInput): Promise<RendimentoOu
     return {
       vazio: true,
       periodo,
-      consolidado: {
-        sessaoInicioId: "",
-        sessaoFimId: "",
-        rendimentoCentavos: null,
-        rendimentoPct: null,
-        pontoInicio: PONTO_SEM_DADO,
-        pontoFim: PONTO_SEM_DADO,
-      },
+      consolidado: RENDIMENTO_PERIODO_SEM_DADO,
+      reservaEmergencia: RENDIMENTO_PERIODO_SEM_DADO,
+      porTag: [],
+      porAlvo: [],
+      foraDaCarteira: [],
+      pendentes: [],
       periodosDisponiveis,
       semPeriodoAnteriorParaComparacao: false,
     };
   }
 
-  // Só uma sessão VIGENTE disponível (`resolverPeriodo` já resolveu início =
-  // fim): não existe segundo ponto para comparar. `calcularRendimentoPeriodo`
-  // com início e fim idênticos sempre daria delta 0, mascarando o rendimento
-  // real (positivo/negativo/indisponível) daquela sessão isolada — em vez
-  // disso, calcula o rendimento do PONTO único e monta um `RendimentoPeriodo`
-  // com pontoInicio/pontoFim ambos iguais a ele (spec.md US1 Acceptance
-  // Scenario 2, Princípio V).
-  if (periodo.sessaoInicioId === periodo.sessaoFimId) {
-    const { inicio: dadosSessaoUnica } = await consolidadoDoPeriodo(
-      periodo.sessaoInicioId,
-      periodo.sessaoFimId,
-    );
+  const [elegiveisInicio, elegiveisFim, buckets] = await Promise.all([
+    chavesElegiveisDaSessao(periodo.sessaoInicioId),
+    chavesElegiveisDaSessao(periodo.sessaoFimId),
+    calcularRendimentoPorBucket(periodo.sessaoInicioId, periodo.sessaoFimId),
+  ]);
 
-    const ponto = calcularRendimentoPonto(dadosSessaoUnica);
-
-    const consolidado: RendimentoPeriodo = {
-      sessaoInicioId: periodo.sessaoInicioId,
-      sessaoFimId: periodo.sessaoFimId,
-      rendimentoCentavos: ponto.rendimentoCentavos,
-      rendimentoPct: ponto.rendimentoPct,
-      pontoInicio: ponto,
-      pontoFim: ponto,
-    };
-
-    return { vazio: false, periodo, consolidado, periodosDisponiveis, semPeriodoAnteriorParaComparacao: true };
-  }
-
-  const { inicio: dadosInicio, fim: dadosFim } = await consolidadoDoPeriodo(
+  const consolidado = await calcularRendimentoPeriodoDeChaves(
+    elegiveisInicio,
+    elegiveisFim,
     periodo.sessaoInicioId,
     periodo.sessaoFimId,
   );
 
-  const consolidado = calcularRendimentoPeriodo({
-    sessaoInicioId: periodo.sessaoInicioId,
-    sessaoFimId: periodo.sessaoFimId,
-    pontoInicio: dadosInicio,
-    pontoFim: dadosFim,
-  });
-
-  return { vazio: false, periodo, consolidado, periodosDisponiveis, semPeriodoAnteriorParaComparacao: false };
+  return {
+    vazio: false,
+    periodo,
+    consolidado,
+    ...buckets,
+    periodosDisponiveis,
+    // Só uma sessão VIGENTE disponível (resolverPeriodo já resolveu início =
+    // fim): sinaliza para a UI que não há período anterior de comparação
+    // (spec.md US1 Acceptance Scenario 2).
+    semPeriodoAnteriorParaComparacao: periodo.sessaoInicioId === periodo.sessaoFimId,
+  };
 }
