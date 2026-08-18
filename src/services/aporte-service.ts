@@ -115,9 +115,13 @@ async function obterSessaoVigenteMaisRecente() {
 /**
  * Cruza as `chave_export` das posições de uma sessão com `ativo_mapeado` e
  * retorna as que estão pendentes (data-model.md: `alvo_id = null AND
- * fora_da_carteira = false`), incluindo — defensivamente — chaves sem
- * NENHUM registro de `ativo_mapeado` (estado equivalente a pendente, ainda
- * que fora do fluxo normal em que o import já cria o pendente).
+ * fora_da_carteira = false AND reserva_emergencia = false`), incluindo —
+ * defensivamente — chaves sem NENHUM registro de `ativo_mapeado` (estado
+ * equivalente a pendente, ainda que fora do fluxo normal em que o import já
+ * cria o pendente). `reserva_emergencia = true` é um estado RESOLVIDO —
+ * não bloqueia a calculadora (mesma checagem duplicada em
+ * import-service.listarPendenciasDaSessao, por decisão explícita de
+ * manter os dois locais idênticos em vez de acoplá-los).
  */
 async function listarPendenciasDaSessao(sessaoId: string): Promise<string[]> {
   const posicoes = await prisma.posicao.findMany({
@@ -135,7 +139,10 @@ async function listarPendenciasDaSessao(sessaoId: string): Promise<string[]> {
 
   return chaves.filter((chave) => {
     const mapeamento = mapaPorChave.get(chave);
-    return !mapeamento || (mapeamento.alvo_id === null && !mapeamento.fora_da_carteira);
+    return (
+      !mapeamento ||
+      (mapeamento.alvo_id === null && !mapeamento.fora_da_carteira && !mapeamento.reserva_emergencia)
+    );
   });
 }
 
@@ -235,6 +242,17 @@ async function montarContextoEntradaMotor(): Promise<ContextoEntradaMotor> {
 
   for (const [chaveExport, dados] of consolidadoPorChave) {
     const mapeamento = mapaPorChave.get(chaveExport);
+
+    // Reserva de emergência: EXCLUÍDA inteiramente da base que vai para o
+    // motor de déficit, mesmo tratamento que ignorar_no_import recebe acima
+    // (nunca entra em `posicoes[]`) — não é apenas um `foraDaCarteira: true`
+    // porque não deve nem aparecer como candidata no laço de tipos/cotação
+    // por alvo abaixo (alvo_id é sempre null aqui, pela invariante da
+    // aplicação, então o motor já a ignoraria de qualquer forma — excluir
+    // aqui só torna essa exclusão explícita, sem depender de um detalhe de
+    // implementação do motor).
+    if (mapeamento?.reserva_emergencia) continue;
+
     const alvoId = mapeamento?.alvo_id ?? null;
     const foraDaCarteira = mapeamento?.fora_da_carteira ?? false;
 

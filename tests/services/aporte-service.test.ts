@@ -229,6 +229,62 @@ describe("aporte-service", () => {
       ).rejects.toThrow(/pendente/i);
     });
 
+    it("posição com reserva_emergencia=true é excluída de posicoes[]/base do motor e NÃO é listada como pendência bloqueando a calculadora", async () => {
+      const alvoAcoes = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+      await prisma.posicao.createMany({
+        data: [
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 100_000,
+            tipo_grupo: "ACOES",
+            data_ultima_cotacao: new Date("2026-07-28"),
+          },
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "RESERVA-CDB",
+            instituicao: "Itaú",
+            quantidade: "1",
+            patrimonio_hoje_centavos: 80_000,
+            tipo_grupo: "OUTROS_FUNDOS",
+            data_ultima_cotacao: new Date("2026-07-28"),
+          },
+        ],
+      });
+      await prisma.ativo_mapeado.createMany({
+        data: [
+          { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+          { chave_export: "RESERVA-CDB", alvo_id: null, reserva_emergencia: true },
+        ],
+      });
+
+      const preparo = await aporteService.prepararCalculadora();
+      expect(preparo.bloqueada).toBe(false);
+      expect(preparo.pendencias).toEqual([]);
+
+      const calculo = await aporteService.calcular({
+        valorCentavos: 50_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 100,
+      });
+
+      // Base do motor não inclui os 80_000 da reserva de emergência.
+      expect(calculo.resultado.patrimonioBaseCentavos).toBe(100_000);
+    });
+
     it("uma chave sem NENHUM ativo_mapeado também bloqueia (equivalente a pendente)", async () => {
       const sessao = await prisma.sessao_import.create({
         data: {
