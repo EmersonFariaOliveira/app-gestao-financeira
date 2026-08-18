@@ -174,7 +174,7 @@ export default function DashboardPage() {
           <CardDescription>Posições de {formatarData(dados.dataExport)}.</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
             <Estatistica
               titulo="Total"
               valor={formatCentavosParaReais(dados.patrimonioTotalCentavos)}
@@ -186,6 +186,10 @@ export default function DashboardPage() {
             <Estatistica
               titulo="Fora da carteira"
               valor={formatCentavosParaReais(dados.patrimonioForaDaCarteiraCentavos)}
+            />
+            <Estatistica
+              titulo="Reserva de emergência"
+              valor={formatCentavosParaReais(dados.patrimonioReservaEmergenciaCentavos)}
             />
             <Estatistica
               titulo="Pendente de vínculo"
