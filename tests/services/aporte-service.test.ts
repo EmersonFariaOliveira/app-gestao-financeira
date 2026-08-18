@@ -802,6 +802,69 @@ describe("aporte-service", () => {
       expect(itemFilaRendaFixa?.valorAtualCentavos ?? 0).toBe(0);
     });
 
+    it("bug corrigido: chave_export com ignorar_no_import=true (alvo_id null, invariante atual) não aparece em listarPendencias() nem bloqueia calcular()", async () => {
+      const alvoAcoes = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+      });
+
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+
+      await prisma.posicao.createMany({
+        data: [
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 300_000,
+            tipo_grupo: "ACOES",
+            data_ultima_cotacao: new Date("2026-07-28"),
+          },
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "TESOURO-IGNORADO",
+            instituicao: "Itaú",
+            quantidade: "1000.00",
+            patrimonio_hoje_centavos: 999_000,
+            tipo_grupo: "TESOURO_DIRETO",
+            data_ultima_cotacao: new Date("2026-07-28"),
+          },
+        ],
+      });
+
+      await prisma.ativo_mapeado.createMany({
+        data: [
+          { chave_export: "PRIO3", alvo_id: alvoAcoes.id, fora_da_carteira: false },
+          // Invariante atual (data-model.md): ignorar_no_import=true sempre
+          // com alvo_id = null — este é exatamente o cenário do bug: 4
+          // pontos de código classificavam isso como pendente.
+          { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
+        ],
+      });
+
+      expect(await aporteService.listarPendencias()).toEqual([]);
+
+      const preparo = await aporteService.prepararCalculadora();
+      expect(preparo.bloqueada).toBe(false);
+      expect(preparo.pendencias).toEqual([]);
+
+      // calcular() não lança erro de bloqueio (não teria alvo pendente).
+      const calculo = await aporteService.calcular({
+        valorCentavos: 50_000,
+        incluirDividendos: false,
+        incluirTroco: false,
+        aporteMinimoCentavos: 100,
+      });
+      expect(calculo.resultado.patrimonioBaseCentavos).toBe(300_000);
+    });
+
     it("colisão entre chave_manual de uma posicao_manual e um chave_export já consolidado do CSV lança erro explícito (fail loud, research.md R8, §2.2)", async () => {
       const alvoAcoes = await prisma.alvo.create({
         data: { nome: "Ações BR", percentual_alvo_bps: 5000, vigencia_inicio: new Date("2026-01-01") },

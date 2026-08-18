@@ -115,11 +115,14 @@ async function obterSessaoVigenteMaisRecente() {
 /**
  * Cruza as `chave_export` das posições de uma sessão com `ativo_mapeado` e
  * retorna as que estão pendentes (data-model.md: `alvo_id = null AND
- * fora_da_carteira = false AND reserva_emergencia = false`), incluindo —
- * defensivamente — chaves sem NENHUM registro de `ativo_mapeado` (estado
- * equivalente a pendente, ainda que fora do fluxo normal em que o import já
- * cria o pendente). `reserva_emergencia = true` é um estado RESOLVIDO —
- * não bloqueia a calculadora (mesma checagem duplicada em
+ * fora_da_carteira = false AND reserva_emergencia = false AND
+ * ignorar_no_import = false`), incluindo — defensivamente — chaves sem
+ * NENHUM registro de `ativo_mapeado` (estado equivalente a pendente, ainda
+ * que fora do fluxo normal em que o import já cria o pendente).
+ * `reserva_emergencia = true` e `ignorar_no_import = true` são estados
+ * RESOLVIDOS — não bloqueiam a calculadora (`ignorar_no_import` é checado
+ * com a MESMA prioridade de `mapeamento-service.listarVinculos`, antes de
+ * fora_da_carteira/reserva_emergencia/alvo_id; mesma checagem duplicada em
  * import-service.listarPendenciasDaSessao, por decisão explícita de
  * manter os dois locais idênticos em vez de acoplá-los).
  */
@@ -141,7 +144,10 @@ async function listarPendenciasDaSessao(sessaoId: string): Promise<string[]> {
     const mapeamento = mapaPorChave.get(chave);
     return (
       !mapeamento ||
-      (mapeamento.alvo_id === null && !mapeamento.fora_da_carteira && !mapeamento.reserva_emergencia)
+      (!mapeamento.ignorar_no_import &&
+        mapeamento.alvo_id === null &&
+        !mapeamento.fora_da_carteira &&
+        !mapeamento.reserva_emergencia)
     );
   });
 }

@@ -164,6 +164,15 @@ describe("mapeamento-service", () => {
 
       expect(await mapeamentoService.contarPendencias()).toBe(1);
     });
+
+    it("contarPendencias não conta um ativo_mapeado com ignorar_no_import=true como pendência (bug corrigido: era contado em 4 lugares que duplicavam a classificação sem excluir esse estado)", async () => {
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
+      });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "WRLD11" } });
+
+      expect(await mapeamentoService.contarPendencias()).toBe(1);
+    });
   });
 
   describe("memorização entre imports", () => {
@@ -841,6 +850,20 @@ describe("mapeamento-service", () => {
       expect(vinculos.reservaEmergencia).toEqual([
         { chaveExport: "RESERVA-CDB", valorAtualCentavos: 0 },
       ]);
+      expect(await mapeamentoService.contarPendencias()).toBe(0);
+    });
+
+    it("chave_export já marcada ignorar_no_import=true não vira pendência de novo mesmo reaparecendo num import novo", async () => {
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
+      });
+
+      const chavesNovas = await simularImportCriaPendenteSeNovo(["TESOURO-IGNORADO"]);
+      expect(chavesNovas).toEqual([]);
+
+      const vinculos = await mapeamentoService.listarVinculos();
+      expect(vinculos.pendentes).toEqual([]);
+      expect(vinculos.ignorados.map((i) => i.chaveExport)).toEqual(["TESOURO-IGNORADO"]);
       expect(await mapeamentoService.contarPendencias()).toBe(0);
     });
   });

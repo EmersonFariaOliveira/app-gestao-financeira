@@ -46,16 +46,26 @@ import { contarPendencias } from "@/services/mapeamento-service";
 //      misturado com `foraDaCarteira` nem com `pendentes`/alocação por alvo.
 //    - `patrimonioPendenteCentavos` = soma das posições sem vínculo resolvido
 //      (`alvo_id = null AND fora_da_carteira = false AND reserva_emergencia
-//      = false`, incluindo — defensivamente, igual a
-//      `aporte-service.listarPendenciasDaSessao` — chaves sem NENHUM
-//      registro de `ativo_mapeado`). Não é "fora da carteira" nem "reserva
-//      de emergência" (decisões do usuário) nem "na carteira" (ainda sem
-//      alvo) — listado à parte em `pendentes`, como contraparte financeira
-//      do alerta de contagem (`contarPendencias()`, que só conta, não soma
-//      valor).
+//      = false AND ignorar_no_import = false`, incluindo — defensivamente,
+//      igual a `aporte-service.listarPendenciasDaSessao` — chaves sem
+//      NENHUM registro de `ativo_mapeado`). Não é "fora da carteira" nem
+//      "reserva de emergência" nem "ignorado" (decisões do usuário) nem "na
+//      carteira" (ainda sem alvo) — listado à parte em `pendentes`, como
+//      contraparte financeira do alerta de contagem (`contarPendencias()`,
+//      que só conta, não soma valor).
+//    - `patrimonioIgnoradoCentavos` = soma das posições marcadas
+//      `ignorar_no_import = true` — estado RESOLVIDO (o usuário decidiu
+//      explicitamente ignorar essa chave do CSV porque será substituída por
+//      uma `posicao_manual`), checado com a MESMA prioridade de
+//      `mapeamento-service.listarVinculos` (`ignorar_no_import` vem ANTES
+//      de fora_da_carteira/reserva_emergencia/alvo_id). Excluída da base do
+//      motor e de todos os outros baldes — nunca infla
+//      `patrimonioPendenteCentavos` nem `patrimonioNaCarteiraCentavos`.
+//      `posicao_manual` não tem campo equivalente (ela É a substituta, não a
+//      ignorada), então este balde só existe do lado de `ativo_mapeado`.
 //    - Invariante: `patrimonioTotalCentavos === patrimonioNaCarteiraCentavos +
 //      patrimonioForaDaCarteiraCentavos + patrimonioReservaEmergenciaCentavos +
-//      patrimonioPendenteCentavos`.
+//      patrimonioPendenteCentavos + patrimonioIgnoradoCentavos`.
 //    - `posicao_manual` (feature 002-posicoes-manuais-ajustes) participa dos
 //      quatro totais acima com a MESMA máquina de estados e a MESMA
 //      prioridade de classificação de `ativo_mapeado` (foraDaCarteira →
@@ -153,6 +163,8 @@ export interface DashboardComDados {
   /** Soma das posições marcadas `reserva_emergencia = true` — balde isolado, ver nota de design acima. */
   patrimonioReservaEmergenciaCentavos: number;
   patrimonioPendenteCentavos: number;
+  /** Soma das posições marcadas `ignorar_no_import = true` — estado RESOLVIDO, ver nota de design acima. */
+  patrimonioIgnoradoCentavos: number;
   alocacao: AlocacaoPorAlvo[];
   /** Mesma alocação de `alocacao`, agrupada por `tag` — ver `AlocacaoPorTag`. */
   alocacaoPorTag: AlocacaoPorTag[];
@@ -243,6 +255,7 @@ interface ClassificacaoPosicoes {
   patrimonioForaDaCarteiraCentavos: number;
   patrimonioReservaEmergenciaCentavos: number;
   patrimonioPendenteCentavos: number;
+  patrimonioIgnoradoCentavos: number;
   valorPorAlvoId: Map<string, number>;
   foraDaCarteira: AtivoComValor[];
   reservaEmergencia: AtivoComValor[];
@@ -260,7 +273,11 @@ interface ClassificacaoPosicoes {
  * também tem `alvo_id = null` (invariante da aplicação), então já cairia na
  * mesma exclusão do motor — aqui ela é classificada num branch próprio, ANTES
  * do branch de "pendente", para ser exibida em um balde isolado em vez de
- * cair em `pendentes`.
+ * cair em `pendentes`. `ignorar_no_import` (também `alvo_id = null`) tem
+ * PRIORIDADE MÁXIMA na classificação — checado ANTES de fora_da_carteira/
+ * reserva_emergencia/alvo_id, mesma ordem de `mapeamento-service.
+ * listarVinculos` — porque é um estado RESOLVIDO (substituído por
+ * `posicao_manual`), não uma pendência.
  */
 async function classificarPosicoesDaSessao(sessaoId: string): Promise<ClassificacaoPosicoes> {
   const posicoesBrutas = await prisma.posicao.findMany({
@@ -288,6 +305,7 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
   let patrimonioForaDaCarteiraCentavos = 0;
   let patrimonioReservaEmergenciaCentavos = 0;
   let patrimonioPendenteCentavos = 0;
+  let patrimonioIgnoradoCentavos = 0;
   const valorPorAlvoId = new Map<string, number>();
   const foraDaCarteira: AtivoComValor[] = [];
   const reservaEmergencia: AtivoComValor[] = [];
@@ -297,10 +315,17 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
     patrimonioTotalCentavos += valorCentavos;
     const mapeamento = mapaPorChave.get(chaveExport);
     const alvoId = mapeamento?.alvo_id ?? null;
+    const ignorarNoImportFlag = mapeamento?.ignorar_no_import ?? false;
     const foraDaCarteiraFlag = mapeamento?.fora_da_carteira ?? false;
     const reservaEmergenciaFlag = mapeamento?.reserva_emergencia ?? false;
 
-    if (foraDaCarteiraFlag) {
+    if (ignorarNoImportFlag) {
+      // Estado RESOLVIDO com PRIORIDADE MÁXIMA (mesma ordem de
+      // mapeamento-service.listarVinculos) — excluído de todos os outros
+      // baldes/base do motor; nunca infla patrimonioPendenteCentavos nem
+      // patrimonioNaCarteiraCentavos.
+      patrimonioIgnoradoCentavos += valorCentavos;
+    } else if (foraDaCarteiraFlag) {
       patrimonioForaDaCarteiraCentavos += valorCentavos;
       foraDaCarteira.push({ chaveExport, valorCentavos });
     } else if (reservaEmergenciaFlag) {
@@ -382,6 +407,7 @@ async function classificarPosicoesDaSessao(sessaoId: string): Promise<Classifica
     patrimonioForaDaCarteiraCentavos,
     patrimonioReservaEmergenciaCentavos,
     patrimonioPendenteCentavos,
+    patrimonioIgnoradoCentavos,
     valorPorAlvoId,
     foraDaCarteira,
     reservaEmergencia,
@@ -521,6 +547,7 @@ export async function dadosDashboard(): Promise<DadosDashboardOutput> {
     patrimonioForaDaCarteiraCentavos: classificacao.patrimonioForaDaCarteiraCentavos,
     patrimonioReservaEmergenciaCentavos: classificacao.patrimonioReservaEmergenciaCentavos,
     patrimonioPendenteCentavos: classificacao.patrimonioPendenteCentavos,
+    patrimonioIgnoradoCentavos: classificacao.patrimonioIgnoradoCentavos,
     alocacao,
     alocacaoPorTag,
     foraDaCarteira: classificacao.foraDaCarteira,

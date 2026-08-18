@@ -307,12 +307,19 @@ export async function listarVinculos(): Promise<ListarVinculosOutput> {
 
 /**
  * Quantidade de `ativo_mapeado` pendentes (alvo_id null AND fora_da_carteira
- * false AND reserva_emergencia false — reserva de emergência é um estado
- * RESOLVIDO, não conta como pendência).
+ * false AND reserva_emergencia false AND ignorar_no_import false —
+ * reserva de emergência e ignorar_no_import são estados RESOLVIDOS, não
+ * contam como pendência; ver prioridade de classificação em
+ * `listarVinculos` acima, onde `ignorar_no_import` é checado primeiro).
  */
 export async function contarPendencias(): Promise<number> {
   return prisma.ativo_mapeado.count({
-    where: { alvo_id: null, fora_da_carteira: false, reserva_emergencia: false },
+    where: {
+      alvo_id: null,
+      fora_da_carteira: false,
+      reserva_emergencia: false,
+      ignorar_no_import: false,
+    },
   });
 }
 

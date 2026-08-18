@@ -251,9 +251,14 @@ function calcularInstituicoesFaltantes(
 
 /**
  * Chaves pendentes de vínculo (data-model.md: `alvo_id = null AND
- * fora_da_carteira = false AND reserva_emergencia = false`, ou sem registro
- * algum). `reserva_emergencia = true` é um estado RESOLVIDO — não conta como
- * pendência nem bloqueia a calculadora.
+ * fora_da_carteira = false AND reserva_emergencia = false AND
+ * ignorar_no_import = false`, ou sem registro algum). `reserva_emergencia =
+ * true` e `ignorar_no_import = true` são estados RESOLVIDOS — não contam
+ * como pendência nem bloqueiam a calculadora (`ignorar_no_import` é checado
+ * com a MESMA prioridade de `mapeamento-service.listarVinculos`, antes de
+ * fora_da_carteira/reserva_emergencia/alvo_id; cópia intencional de
+ * aporte-service.listarPendenciasDaSessao — ver nota lá sobre manter os dois
+ * locais idênticos).
  */
 async function listarPendenciasDaSessao(sessaoId: string): Promise<string[]> {
   const posicoes = await prisma.posicao.findMany({
@@ -273,7 +278,10 @@ async function listarPendenciasDaSessao(sessaoId: string): Promise<string[]> {
     const mapeamento = mapaPorChave.get(chave);
     return (
       !mapeamento ||
-      (mapeamento.alvo_id === null && !mapeamento.fora_da_carteira && !mapeamento.reserva_emergencia)
+      (!mapeamento.ignorar_no_import &&
+        mapeamento.alvo_id === null &&
+        !mapeamento.fora_da_carteira &&
+        !mapeamento.reserva_emergencia)
     );
   });
 }

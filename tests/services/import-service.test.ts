@@ -550,6 +550,31 @@ describe("import-service", () => {
       if (!segundo.ok) return;
       expect(segundo.pendenciasVinculo).toEqual([]);
     });
+
+    it("chave já marcada ignorar_no_import=true (bug corrigido: era tratada como pendente em 4 lugares) também não vira pendência de novo — estado RESOLVIDO, não bloqueia a calculadora", async () => {
+      const primeiro = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "TESOURO-IGNORADO" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(primeiro.ok).toBe(true);
+      if (!primeiro.ok) return;
+      expect(primeiro.pendenciasVinculo).toEqual(["TESOURO-IGNORADO"]);
+
+      // Invariante (data-model.md): ignorar_no_import=true sempre com alvo_id
+      // null.
+      await prisma.ativo_mapeado.update({
+        where: { chave_export: "TESOURO-IGNORADO" },
+        data: { ignorar_no_import: true, alvo_id: null },
+      });
+
+      const segundo = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("Itaú", [linha({ acao: "TESOURO-IGNORADO" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(segundo.ok).toBe(true);
+      if (!segundo.ok) return;
+      expect(segundo.pendenciasVinculo).toEqual([]);
+    });
   });
 
   describe("import com 0 arquivos (lacuna de cobertura investigada)", () => {

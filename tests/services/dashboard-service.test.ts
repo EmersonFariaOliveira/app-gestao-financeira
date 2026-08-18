@@ -445,6 +445,83 @@ describe("dashboard-service", () => {
       ).toBe(dados.patrimonioTotalCentavos);
     });
 
+    it("bug corrigido: ativo com ignorar_no_import=true não aparece em pendentes nem infla qtdPendencias/patrimonioPendenteCentavos — soma em patrimonioIgnoradoCentavos e a invariante dos 5 baldes bate", async () => {
+      const alvo = await prisma.alvo.create({
+        data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+      });
+      const sessao = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+      await prisma.posicao.createMany({
+        data: [
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 300_000,
+            tipo_grupo: "ACOES",
+          },
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "TESOURO-IGNORADO",
+            instituicao: "Itaú",
+            quantidade: "1000.00",
+            patrimonio_hoje_centavos: 90_000,
+            tipo_grupo: "TESOURO_DIRETO",
+          },
+          {
+            sessao_import_id: sessao.id,
+            chave_export: "ATIVO-PENDENTE",
+            instituicao: "Itaú",
+            quantidade: "1",
+            patrimonio_hoje_centavos: 20_000,
+            tipo_grupo: "ACOES",
+          },
+        ],
+      });
+      await prisma.ativo_mapeado.createMany({
+        data: [
+          { chave_export: "PRIO3", alvo_id: alvo.id, fora_da_carteira: false },
+          // Invariante atual (data-model.md): ignorar_no_import=true sempre
+          // com alvo_id = null — este é exatamente o cenário do bug.
+          { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
+          // ATIVO-PENDENTE: sem ativo_mapeado — pendente de verdade.
+        ],
+      });
+
+      const dados = await dashboardService.dadosDashboard();
+      if (dados.vazio) throw new Error("não deveria ser vazio");
+
+      expect(dados.patrimonioIgnoradoCentavos).toBe(90_000);
+      expect(dados.pendentes).toEqual([{ chaveExport: "ATIVO-PENDENTE", valorCentavos: 20_000 }]);
+      expect(dados.patrimonioPendenteCentavos).toBe(20_000);
+      // qtdPendencias vem de contarPendencias() (só conta registros
+      // ativo_mapeado existentes) — ATIVO-PENDENTE não tem nenhum registro,
+      // mesma convenção do teste acima ("app vazio... ATIVO-PENDENTE não tem
+      // ativo_mapeado nenhum"). O ponto central deste teste é que
+      // TESOURO-IGNORADO (que TEM registro, com ignorar_no_import=true) não
+      // contaria como pendência se tivesse contado — nenhum registro conta
+      // aqui, então 0.
+      expect(dados.qtdPendencias).toBe(0);
+      expect(dados.patrimonioNaCarteiraCentavos).toBe(300_000);
+
+      // Total = 300_000 (PRIO3) + 90_000 (ignorado) + 20_000 (pendente) = 410_000.
+      expect(dados.patrimonioTotalCentavos).toBe(410_000);
+      expect(
+        dados.patrimonioNaCarteiraCentavos +
+          dados.patrimonioForaDaCarteiraCentavos +
+          dados.patrimonioReservaEmergenciaCentavos +
+          dados.patrimonioPendenteCentavos +
+          dados.patrimonioIgnoradoCentavos,
+      ).toBe(dados.patrimonioTotalCentavos);
+    });
+
     describe("posicao_manual (feature 002-posicoes-manuais-ajustes)", () => {
       it("posição manual vinculada a um alvo soma em patrimonioNaCarteiraCentavos/valorPorAlvoId/alocacao, com valor_atual_centavos (nunca valor_investido_centavos)", async () => {
         const alvo = await prisma.alvo.create({
