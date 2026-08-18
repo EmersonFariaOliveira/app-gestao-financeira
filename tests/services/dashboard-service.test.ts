@@ -511,14 +511,17 @@ describe("dashboard-service", () => {
       expect(dados.qtdPendencias).toBe(0);
       expect(dados.patrimonioNaCarteiraCentavos).toBe(300_000);
 
-      // Total = 300_000 (PRIO3) + 90_000 (ignorado) + 20_000 (pendente) = 410_000.
-      expect(dados.patrimonioTotalCentavos).toBe(410_000);
+      // Total = 300_000 (PRIO3) + 20_000 (pendente) = 320_000 — NUNCA soma
+      // patrimonioIgnoradoCentavos (90_000): TESOURO-IGNORADO é um estado
+      // RESOLVIDO (substituído por posicao_manual) e é excluído de TODAS as
+      // somas do sistema, inclusive do "Patrimônio consolidado" do topo do
+      // dashboard — não só dos baldes intermediários.
+      expect(dados.patrimonioTotalCentavos).toBe(320_000);
       expect(
         dados.patrimonioNaCarteiraCentavos +
           dados.patrimonioForaDaCarteiraCentavos +
           dados.patrimonioReservaEmergenciaCentavos +
-          dados.patrimonioPendenteCentavos +
-          dados.patrimonioIgnoradoCentavos,
+          dados.patrimonioPendenteCentavos,
       ).toBe(dados.patrimonioTotalCentavos);
     });
 
@@ -853,6 +856,83 @@ describe("dashboard-service", () => {
             dados.patrimonioPendenteCentavos,
         ).toBe(dados.patrimonioTotalCentavos);
         expect(dados.qtdPendencias).toBe(1);
+      });
+
+      it("posição CSV ignorada (ignorar_no_import=true) NÃO infla o total mesmo quando existe posicao_manual (a substituta) contribuindo no mesmo mês", async () => {
+        // Cenário real do fluxo de substituição: o usuário ignora a posição
+        // do CSV (TESOURO-IGNORADO) e cadastra a posicao_manual equivalente
+        // (MANUAL-SUBSTITUTA) para o mesmo mês. patrimonioTotalCentavos deve
+        // refletir só PRIO3 (CSV vinculada) + MANUAL-SUBSTITUTA (manual
+        // vinculada) — nunca somar TESOURO-IGNORADO, mesmo com a substituta
+        // presente ao mesmo tempo.
+        const alvo = await prisma.alvo.create({
+          data: { nome: "Ações BR", percentual_alvo_bps: 10000, vigencia_inicio: new Date("2026-01-01") },
+        });
+        const sessao = await prisma.sessao_import.create({
+          data: {
+            mes_referencia: "2026-07",
+            data_export: new Date("2026-07-28"),
+            status: "VIGENTE",
+            instituicoes: JSON.stringify(["Itaú"]),
+          },
+        });
+        await prisma.posicao.createMany({
+          data: [
+            {
+              sessao_import_id: sessao.id,
+              chave_export: "PRIO3",
+              instituicao: "Itaú",
+              quantidade: "100",
+              patrimonio_hoje_centavos: 100_000,
+              tipo_grupo: "ACOES",
+            },
+            {
+              sessao_import_id: sessao.id,
+              chave_export: "TESOURO-IGNORADO",
+              instituicao: "Itaú",
+              quantidade: "1000.00",
+              patrimonio_hoje_centavos: 90_000,
+              tipo_grupo: "TESOURO_DIRETO",
+            },
+          ],
+        });
+        await prisma.ativo_mapeado.createMany({
+          data: [
+            { chave_export: "PRIO3", alvo_id: alvo.id, fora_da_carteira: false },
+            { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
+          ],
+        });
+
+        const substituta = await prisma.posicao_manual.create({
+          data: {
+            chave_manual: "MANUAL-SUBSTITUTA",
+            instituicao: "Itaú",
+            descricao: "Substituta da posição ignorada no CSV",
+            alvo_id: alvo.id,
+          },
+        });
+        await prisma.posicao_manual_valor.create({
+          data: {
+            posicao_manual_id: substituta.id,
+            sessao_import_id: sessao.id,
+            valor_investido_centavos: 1,
+            valor_atual_centavos: 95_000,
+          },
+        });
+
+        const dados = await dashboardService.dadosDashboard();
+        if (dados.vazio) throw new Error("não deveria ser vazio");
+
+        expect(dados.patrimonioIgnoradoCentavos).toBe(90_000);
+        // naCarteira = PRIO3 (CSV) + MANUAL-SUBSTITUTA (manual) — nunca inclui TESOURO-IGNORADO.
+        expect(dados.patrimonioNaCarteiraCentavos).toBe(195_000);
+        expect(dados.patrimonioTotalCentavos).toBe(195_000);
+        expect(
+          dados.patrimonioNaCarteiraCentavos +
+            dados.patrimonioForaDaCarteiraCentavos +
+            dados.patrimonioReservaEmergenciaCentavos +
+            dados.patrimonioPendenteCentavos,
+        ).toBe(dados.patrimonioTotalCentavos);
       });
     });
 
@@ -1256,6 +1336,83 @@ describe("dashboard-service", () => {
       expect(historico.sessoesSubstituidas[0].sessaoImportId).toBe(sessaoJulhoAntiga.id);
       expect(historico.sessoesSubstituidas[0].patrimonioTotalCentavos).toBe(200_000);
       expect(historico.sessoesSubstituidas[0].instituicoes).toEqual(["Itaú"]);
+    });
+
+    it("bug corrigido: posição com ignorar_no_import=true não infla patrimonioTotalCentavos na série mensal nem na auditoria de sessões substituídas", async () => {
+      // Estado RESOLVIDO (substituído por posicao_manual) — mesma exclusão
+      // de classificarPosicoesDaSessao, aqui aplicada em serieMensal e
+      // sessoesSubstituidas, que somavam patrimonio_hoje_centavos direto de
+      // TODAS as posições sem checar ativo_mapeado nenhum (bug).
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "TESOURO-IGNORADO", alvo_id: null, ignorar_no_import: true },
+      });
+
+      const sessaoSubstituida = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-06",
+          data_export: new Date("2026-06-10"),
+          status: "SUBSTITUIDO",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+      await prisma.posicao.createMany({
+        data: [
+          {
+            sessao_import_id: sessaoSubstituida.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 200_000,
+            tipo_grupo: "ACOES",
+          },
+          {
+            sessao_import_id: sessaoSubstituida.id,
+            chave_export: "TESOURO-IGNORADO",
+            instituicao: "Itaú",
+            quantidade: "1000.00",
+            patrimonio_hoje_centavos: 90_000,
+            tipo_grupo: "TESOURO_DIRETO",
+          },
+        ],
+      });
+
+      const sessaoVigente = await prisma.sessao_import.create({
+        data: {
+          mes_referencia: "2026-07",
+          data_export: new Date("2026-07-28"),
+          status: "VIGENTE",
+          instituicoes: JSON.stringify(["Itaú"]),
+        },
+      });
+      await prisma.posicao.createMany({
+        data: [
+          {
+            sessao_import_id: sessaoVigente.id,
+            chave_export: "PRIO3",
+            instituicao: "Itaú",
+            quantidade: "100",
+            patrimonio_hoje_centavos: 250_000,
+            tipo_grupo: "ACOES",
+          },
+          {
+            sessao_import_id: sessaoVigente.id,
+            chave_export: "TESOURO-IGNORADO",
+            instituicao: "Itaú",
+            quantidade: "1000.00",
+            patrimonio_hoje_centavos: 95_000,
+            tipo_grupo: "TESOURO_DIRETO",
+          },
+        ],
+      });
+
+      const historico = await dashboardService.dadosHistorico();
+
+      const pontoVigente = historico.serieMensal.find((p) => p.sessaoImportId === sessaoVigente.id);
+      expect(pontoVigente?.patrimonioTotalCentavos).toBe(250_000);
+
+      expect(historico.sessoesSubstituidas).toHaveLength(1);
+      expect(historico.sessoesSubstituidas[0].sessaoImportId).toBe(sessaoSubstituida.id);
+      expect(historico.sessoesSubstituidas[0].patrimonioTotalCentavos).toBe(200_000);
     });
 
     it("linha do tempo sugerido vs. executado usa o mes_referencia da sessão do aporte, não criado_em", async () => {
