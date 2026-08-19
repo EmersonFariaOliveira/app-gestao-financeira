@@ -1221,6 +1221,115 @@ describe("rendimento-service", () => {
       expect(foraMap.get("FORA2")!.rendimentoCentavos).toBe(-1_000);
     });
 
+    it("foraDaCarteiraTotal: agregado calculado sobre o CONJUNTO das chaves (não é soma ingênua dos itens individuais)", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      await prisma.ativo_mapeado.create({ data: { chave_export: "FORA1", fora_da_carteira: true } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "FORA2", fora_da_carteira: true } });
+      await criarPosicao(inicio.id, "FORA1", 20_000, 15_000);
+      await criarPosicao(fim.id, "FORA1", 22_000, 15_000);
+      await criarPosicao(inicio.id, "FORA2", 5_000, 5_000);
+      await criarPosicao(fim.id, "FORA2", 4_000, 5_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      // início: 20_000+5_000=25_000 atual, 15_000+5_000=20_000 investido
+      // fim: 22_000+4_000=26_000 atual, mesmo investido 20_000
+      // rendimento(fim)=26_000-20_000=6_000; rendimento(início)=25_000-20_000=5_000; delta=1_000
+      expect(buckets.foraDaCarteiraTotal.pontoInicio.valorAtualCentavos).toBe(25_000);
+      expect(buckets.foraDaCarteiraTotal.pontoInicio.valorInvestidoCentavos).toBe(20_000);
+      expect(buckets.foraDaCarteiraTotal.pontoFim.valorAtualCentavos).toBe(26_000);
+      expect(buckets.foraDaCarteiraTotal.rendimentoCentavos).toBe(1_000);
+
+      // Confere que bate com a soma exata (em centavos) dos itens individuais
+      // (FORA1: 2_000, FORA2: -1_000 -> 1_000), mas o cálculo em si NÃO foi
+      // feito somando os itens — foi uma única chamada sobre o conjunto.
+      const somaItens = buckets.foraDaCarteira.reduce(
+        (acc, f) => acc + (f.rendimento.rendimentoCentavos ?? 0),
+        0,
+      );
+      expect(somaItens).toBe(buckets.foraDaCarteiraTotal.rendimentoCentavos);
+    });
+
+    it("foraDaCarteiraTotal vazio (rendimentoCentavos null, FR-010) quando nenhum ativo é fora da carteira", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+      await prisma.ativo_mapeado.create({ data: { chave_export: "AAA11", fora_da_carteira: false } });
+      await criarPosicao(inicio.id, "AAA11", 100_000, 80_000);
+      await criarPosicao(fim.id, "AAA11", 110_000, 80_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.foraDaCarteira).toEqual([]);
+      expect(buckets.foraDaCarteiraTotal.rendimentoCentavos).toBeNull();
+      expect(buckets.foraDaCarteiraTotal.rendimentoPct).toBeNull();
+      expect(buckets.foraDaCarteiraTotal.pontoInicio.valorInvestidoCentavos).toBeNull();
+    });
+
+    it("carteiraAlvoTotal: inclui chaves de alvo COM tag e SEM tag (bug que subestimava o total somando só porTag)", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      const alvoComTag = await prisma.alvo.create({
+        data: {
+          nome: "Ação com tag",
+          percentual_alvo_bps: 3000,
+          tag: "RENDA-VARIAVEL",
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+      const alvoSemTag = await prisma.alvo.create({
+        data: {
+          nome: "Alvo sem tag",
+          percentual_alvo_bps: 1000,
+          tag: null,
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "COMTAG1", alvo_id: alvoComTag.id } });
+      await prisma.ativo_mapeado.create({ data: { chave_export: "SEMTAG1", alvo_id: alvoSemTag.id } });
+
+      await criarPosicao(inicio.id, "COMTAG1", 100_000, 80_000);
+      await criarPosicao(fim.id, "COMTAG1", 120_000, 80_000);
+      await criarPosicao(inicio.id, "SEMTAG1", 10_000, 8_000);
+      await criarPosicao(fim.id, "SEMTAG1", 11_000, 8_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      // Soma de porTag SOZINHO exclui o alvo sem tag (bug que motivou este
+      // teste): SEMTAG1 nunca aparece em nenhuma tag.
+      const somaPorTag = buckets.porTag.reduce((acc, t) => acc + (t.rendimento.rendimentoCentavos ?? 0), 0);
+      // COMTAG1: rendimento(fim)=120_000-80_000=40_000; rendimento(início)=100_000-80_000=20_000; delta=20_000
+      expect(somaPorTag).toBe(20_000);
+
+      // carteiraAlvoTotal inclui AMBOS: investido início 80_000+8_000=88_000,
+      // atual início 100_000+10_000=110_000; atual fim 120_000+11_000=131_000.
+      // rendimento(fim)=131_000-88_000=43_000; rendimento(início)=110_000-88_000=22_000; delta=21_000
+      expect(buckets.carteiraAlvoTotal.pontoInicio.valorAtualCentavos).toBe(110_000);
+      expect(buckets.carteiraAlvoTotal.pontoInicio.valorInvestidoCentavos).toBe(88_000);
+      expect(buckets.carteiraAlvoTotal.pontoFim.valorAtualCentavos).toBe(131_000);
+      expect(buckets.carteiraAlvoTotal.rendimentoCentavos).toBe(21_000);
+
+      // O total correto (com o alvo sem tag) é maior que a soma de porTag
+      // sozinho — é exatamente o cenário do bug relatado pelo desenvolvedor-ui.
+      expect(buckets.carteiraAlvoTotal.rendimentoCentavos).not.toBe(somaPorTag);
+    });
+
+    it("carteiraAlvoTotal vazio (rendimentoCentavos null, FR-010) quando não há nenhum alvo com chave elegível", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+      await prisma.ativo_mapeado.create({ data: { chave_export: "FORA1", fora_da_carteira: true } });
+      await criarPosicao(inicio.id, "FORA1", 20_000, 15_000);
+      await criarPosicao(fim.id, "FORA1", 22_000, 15_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.carteiraAlvoTotal.rendimentoCentavos).toBeNull();
+      expect(buckets.carteiraAlvoTotal.rendimentoPct).toBeNull();
+      expect(buckets.carteiraAlvoTotal.pontoInicio.valorInvestidoCentavos).toBeNull();
+    });
+
     it("ativo ignorar_no_import continua excluído de todos os buckets (FR-012)", async () => {
       const inicio = await criarSessao("2026-07");
       const fim = await criarSessao("2026-08");
@@ -1530,6 +1639,56 @@ describe("rendimento-service", () => {
       expect(resultado.pendentes[0].rendimento.rendimentoCentavos).toBe(500);
       expect(resultado.consolidado.rendimentoCentavos).not.toBeNull();
       expect(somaBuckets).toBe(resultado.consolidado.rendimentoCentavos);
+    });
+
+    it("pendentesTotal: agregado calculado sobre o CONJUNTO das chaves pendentes (não é soma ingênua dos itens individuais)", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      // Sem ativo_mapeado -> "pendente" (defensivo).
+      await criarPosicao(inicio.id, "PENDENTE1", 10_000, 8_000);
+      await criarPosicao(fim.id, "PENDENTE1", 10_500, 8_000);
+      await criarPosicao(inicio.id, "PENDENTE2", 5_000, 5_000);
+      await criarPosicao(fim.id, "PENDENTE2", 4_500, 5_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      // início: 10_000+5_000=15_000 atual, 8_000+5_000=13_000 investido
+      // fim: 10_500+4_500=15_000 atual, mesmo investido 13_000
+      // rendimento(fim)=15_000-13_000=2_000; rendimento(início)=15_000-13_000=2_000; delta=0
+      expect(buckets.pendentesTotal.pontoInicio.valorAtualCentavos).toBe(15_000);
+      expect(buckets.pendentesTotal.pontoInicio.valorInvestidoCentavos).toBe(13_000);
+      expect(buckets.pendentesTotal.rendimentoCentavos).toBe(0);
+
+      const somaItens = buckets.pendentes.reduce(
+        (acc, p) => acc + (p.rendimento.rendimentoCentavos ?? 0),
+        0,
+      );
+      expect(somaItens).toBe(buckets.pendentesTotal.rendimentoCentavos);
+    });
+
+    it("pendentesTotal vazio (rendimentoCentavos null, FR-010) quando não há nenhuma chave pendente", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+      const alvo = await prisma.alvo.create({
+        data: {
+          nome: "Alvo AAA11",
+          percentual_alvo_bps: 1000,
+          vigencia_inicio: new Date("2026-01-01"),
+        },
+      });
+      // Vinculada a um alvo (não pendente, não fora da carteira).
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "AAA11", fora_da_carteira: false, alvo_id: alvo.id },
+      });
+      await criarPosicao(inicio.id, "AAA11", 100_000, 80_000);
+      await criarPosicao(fim.id, "AAA11", 110_000, 80_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.pendentes).toEqual([]);
+      expect(buckets.pendentesTotal.rendimentoCentavos).toBeNull();
+      expect(buckets.pendentesTotal.rendimentoPct).toBeNull();
     });
   });
 

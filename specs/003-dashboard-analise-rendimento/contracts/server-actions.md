@@ -75,6 +75,45 @@ export interface RendimentoOutput {
    * disponível").
    */
   pendentes: Array<{ chaveExport: string; rendimento: RendimentoPeriodo }>;
+  /**
+   * NOVO (adicionado a pedido do usuário, revisão de UX pós-redesenho da
+   * tela: os cards "Ativos fora da carteira alvo" e "Pendentes de vínculo"
+   * também precisam de um total agregado no cabeçalho, no mesmo estilo do
+   * badge que "Reserva de emergência" já mostra). `foraDaCarteiraTotal` é o
+   * agregado de CONVENIÊNCIA sobre TODAS as chaves de `foraDaCarteira`;
+   * `pendentesTotal`, sobre TODAS as chaves de `pendentes`. Ambos calculados
+   * com a MESMA técnica de "somar antes de aplicar a fórmula" já usada por
+   * `reservaEmergencia`/`porTag`/`porAlvo`/`consolidado` — uma única chamada
+   * de agregação sobre o conjunto completo de chaves do bucket, NUNCA a soma
+   * ingênua dos `rendimentoCentavos` já arredondados dos itens individuais de
+   * `foraDaCarteira`/`pendentes` (pode divergir por arredondamento).
+   *
+   * NÃO muda a regra de FR-007/FR-009/FR-017: os itens individuais de
+   * `foraDaCarteira`/`pendentes` continuam sendo a fonte de verdade exibida
+   * linha a linha (nunca escondidos/substituídos por este total), e este
+   * total nunca é fundido com `porTag`/`porAlvo`/`consolidado` de nenhuma
+   * forma nova — é apenas a exposição, como campo de output, do número que
+   * `SC-006` ("a soma dos rendimentos exibidos por bucket bate exatamente com
+   * o rendimento consolidado") já assume internamente para cada bucket como
+   * um todo.
+   */
+  foraDaCarteiraTotal: RendimentoPeriodo;
+  pendentesTotal: RendimentoPeriodo;
+  /**
+   * NOVO (adicionado a pedido do usuário: total geral no cabeçalho do card
+   * "Rendimento por tag e por alvo"). Cobre TODAS as chaves vinculadas a
+   * QUALQUER alvo da carteira, com ou sem tag — diferente de somar `porTag`,
+   * que só cobre alvos COM tag e por isso subestima o total sempre que
+   * existir um alvo "Sem tag" com rendimento diferente de zero (bug real
+   * encontrado quando a UI tentou montar esse total no cliente somando
+   * `porTag`). Também diferente de `consolidado`, que inclui
+   * `reservaEmergencia`/`foraDaCarteira`/`pendentes` além dos alvos.
+   * Calculado com a mesma técnica de "somar antes de aplicar a fórmula" já
+   * usada por `foraDaCarteiraTotal`/`pendentesTotal` — uma única chamada de
+   * agregação sobre a união de todas as chaves de todos os alvos, nunca a
+   * soma ingênua dos agregados de `porTag`/`porAlvo` já calculados.
+   */
+  carteiraAlvoTotal: RendimentoPeriodo;
   serie: SerieRendimento; // US3, um ponto por sessão vigente no período
   periodosDisponiveis: Array<{ sessaoImportId: string; mesReferencia: string; dataExport: string }>; // para popular o seletor de período customizado
 }
@@ -92,5 +131,7 @@ export async function dadosRendimento(
 | Rótulo do percentual na UI | NUNCA "rentabilidade" (FR-020) — usar "ganho sobre capital investido" ou equivalente definido pelo `desenvolvedor-ui`. |
 | `foraDaCarteira` | Um item por `chaveExport` (ou `chave_manual` de posição manual fora da carteira) — nunca agregado num único número, mesmo padrão de `dashboard-service.foraDaCarteira` hoje. |
 | `pendentes` (FR-017/FR-014) | Um item por chave pendente de vínculo, nunca agregado — não entra em `reservaEmergencia`/`porTag`/`porAlvo`/`foraDaCarteira` (não influencia rendimento de alvo/tag), mas é somado ao total de `consolidado` (via SC-006: reservaEmergencia + Σ porTag + Σ foraDaCarteira + Σ pendentes == consolidado). |
+| `foraDaCarteiraTotal`/`pendentesTotal` | Badge de total de conveniência para o cabeçalho dos cards "Ativos fora da carteira alvo"/"Pendentes de vínculo" (UI) — agregado do bucket inteiro, calculado com uma única chamada sobre o conjunto de chaves (nunca soma dos itens já arredondados). Não viola FR-007/FR-009/FR-017: os itens de `foraDaCarteira`/`pendentes` continuam exibidos individualmente; o que essas regras proíbem é fundir com o rendimento de um alvo/tag, não somar o próprio bucket. |
+| `carteiraAlvoTotal` | Total geral de conveniência para o cabeçalho do card "Rendimento por tag e por alvo" (UI) — cobre TODOS os alvos, com ou sem tag. NÃO é a soma de `porTag` (que exclui alvos sem tag) nem de `consolidado` (que inclui reserva/fora/pendentes); calculado sobre a união das chaves de todos os alvos, mesma técnica de agregação única dos demais campos `*Total`. |
 
 Nenhuma nova action de escrita nesta feature — `dadosRendimento` é 100% leitura, mesmo padrão de `dashboard`/`historico`.

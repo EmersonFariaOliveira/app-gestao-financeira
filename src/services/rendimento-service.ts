@@ -411,6 +411,53 @@ export interface RendimentoOutput {
    */
   pendentes: RendimentoAtivoForaDaCarteira[];
   /**
+   * Agregado de CONVENIÊNCIA para exibição (badge de total no cabeçalho do
+   * card "Ativos fora da carteira alvo" da tela 6.10) — NÃO é um campo novo
+   * de regra de negócio, é a exposição do mesmo número que `SC-006` (spec.md)
+   * já assume implicitamente ao dizer que "a soma dos rendimentos exibidos
+   * por bucket bate exatamente com o rendimento consolidado". Calculado com
+   * UMA ÚNICA chamada a `calcularRendimentoPeriodoDeChaves` sobre o conjunto
+   * COMPLETO de chaves `fora_da_carteira` (mesma técnica de "somar antes de
+   * aplicar a fórmula" de `reservaEmergencia`/`porTag`/`porAlvo`/
+   * `consolidado` — NUNCA a soma ingênua dos `rendimentoCentavos` já
+   * arredondados de cada item de `foraDaCarteira`, que pode divergir por
+   * arredondamento).
+   *
+   * Isto NÃO viola FR-009 (spec.md Acceptance Scenario 3: "o rendimento de
+   * cada ativo fora da carteira é exibido individualmente, sem ser somado ao
+   * rendimento por alvo/tag") — essa regra proíbe FUNDIR os ativos fora da
+   * carteira com o rendimento de um alvo/tag, não proíbe um total agregado
+   * do PRÓPRIO bucket. Os itens de `foraDaCarteira` continuam sendo a fonte
+   * de verdade exibida linha a linha; este total nunca substitui nem esconde
+   * os itens individuais, é só um número adicional de cabeçalho.
+   */
+  foraDaCarteiraTotal: RendimentoPeriodo;
+  /**
+   * Mesma semântica de `foraDaCarteiraTotal`, para o card "Pendentes de
+   * vínculo" (FR-017) — agregado de conveniência sobre o conjunto COMPLETO
+   * de chaves pendentes, via UMA chamada a `calcularRendimentoPeriodoDeChaves`
+   * (nunca soma ingênua dos itens de `pendentes`). Não viola FR-017 pela
+   * mesma razão: o que FR-017 proíbe é influenciar o rendimento de
+   * alvo/tag, não expor um total do próprio bucket "à parte".
+   */
+  pendentesTotal: RendimentoPeriodo;
+  /**
+   * Agregado de CONVENIÊNCIA para exibição (total geral no cabeçalho do card
+   * "Rendimento por tag e por alvo" da tela 6.10) — cobre TODAS as chaves
+   * vinculadas a QUALQUER alvo da carteira, com ou sem tag. Diferente de
+   * somar `porTag`: `porTag` só cobre alvos COM tag, então somar `porTag`
+   * sozinho subestima o total sempre que existir algum alvo "Sem tag" com
+   * rendimento diferente de zero. Diferente de `consolidado`: não inclui
+   * `reservaEmergencia`/`foraDaCarteira`/`pendentes`, só o que está
+   * vinculado a um alvo. Calculado com UMA ÚNICA chamada a
+   * `calcularRendimentoPeriodoDeChaves` sobre a união de TODAS as chaves de
+   * TODOS os alvos (mesma técnica de "somar antes de aplicar a fórmula" de
+   * `foraDaCarteiraTotal`/`pendentesTotal` — nunca a soma ingênua dos
+   * agregados por tag/alvo já calculados, que pode divergir por
+   * arredondamento).
+   */
+  carteiraAlvoTotal: RendimentoPeriodo;
+  /**
    * Série temporal (US3, `montarSerieRendimento`): um ponto por sessão
    * VIGENTE dentro do período resolvido por `periodo` (inclusive as
    * extremidades), para o gráfico interativo da tela 6.10. `[]` quando
@@ -726,6 +773,12 @@ export interface RendimentoPorBucket {
   foraDaCarteira: RendimentoAtivoForaDaCarteira[];
   /** Ver `RendimentoOutput.pendentes` — mesma semântica, um item por chave pendente, nunca agregado. */
   pendentes: RendimentoAtivoForaDaCarteira[];
+  /** Ver `RendimentoOutput.foraDaCarteiraTotal` — agregado de conveniência sobre TODAS as chaves de `foraDaCarteira`. */
+  foraDaCarteiraTotal: RendimentoPeriodo;
+  /** Ver `RendimentoOutput.pendentesTotal` — agregado de conveniência sobre TODAS as chaves de `pendentes`. */
+  pendentesTotal: RendimentoPeriodo;
+  /** Ver `RendimentoOutput.carteiraAlvoTotal` — agregado de conveniência sobre TODAS as chaves vinculadas a QUALQUER alvo (com ou sem tag). */
+  carteiraAlvoTotal: RendimentoPeriodo;
 }
 
 /**
@@ -814,6 +867,18 @@ export async function calcularRendimentoPorBucket(
     foraDaCarteira.push({ chaveExport, rendimento });
   }
 
+  // Agregado de conveniência (badge de total no cabeçalho do card, UI) —
+  // mesma técnica de "somar antes de aplicar a fórmula" de
+  // `reservaEmergencia`/`porTag`/`porAlvo`: UMA chamada sobre o conjunto
+  // COMPLETO de `chavesFora`, nunca a soma dos itens já arredondados de
+  // `foraDaCarteira` acima. Ver `RendimentoOutput.foraDaCarteiraTotal`.
+  const foraDaCarteiraTotal = await calcularRendimentoPeriodoDeChaves(
+    filtrarMapaPorChaves(elegiveisInicio, chavesFora),
+    filtrarMapaPorChaves(elegiveisFim, chavesFora),
+    sessaoInicioId,
+    sessaoFimId,
+  );
+
   const pendentes: RendimentoAtivoForaDaCarteira[] = [];
   for (const chaveExport of chavesPendentes) {
     const rendimento = await calcularRendimentoPeriodoDeChaves(
@@ -824,6 +889,31 @@ export async function calcularRendimentoPorBucket(
     );
     pendentes.push({ chaveExport, rendimento });
   }
+
+  // Ver `RendimentoOutput.pendentesTotal` — mesmo padrão de `foraDaCarteiraTotal`.
+  const pendentesTotal = await calcularRendimentoPeriodoDeChaves(
+    filtrarMapaPorChaves(elegiveisInicio, chavesPendentes),
+    filtrarMapaPorChaves(elegiveisFim, chavesPendentes),
+    sessaoInicioId,
+    sessaoFimId,
+  );
+
+  // Agregado de conveniência (total geral do cabeçalho de "Rendimento por
+  // tag e por alvo", UI) — cobre TODAS as chaves vinculadas a QUALQUER alvo,
+  // com ou sem tag (diferente de somar `porTag`, que exclui alvos "Sem
+  // tag"). Mesma técnica de "somar antes de aplicar a fórmula": UMA chamada
+  // sobre a união de todas as chaves de `chavesPorAlvoId`, nunca a soma dos
+  // agregados por tag/alvo já calculados abaixo.
+  const chavesDeTodosOsAlvos = new Set<string>();
+  for (const chaves of chavesPorAlvoId.values()) {
+    for (const chave of chaves) chavesDeTodosOsAlvos.add(chave);
+  }
+  const carteiraAlvoTotal = await calcularRendimentoPeriodoDeChaves(
+    filtrarMapaPorChaves(elegiveisInicio, chavesDeTodosOsAlvos),
+    filtrarMapaPorChaves(elegiveisFim, chavesDeTodosOsAlvos),
+    sessaoInicioId,
+    sessaoFimId,
+  );
 
   const alvoIds = Array.from(chavesPorAlvoId.keys());
   const alvos =
@@ -872,7 +962,17 @@ export async function calcularRendimentoPorBucket(
     porTag.push({ tag, rendimento });
   }
 
-  return { reservaEmergencia, reservaEmergenciaItens, porTag, porAlvo, foraDaCarteira, pendentes };
+  return {
+    reservaEmergencia,
+    reservaEmergenciaItens,
+    porTag,
+    porAlvo,
+    foraDaCarteira,
+    pendentes,
+    foraDaCarteiraTotal,
+    pendentesTotal,
+    carteiraAlvoTotal,
+  };
 }
 
 /**
@@ -1232,6 +1332,9 @@ export async function dadosRendimento(input: PeriodoInput): Promise<RendimentoOu
       porAlvo: [],
       foraDaCarteira: [],
       pendentes: [],
+      foraDaCarteiraTotal: RENDIMENTO_PERIODO_SEM_DADO,
+      pendentesTotal: RENDIMENTO_PERIODO_SEM_DADO,
+      carteiraAlvoTotal: RENDIMENTO_PERIODO_SEM_DADO,
       serie: [],
       periodosDisponiveis,
       semPeriodoAnteriorParaComparacao: false,
