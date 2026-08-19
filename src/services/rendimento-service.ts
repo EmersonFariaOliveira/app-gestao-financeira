@@ -373,6 +373,20 @@ export interface RendimentoOutput {
   consolidado: RendimentoPeriodo;
   /** Rendimento de todas as chaves/posições manuais com `reserva_emergencia = true` (US2, FR-008). */
   reservaEmergencia: RendimentoPeriodo;
+  /**
+   * Rendimento de CADA ativo/posição manual `reserva_emergencia = true`, um
+   * item por chave (US2, FR-008) — nunca agregado num único número. Mesmo
+   * shape/padrão de `foraDaCarteira` (`{ chaveExport, rendimento }`).
+   *
+   * Campo ausente do desenho original do contrato (`RendimentoOutput` só
+   * previa o agregado `reservaEmergencia`) — adicionado depois, a pedido do
+   * usuário durante revisão de UX da tela ("não vejo os ativos na reserva de
+   * emergência"): a tela precisa listar os ativos individuais do bucket,
+   * assim como já faz para `foraDaCarteira`/`pendentes`. Aditivo — não muda
+   * `reservaEmergencia` (o agregado continua calculado do mesmo jeito) nem
+   * nenhum outro número existente.
+   */
+  reservaEmergenciaItens: RendimentoAtivoForaDaCarteira[];
   /** Rendimento agrupado por `alvo.tag` (US2, FR-008) — só tags com pelo menos um alvo com chave elegível aparecem aqui. */
   porTag: RendimentoPorTag[];
   /** Rendimento de cada alvo individualmente (US2, FR-008/FR-009) — só alvos com pelo menos uma chave elegível aparecem aqui. */
@@ -705,6 +719,8 @@ export interface RendimentoAtivoForaDaCarteira {
 /** Resultado de `calcularRendimentoPorBucket` — os 5 campos de segmentação de `RendimentoOutput` (US2 + pendentes FR-017/FR-014). */
 export interface RendimentoPorBucket {
   reservaEmergencia: RendimentoPeriodo;
+  /** Ver `RendimentoOutput.reservaEmergenciaItens` — mesma semântica, um item por chave de reserva de emergência, nunca agregado. */
+  reservaEmergenciaItens: RendimentoAtivoForaDaCarteira[];
   porTag: RendimentoPorTag[];
   porAlvo: RendimentoPorAlvo[];
   foraDaCarteira: RendimentoAtivoForaDaCarteira[];
@@ -776,6 +792,17 @@ export async function calcularRendimentoPorBucket(
     sessaoFimId,
   );
 
+  const reservaEmergenciaItens: RendimentoAtivoForaDaCarteira[] = [];
+  for (const chaveExport of chavesReserva) {
+    const rendimento = await calcularRendimentoPeriodoDeChaves(
+      filtrarMapaPorChaves(elegiveisInicio, [chaveExport]),
+      filtrarMapaPorChaves(elegiveisFim, [chaveExport]),
+      sessaoInicioId,
+      sessaoFimId,
+    );
+    reservaEmergenciaItens.push({ chaveExport, rendimento });
+  }
+
   const foraDaCarteira: RendimentoAtivoForaDaCarteira[] = [];
   for (const chaveExport of chavesFora) {
     const rendimento = await calcularRendimentoPeriodoDeChaves(
@@ -845,7 +872,7 @@ export async function calcularRendimentoPorBucket(
     porTag.push({ tag, rendimento });
   }
 
-  return { reservaEmergencia, porTag, porAlvo, foraDaCarteira, pendentes };
+  return { reservaEmergencia, reservaEmergenciaItens, porTag, porAlvo, foraDaCarteira, pendentes };
 }
 
 /**
@@ -1200,6 +1227,7 @@ export async function dadosRendimento(input: PeriodoInput): Promise<RendimentoOu
       periodo,
       consolidado: RENDIMENTO_PERIODO_SEM_DADO,
       reservaEmergencia: RENDIMENTO_PERIODO_SEM_DADO,
+      reservaEmergenciaItens: [],
       porTag: [],
       porAlvo: [],
       foraDaCarteira: [],

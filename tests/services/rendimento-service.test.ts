@@ -1021,6 +1021,56 @@ describe("rendimento-service", () => {
       expect(buckets.reservaEmergencia.rendimentoCentavos).toBe(3_000);
     });
 
+    it("reservaEmergenciaItens: um item por chave de reserva de emergência, NUNCA agregado num único número", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "RESERVA-CDB", reserva_emergencia: true },
+      });
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "RESERVA-TESOURO", reserva_emergencia: true },
+      });
+      await criarPosicao(inicio.id, "RESERVA-CDB", 50_000, 50_000);
+      await criarPosicao(fim.id, "RESERVA-CDB", 52_000, 50_000);
+      await criarPosicao(inicio.id, "RESERVA-TESOURO", 30_000, 28_000);
+      await criarPosicao(fim.id, "RESERVA-TESOURO", 31_000, 28_000);
+      // Ativo normal (não reserva) não deve entrar neste bucket.
+      await prisma.ativo_mapeado.create({ data: { chave_export: "AAA11", fora_da_carteira: false } });
+      await criarPosicao(inicio.id, "AAA11", 100_000, 80_000);
+      await criarPosicao(fim.id, "AAA11", 110_000, 80_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.reservaEmergenciaItens).toHaveLength(2);
+      const itensMap = new Map(buckets.reservaEmergenciaItens.map((r) => [r.chaveExport, r.rendimento]));
+      // RESERVA-CDB: rendimento(fim)=52_000-50_000=2_000; rendimento(início)=50_000-50_000=0; delta=2_000
+      expect(itensMap.get("RESERVA-CDB")!.rendimentoCentavos).toBe(2_000);
+      // RESERVA-TESOURO: rendimento(fim)=31_000-28_000=3_000; rendimento(início)=30_000-28_000=2_000; delta=1_000
+      expect(itensMap.get("RESERVA-TESOURO")!.rendimentoCentavos).toBe(1_000);
+      // Soma dos itens individuais (2_000 + 1_000 = 3_000) bate com o agregado
+      // NESTE caso, mas isso não é garantido em geral por arredondamento de
+      // rendimentoPct por chave vs conjunto — a asserção de igualdade acima é
+      // sobre rendimentoCentavos (soma exata em centavos, sem % envolvido).
+      const somaItens = buckets.reservaEmergenciaItens.reduce(
+        (acc, r) => acc + (r.rendimento.rendimentoCentavos ?? 0),
+        0,
+      );
+      expect(somaItens).toBe(buckets.reservaEmergencia.rendimentoCentavos);
+    });
+
+    it("reservaEmergenciaItens vazio quando não há nenhuma chave de reserva de emergência: [], nunca omitido", async () => {
+      const inicio = await criarSessao("2026-07");
+      const fim = await criarSessao("2026-08");
+      await prisma.ativo_mapeado.create({ data: { chave_export: "AAA11", fora_da_carteira: false } });
+      await criarPosicao(inicio.id, "AAA11", 100_000, 80_000);
+      await criarPosicao(fim.id, "AAA11", 110_000, 80_000);
+
+      const buckets = await rendimentoService.calcularRendimentoPorBucket(inicio.id, fim.id);
+
+      expect(buckets.reservaEmergenciaItens).toEqual([]);
+    });
+
     it("reserva de emergência sem nenhuma chave: rendimentoCentavos null (FR-010), nunca 0", async () => {
       const inicio = await criarSessao("2026-07");
       const fim = await criarSessao("2026-08");

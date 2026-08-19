@@ -49,6 +49,16 @@ export interface RendimentoOutput {
   periodo: PeriodoAnalise; // resolvido (sessaoInicioId/sessaoFimId concretos), data-model.md
   consolidado: RendimentoPeriodo; // patrimônio total (US1)
   reservaEmergencia: RendimentoPeriodo; // US2
+  /**
+   * NOVO (adicionado depois do desenho original deste contrato, a pedido do
+   * usuário durante revisão de UX da tela: "não vejo os ativos na reserva de
+   * emergência"). Um item por chave marcada `reserva_emergencia = true`,
+   * nunca agregado — mesmo shape/padrão de `foraDaCarteira`. Aditivo: não
+   * substitui `reservaEmergencia` (o agregado continua existindo e sendo
+   * calculado exatamente como antes) — a UI passa a poder listar os ativos
+   * individuais do bucket além de mostrar o número consolidado.
+   */
+  reservaEmergenciaItens: Array<{ chaveExport: string; rendimento: RendimentoPeriodo }>;
   porTag: Array<{ tag: string; rendimento: RendimentoPeriodo }>; // US2
   porAlvo: Array<{ alvoId: string; nomeAlvo: string; tag: string | null; rendimento: RendimentoPeriodo }>; // US2
   foraDaCarteira: Array<{ chaveExport: string; rendimento: RendimentoPeriodo }>; // US2
