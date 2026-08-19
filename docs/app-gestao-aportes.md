@@ -290,7 +290,7 @@ A visão de 10 segundos: "como estou vs. onde deveria estar".
 - **Checagem de completude:** comparar instituições com a sessão anterior. Se faltar alguma (*"o import anterior tinha Itaú + Nubank; este só tem Itaú"*), exibir **aviso forte + confirmação explícita** — não bloquear, pois encerramento de conta numa corretora é um caso legítimo.
 - Diff contra a sessão anterior: ativos novos, ativos que sumiram, variações grandes — como conferência antes de confirmar.
 - **Posições manuais e ajustes:** antes de confirmar a sessão, revisão da lista de posições manuais (CDBs) e ajustes de valor investido (fundos), pré-preenchida a partir da sessão anterior — ver seção 6.9.
-- **Backup automático:** antes de confirmar cada sessão de import, o app cria uma cópia datada do arquivo SQLite (ex.: `backups/app-2026-07-28.db`), com retenção configurável (sugestão: manter as últimas 12). O momento é ideal — o import é a única operação que altera dados em volume.
+- **Backup automático:** antes de confirmar cada sessão de import, o app cria uma cópia datada do arquivo SQLite (ex.: `backup/app-2026-07-28.db`), com retenção configurável (sugestão: manter as últimas 12). O momento é ideal — o import é a única operação que altera dados em volume.
 - Erros de parse exibidos com clareza (linha/coluna), nunca falha silenciosa.
 
 ### 6.3 Vínculo de ativos (de-para)
