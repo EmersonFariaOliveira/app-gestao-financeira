@@ -14,8 +14,6 @@
  * Formato de retorno padrão (contracts/server-actions.md):
  * `{ ok: true, data } | { ok: false, erro: string, detalhes?: unknown }`.
  */
-import path from "node:path";
-
 import {
   exportarConfigJson as exportarConfigJsonService,
   getAllConfig,
@@ -25,6 +23,7 @@ import {
   type ConfigExportJson,
   type ImportarConfigResultado,
 } from "@/services/config-service";
+import { diretorioBackupsPadrao, resolverCaminhoDb } from "@/services/db-paths";
 
 export type ActionResult<T> =
   | { ok: true; data: T }
@@ -42,26 +41,8 @@ export interface ConfigAtualDto {
   retencaoBackups: number;
   /** Caminho absoluto do arquivo SQLite (apenas informativo — nunca acessado diretamente pela UI). */
   caminhoDb: string;
-  /** Caminho absoluto da pasta de backups automáticos (mesma lógica de `backup-service.ts`: `<cwd>/backups`). */
+  /** Caminho absoluto da pasta de backups automáticos (subpasta `backup/` ao lado do `.db` — ver `db-paths.ts`). */
   caminhoBackups: string;
-}
-
-/**
- * Resolve o caminho do `.db` a partir de `DATABASE_URL` (`.env`,
- * ex.: `file:../data/app.db`), relativo a `prisma/schema.prisma` — mesma
- * convenção usada pelo Prisma. Mantido aqui (não em backup-service.ts)
- * porque é puramente informativo para exibição na tela 6.8, não uma
- * operação de backup.
- */
-function resolverCaminhoDb(): string {
-  const url = process.env.DATABASE_URL ?? "file:../data/app.db";
-  const semPrefixo = url.replace(/^file:/, "");
-  return path.resolve(process.cwd(), "prisma", semPrefixo);
-}
-
-/** Mesma convenção de `backup-service.ts` (`diretorioBackupsPadrao`): `<cwd>/backups`. */
-function resolverCaminhoBackups(): string {
-  return path.resolve(process.cwd(), "backups");
 }
 
 /** Lê as configurações atuais + caminhos informativos do `.db` e da pasta de backups (FR-043). */
@@ -75,7 +56,7 @@ export async function lerConfig(): Promise<ActionResult<ConfigAtualDto>> {
         aporteMinimoCentavos: config.aporte_minimo_centavos as number,
         retencaoBackups: config.retencao_backups as number,
         caminhoDb: resolverCaminhoDb(),
-        caminhoBackups: resolverCaminhoBackups(),
+        caminhoBackups: diretorioBackupsPadrao(),
       },
     };
   } catch (erro) {
