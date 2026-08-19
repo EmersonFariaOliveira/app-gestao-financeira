@@ -14,8 +14,9 @@
  * Conteúdo (seção 6.8):
  * 1. Formulário de settings: banda de tolerância, aporte mínimo, retenção
  *    de backups.
- * 2. Exibição (não editável) dos caminhos do `.db` e da pasta `backups/`,
- *    com lembrete de que copiar esses caminhos é o backup completo do app
+ * 2. Exibição (não editável) dos caminhos do `.db` e da pasta `backup/`
+ *    (subpasta ao lado do `.db` — ver `src/services/db-paths.ts`), com
+ *    lembrete de que copiar esses caminhos é o backup completo do app
  *    (local-first, sem sync na nuvem).
  * 3. Exportar configuração: JSON exibido num `<pre>` (com botão de copiar)
  *    e também disponível para download via Blob + `<a download>` — cobre
@@ -276,7 +277,8 @@ export default function ConfiguracoesPage() {
           <CardTitle>Parâmetros</CardTitle>
           <CardDescription>
             Banda de tolerância (dashboard), aporte mínimo por transação (calculadora) e
-            quantas cópias de backup automático manter em <code>backups/</code>.
+            quantas cópias de backup automático manter (veja o caminho da pasta de backups
+            abaixo).
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-end sm:flex-wrap">
