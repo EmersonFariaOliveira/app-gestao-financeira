@@ -85,6 +85,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatCentavosParaReais, parseDecimalParaCentavos } from "@/core/money";
+import { avaliarMovimentacaoNaoExplicada } from "@/core/rendimento/movimentacao-nao-explicada";
 import { useSortableRows } from "@/hooks/use-sortable-rows";
 import type { ErroParse } from "@/parser/types";
 
@@ -251,6 +252,70 @@ export default function ImportPage() {
     if (temInstituicoesFaltantes && !confirmouInstituicoesFaltantes) return false;
     return true;
   }, [preview, mesReferenciaTexto, temInstituicoesFaltantes, confirmouInstituicoesFaltantes]);
+
+  // Correção do falso positivo de fundos com ajuste manual recorrente: para
+  // alvos com ajuste pendente (`preview.avaliacoesMovimentacaoAoVivo`), a
+  // avaliação estática do servidor foi adiada — recalculamos a MESMA regra
+  // (avaliarMovimentacaoNaoExplicada, core puro) reativamente aqui, usando o
+  // valor que o usuário está digitando agora em `ajustesTextos` (caindo para
+  // o valor bruto do CSV quando o campo está vazio — mesma semântica de
+  // `resolverValorInvestido`).
+  const avaliacoesAoVivoQueExcedem = useMemo(() => {
+    if (!preview) return [];
+    const resultado: {
+      alvoId: string;
+      nomeAlvo: string;
+      granularidade: "ativo" | "alvo";
+      chaveExport?: string;
+      posicaoManualId?: string;
+      valorInvestidoEsperadoCentavos: number;
+      valorInvestidoRealCentavos: number;
+      diferencaCentavos: number;
+    }[] = [];
+
+    for (const item of preview.avaliacoesMovimentacaoAoVivo) {
+      let somaAjustesCentavos = 0;
+      for (const ajuste of item.ajustesDoAlvo) {
+        const texto = ajustesTextos[ajuste.chaveExport] ?? "";
+        let contribuicaoCentavos: number;
+        if (!texto.trim()) {
+          contribuicaoCentavos = ajuste.valorCsvCentavos ?? 0;
+        } else {
+          try {
+            contribuicaoCentavos = parseDecimalParaCentavos(texto);
+          } catch {
+            // Estado intermediário de digitação (número inválido/incompleto)
+            // — não quebrar a tela nem mostrar um aviso incorreto por causa
+            // disso; cai para o mesmo fallback do campo vazio.
+            contribuicaoCentavos = ajuste.valorCsvCentavos ?? 0;
+          }
+        }
+        somaAjustesCentavos += contribuicaoCentavos;
+      }
+
+      const valorInvestidoRealCentavos = item.valorRealBaseCentavos + somaAjustesCentavos;
+      const { diferencaCentavos, excedeTolerancia } = avaliarMovimentacaoNaoExplicada({
+        valorInvestidoEsperadoCentavos: item.valorInvestidoEsperadoCentavos,
+        valorInvestidoRealCentavos,
+        houveBaseComparacao: item.houveBaseComparacao,
+      });
+
+      if (excedeTolerancia) {
+        resultado.push({
+          alvoId: item.alvoId,
+          nomeAlvo: item.nomeAlvo,
+          granularidade: item.granularidade,
+          chaveExport: item.chaveExport,
+          posicaoManualId: item.posicaoManualId,
+          valorInvestidoEsperadoCentavos: item.valorInvestidoEsperadoCentavos,
+          valorInvestidoRealCentavos,
+          diferencaCentavos,
+        });
+      }
+    }
+
+    return resultado;
+  }, [preview, ajustesTextos]);
 
   async function handleConfirmar() {
     if (!podeConfirmar || !preview) return;
@@ -523,7 +588,7 @@ export default function ImportPage() {
                 </div>
               )}
 
-              {preview.movimentacoesNaoExplicadas.length > 0 && (
+              {[...preview.movimentacoesNaoExplicadas, ...avaliacoesAoVivoQueExcedem].length > 0 && (
                 <div className="flex flex-col gap-2 rounded-lg border border-amber-400/60 bg-amber-400/10 p-3 text-sm">
                   <p className="font-medium text-amber-700">
                     Atenção: movimentação de valor investido não explicada pelos aportes
@@ -536,9 +601,18 @@ export default function ImportPage() {
                     feito fora do app.
                   </p>
                   <ul className="flex flex-col gap-1">
-                    {preview.movimentacoesNaoExplicadas.map((item, idx) => (
+                    {[
+                      ...preview.movimentacoesNaoExplicadas.map((item, idx) => ({
+                        key: `estatico-${item.alvoId}-${item.chaveExport ?? item.posicaoManualId ?? idx}`,
+                        item,
+                      })),
+                      ...avaliacoesAoVivoQueExcedem.map((item, idx) => ({
+                        key: `ao-vivo-${item.alvoId}-${item.chaveExport ?? item.posicaoManualId ?? idx}`,
+                        item,
+                      })),
+                    ].map(({ key, item }) => (
                       <li
-                        key={`${item.alvoId}-${item.chaveExport ?? item.posicaoManualId ?? idx}`}
+                        key={key}
                         className="rounded-md border border-amber-400/40 bg-background/40 px-2 py-1.5"
                       >
                         <span className="font-medium">{item.nomeAlvo}</span>
