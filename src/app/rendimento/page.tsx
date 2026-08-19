@@ -668,7 +668,7 @@ function SecaoTagsEAlvosComDados({ dados }: { dados: RendimentoOutput }) {
                 expandido={!colapsados.has(CHAVE_SEM_TAG)}
                 onToggle={() => alternar(CHAVE_SEM_TAG)}
                 rendimento={null}
-                rotulo={<span className="text-sm font-medium text-muted-foreground">Sem tag</span>}
+                rotulo={<span className="text-sm font-semibold text-foreground">Sem tag</span>}
                 alvos={alvosSemTag}
                 sortKey={gruposOrdenados.sortKey}
                 sortDirection={gruposOrdenados.direction}
@@ -730,13 +730,13 @@ function LinhaGrupoTag({
 
   return (
     <>
-      <TableRow>
-        <TableCell>
+      <TableRow className="border-t-2 border-border bg-muted/40 hover:bg-muted/50">
+        <TableCell className="py-3">
           <button
             type="button"
             aria-expanded={expandido}
             onClick={onToggle}
-            className="inline-flex items-center gap-2 rounded-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="inline-flex items-center gap-2 rounded-sm text-sm font-semibold outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
             <ChevronRight
               className={cn(
@@ -748,30 +748,36 @@ function LinhaGrupoTag({
             {rotulo}
           </button>
         </TableCell>
-        <TableCell className="text-right">
+        <TableCell className="py-3 text-right">
           {rendimento ? (
-            <CelulaValorAbsoluto centavos={rendimento.pontoInicio.valorInvestidoCentavos} />
+            <CelulaValorAbsoluto
+              centavos={rendimento.pontoInicio.valorInvestidoCentavos}
+              className="font-semibold"
+            />
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
         </TableCell>
-        <TableCell className="text-right">
+        <TableCell className="py-3 text-right">
           {rendimento ? (
-            <CelulaValorAbsoluto centavos={rendimento.pontoFim.valorAtualCentavos} />
+            <CelulaValorAbsoluto
+              centavos={rendimento.pontoFim.valorAtualCentavos}
+              className="font-semibold"
+            />
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
         </TableCell>
-        <TableCell className="text-right">
+        <TableCell className="py-3 text-right">
           {rendimento ? (
-            <CelulaValor centavos={rendimento.rendimentoCentavos} />
+            <CelulaValor centavos={rendimento.rendimentoCentavos} className="font-semibold" />
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
         </TableCell>
-        <TableCell className="text-right">
+        <TableCell className="py-3 text-right">
           {rendimento ? (
-            <CelulaPercentual pct={rendimento.rendimentoPct} />
+            <CelulaPercentual pct={rendimento.rendimentoPct} className="font-semibold" />
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
