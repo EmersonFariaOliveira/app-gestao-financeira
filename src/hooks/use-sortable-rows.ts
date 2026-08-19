@@ -30,6 +30,45 @@ export interface UseSortableRowsResult<T, K extends string> {
   sortDirectionFor: (key: K) => SortDirection | undefined;
 }
 
+/**
+ * Núcleo puro da ordenação — extraído de `useSortableRows` para ser
+ * reutilizável fora de um componente React que já tem seu próprio estado de
+ * `sortKey`/`direction` (ex.: sub-linhas de alvo dentro de um grupo de tag em
+ * `src/app/rendimento/page.tsx`, que precisam ordenar pelo MESMO critério já
+ * ativo na tabela pai em vez de manter um estado de ordenação próprio e
+ * dessincronizado). `sortKey: null` devolve `rows` na ordem recebida, sem
+ * cópia — mesmo comportamento "sem coluna ativa" do hook.
+ */
+export function ordenarLinhas<T, K extends string>(
+  rows: T[],
+  accessors: SortAccessors<T, K>,
+  sortKey: K | null,
+  direction: SortDirection,
+): T[] {
+  if (!sortKey) return rows;
+  const accessor = accessors[sortKey];
+  const decorado = rows.map((row, indiceOriginal) => ({
+    row,
+    valor: accessor(row),
+    indiceOriginal,
+  }));
+  decorado.sort((a, b) => {
+    let cmp: number;
+    if (typeof a.valor === "number" && typeof b.valor === "number") {
+      cmp = a.valor - b.valor;
+    } else {
+      cmp = String(a.valor).localeCompare(String(b.valor), "pt-BR", {
+        numeric: true,
+        sensitivity: "base",
+      });
+    }
+    if (direction === "desc") cmp = -cmp;
+    // desempate por indiceOriginal sempre crescente (nunca invertido) para ordenação estável de verdade
+    return cmp === 0 ? a.indiceOriginal - b.indiceOriginal : cmp;
+  });
+  return decorado.map((d) => d.row);
+}
+
 export function useSortableRows<T, K extends string>(
   rows: T[],
   accessors: SortAccessors<T, K>,
@@ -38,28 +77,7 @@ export function useSortableRows<T, K extends string>(
   const [direction, setDirection] = useState<SortDirection>("asc");
 
   const sortedRows = useMemo(() => {
-    if (!sortKey) return rows;
-    const accessor = accessors[sortKey];
-    const decorado = rows.map((row, indiceOriginal) => ({
-      row,
-      valor: accessor(row),
-      indiceOriginal,
-    }));
-    decorado.sort((a, b) => {
-      let cmp: number;
-      if (typeof a.valor === "number" && typeof b.valor === "number") {
-        cmp = a.valor - b.valor;
-      } else {
-        cmp = String(a.valor).localeCompare(String(b.valor), "pt-BR", {
-          numeric: true,
-          sensitivity: "base",
-        });
-      }
-      if (direction === "desc") cmp = -cmp;
-      // desempate por indiceOriginal sempre crescente (nunca invertido) para ordenação estável de verdade
-      return cmp === 0 ? a.indiceOriginal - b.indiceOriginal : cmp;
-    });
-    return decorado.map((d) => d.row);
+    return ordenarLinhas(rows, accessors, sortKey, direction);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `accessors` é recriado a cada render nos call sites; incluí-lo forçaria reordenação desnecessária a cada render sem mudar o resultado.
   }, [rows, sortKey, direction]);
 

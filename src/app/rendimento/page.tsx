@@ -18,11 +18,21 @@
  * dela, e cada ativo fora da carteira individualmente, e o gráfico
  * interativo de evolução (US3, `GraficoEvolucaoRendimento`).
  *
+ * Redesenho de UX (puramente apresentação — nenhum dado/fórmula mudou): a
+ * pilha de dezenas de cards quase idênticos (um par de caixas "Rendimento em
+ * R$" / "Ganho sobre capital investido" por tag/alvo/ativo) virou tabelas
+ * compactas e ordenáveis (`useSortableRows`/`SortableTableHead`), com a
+ * seção "por tag e por alvo" como tabela expansível em accordion (tag ->
+ * alvos da tag). Cor de status (verde/vermelho, `CHART_COLORS.statusGood`/
+ * `statusCritical`) NUNCA é a única pista — sempre acompanhada de ícone
+ * (▲/▼/—) e do sinal do número.
+ *
  * FR-020 (inviolável): o percentual de rendimento NUNCA é rotulado como
  * "rentabilidade" — é uma razão simples sobre o capital investido no início
  * do período, não uma métrica ponderada por tempo (TWR/XIRR).
  */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { ChevronRight, Minus, TrendingDown, TrendingUp } from "lucide-react";
 
 import { dadosRendimento } from "@/app/actions/rendimento";
 import type { PeriodoInput, RendimentoOutput } from "@/app/actions/rendimento";
@@ -31,18 +41,32 @@ import type {
   RendimentoAtivoForaDaCarteira,
   RendimentoPeriodo,
   RendimentoPorAlvo,
-  RendimentoPorTag,
 } from "@/services/rendimento-service";
 import { GraficoEvolucaoRendimento } from "@/components/rendimento/grafico-evolucao";
 import { Button } from "@/components/ui/button";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  SortableTableHead,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { TagBadge } from "@/components/ui/tag-badge";
+import { CHART_COLORS } from "@/components/charts/chart-colors";
+import { ordenarLinhas, useSortableRows } from "@/hooks/use-sortable-rows";
+import type { SortDirection } from "@/hooks/use-sortable-rows";
 import { formatCentavosParaReais } from "@/core/money";
+import { cn } from "@/lib/utils";
 
 type FaseCarregamento = "carregando" | "erro" | "pronto";
 
@@ -169,10 +193,20 @@ export default function RendimentoPage() {
         <>
           <CardConsolidado dados={dados} />
           <CardGraficoEvolucao dados={dados} />
-          <CardReservaEmergencia dados={dados} />
+          <SecaoReservaEmergencia dados={dados} />
           <SecaoTagsEAlvos dados={dados} />
-          <SecaoForaDaCarteira dados={dados} />
-          <SecaoPendentesDeVinculo dados={dados} />
+          <TabelaAtivosFlat
+            titulo="Ativos fora da carteira alvo"
+            descricao="Rendimento de cada ativo marcado como fora da carteira alvo, individualmente — nunca somado num único total. Ordenado por rendimento em R$, maior ganho primeiro."
+            mensagemVazio="Nenhum ativo fora da carteira alvo."
+            itens={dados.foraDaCarteira}
+          />
+          <TabelaAtivosFlat
+            titulo="Pendentes de vínculo"
+            descricao="Ativos ainda sem vínculo a um alvo da carteira — não fora da carteira nem reserva de emergência. Não influenciam o rendimento de nenhum alvo ou tag; entram apenas no consolidado do patrimônio total."
+            mensagemVazio="Nenhum ativo pendente de vínculo."
+            itens={dados.pendentes}
+          />
         </>
       )}
     </div>
@@ -255,54 +289,98 @@ function SeletorPeriodoCustomizado({
   );
 }
 
-/**
- * Bloco visual reutilizado por todos os cards de rendimento desta tela
- * (consolidado, reserva de emergência, cada tag/alvo, cada ativo fora da
- * carteira) — mesmo par R$/percentual, mesma mensagem "sem histórico
- * suficiente" quando `rendimentoCentavos: null` (FR-010), nunca a palavra
- * "rentabilidade" (FR-020).
- */
-function BlocoRendimento({ rendimento }: { rendimento: RendimentoPeriodo }) {
-  const semHistorico = rendimento.rendimentoCentavos === null;
+// ---------------------------------------------------------------------------
+// Blocos de apresentação de rendimento (valor R$ + percentual). Cor de
+// status NUNCA é a única pista — sempre acompanhada de ícone (▲/▼/—) e do
+// sinal do número (FR-020: nunca "rentabilidade").
+// ---------------------------------------------------------------------------
 
-  if (semHistorico) {
+/** Célula de tabela com o valor em R$, colorido por status (verde/vermelho), apagado quando zero, nota quando `null` (FR-010). */
+function CelulaValor({ centavos, className }: { centavos: number | null; className?: string }) {
+  if (centavos === null) {
+    return <span className="text-xs whitespace-normal italic text-muted-foreground">sem histórico</span>;
+  }
+  const zero = centavos === 0;
+  const cor = zero ? undefined : centavos > 0 ? CHART_COLORS.statusGood : CHART_COLORS.statusCritical;
+  return (
+    <span
+      className={cn("font-medium tabular-nums", zero && "text-muted-foreground/50", className)}
+      style={cor ? { color: cor } : undefined}
+    >
+      {formatCentavosParaReais(centavos)}
+    </span>
+  );
+}
+
+/** Célula de tabela com o percentual (ganho sobre capital investido), ícone ▲/▼/— + cor, nota quando `null` (FR-010). */
+function CelulaPercentual({ pct, className }: { pct: number | null; className?: string }) {
+  if (pct === null) {
+    return <span className="text-xs whitespace-normal italic text-muted-foreground">sem histórico</span>;
+  }
+  const zero = pct === 0;
+  const positivo = pct > 0;
+  const cor = zero ? undefined : positivo ? CHART_COLORS.statusGood : CHART_COLORS.statusCritical;
+  const Icone = zero ? Minus : positivo ? TrendingUp : TrendingDown;
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1 tabular-nums",
+        zero && "text-muted-foreground/50",
+        className,
+      )}
+      style={cor ? { color: cor } : undefined}
+    >
+      <Icone className="size-3.5 shrink-0" aria-hidden />
+      {formatPercentual(pct)}
+    </span>
+  );
+}
+
+/** Pill de tendência para destaques fora de tabela (hero consolidado, faixa da reserva de emergência) — mesma semântica de `CelulaPercentual`, maior. */
+function BadgeTendencia({ pct }: { pct: number }) {
+  const zero = pct === 0;
+  const positivo = pct > 0;
+  const cor = zero ? CHART_COLORS.textMuted : positivo ? CHART_COLORS.statusGood : CHART_COLORS.statusCritical;
+  const Icone = zero ? Minus : positivo ? TrendingUp : TrendingDown;
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/40 px-3 py-1 text-base font-semibold tabular-nums"
+      style={{ color: cor }}
+    >
+      <Icone className="size-4 shrink-0" aria-hidden />
+      {formatPercentual(pct)}
+    </span>
+  );
+}
+
+/** Número de destaque do card consolidado: valor grande + badge de tendência ao lado. */
+function ValorHero({ rendimento }: { rendimento: RendimentoPeriodo }) {
+  if (rendimento.rendimentoCentavos === null) {
     return (
       <p className="text-sm text-muted-foreground">
-        Sem histórico suficiente para calcular o rendimento neste período — pelo menos uma
-        das sessões não tem valor investido rastreável (import antigo sem
-        &quot;Patrimônio Aplicado&quot; ou ajuste preenchido).
+        Sem histórico suficiente para calcular o rendimento neste período — pelo menos uma das
+        sessões não tem valor investido rastreável (import antigo sem &quot;Patrimônio
+        Aplicado&quot; ou ajuste preenchido).
       </p>
     );
   }
 
+  const centavos = rendimento.rendimentoCentavos;
+  const zero = centavos === 0;
+  const cor = zero ? undefined : centavos > 0 ? CHART_COLORS.statusGood : CHART_COLORS.statusCritical;
+
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-      <div className="flex flex-col gap-1 rounded-lg border border-border p-3">
-        <span className="text-xs text-muted-foreground">Rendimento em R$</span>
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-3">
         <span
-          className={
-            "text-2xl font-semibold " +
-            (rendimento.rendimentoCentavos! < 0 ? "text-destructive" : "")
-          }
+          className="text-3xl font-bold tabular-nums sm:text-4xl"
+          style={cor ? { color: cor } : undefined}
         >
-          {formatCentavosParaReais(rendimento.rendimentoCentavos!)}
+          {formatCentavosParaReais(centavos)}
         </span>
+        {rendimento.rendimentoPct !== null && <BadgeTendencia pct={rendimento.rendimentoPct} />}
       </div>
-      <div className="flex flex-col gap-1 rounded-lg border border-border p-3">
-        <span className="text-xs text-muted-foreground">Ganho sobre capital investido</span>
-        <span
-          className={
-            "text-2xl font-semibold " +
-            (rendimento.rendimentoPct !== null && rendimento.rendimentoPct < 0
-              ? "text-destructive"
-              : "")
-          }
-        >
-          {rendimento.rendimentoPct === null
-            ? "sem histórico suficiente"
-            : formatPercentual(rendimento.rendimentoPct)}
-        </span>
-      </div>
+      <span className="text-xs text-muted-foreground">Ganho sobre capital investido</span>
     </div>
   );
 }
@@ -332,14 +410,14 @@ function CardConsolidado({ dados }: { dados: RendimentoOutput }) {
           pendentes de vínculo com dado disponível).
         </CardDescription>
       </CardHeader>
-      <CardContent className="flex flex-col gap-4">
+      <CardContent className="flex flex-col gap-2">
+        <ValorHero rendimento={dados.consolidado} />
         {dados.semPeriodoAnteriorParaComparacao && (
-          <p className="rounded-md border border-border bg-muted px-3 py-2 text-sm text-muted-foreground">
-            Ainda não há período anterior para comparação — mostrando o rendimento
-            acumulado desde a única sessão de import disponível.
+          <p className="text-xs text-muted-foreground">
+            Nota: ainda não há período anterior para comparação — o valor acima é o
+            rendimento acumulado desde a única sessão de import disponível.
           </p>
         )}
-        <BlocoRendimento rendimento={dados.consolidado} />
       </CardContent>
     </Card>
   );
@@ -385,36 +463,129 @@ function CardGraficoEvolucao({ dados }: { dados: RendimentoOutput }) {
   );
 }
 
-/** Rendimento de tudo que está marcado `reserva_emergencia = true` (US2, FR-008). */
-function CardReservaEmergencia({ dados }: { dados: RendimentoOutput }) {
+/**
+ * Rendimento de tudo que está marcado `reserva_emergencia = true` (US2,
+ * FR-008) — faixa de resumo (agregado do bucket, nunca somado a nenhum outro
+ * bucket — FR-007) no topo do card, mais a lista dos ativos individuais que
+ * compõem a reserva (`reservaEmergenciaItens`) numa tabela ordenável
+ * colapsável abaixo, mesmo componente `TabelaRendimentoPorAtivo` reutilizado
+ * por "fora da carteira"/"pendentes". Colapsada por padrão: o agregado já
+ * responde a pergunta mais comum ("como está a reserva?"), o detalhe por
+ * ativo é uma expansão opcional.
+ */
+function SecaoReservaEmergencia({ dados }: { dados: RendimentoOutput }) {
   if (dados.vazio) return null;
+  return <SecaoReservaEmergenciaComDados dados={dados} />;
+}
+
+function SecaoReservaEmergenciaComDados({ dados }: { dados: RendimentoOutput }) {
+  const r = dados.reservaEmergencia;
+  const itens = dados.reservaEmergenciaItens;
+  const [expandido, setExpandido] = useState(false);
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Reserva de emergência</CardTitle>
         <CardDescription>
-          Rendimento de todos os ativos/posições marcados como reserva de emergência, no
-          mesmo período selecionado acima.
+          Ativos/posições marcados como reserva de emergência, no período selecionado acima —
+          agregado do bucket, nunca somado a nenhum outro (fora da carteira, tag/alvo ou
+          pendentes).
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <BlocoRendimento rendimento={dados.reservaEmergencia} />
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+          <button
+            type="button"
+            aria-expanded={expandido}
+            onClick={() => setExpandido((v) => !v)}
+            className="inline-flex items-center gap-2 rounded-sm text-sm font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          >
+            <ChevronRight
+              className={cn(
+                "size-4 shrink-0 text-muted-foreground transition-transform",
+                expandido && "rotate-90",
+              )}
+              aria-hidden
+            />
+            {expandido ? "Ocultar ativos" : "Ver ativos"} ({itens.length})
+          </button>
+          <div className="flex items-center gap-3">
+            {r.rendimentoCentavos === null ? (
+              <span className="text-xs italic text-muted-foreground">sem histórico suficiente</span>
+            ) : (
+              <>
+                <CelulaValor centavos={r.rendimentoCentavos} className="text-lg" />
+                {r.rendimentoPct !== null && <BadgeTendencia pct={r.rendimentoPct} />}
+              </>
+            )}
+          </div>
+        </div>
+
+        {expandido &&
+          (itens.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Nenhum ativo marcado como reserva de emergência.
+            </p>
+          ) : (
+            <TabelaRendimentoPorAtivo itens={itens} />
+          ))}
       </CardContent>
     </Card>
   );
 }
 
+const CHAVE_SEM_TAG = "__sem_tag__";
+
 /**
  * Rendimento por tag e, dentro de cada tag, por alvo individual (US2,
- * FR-008/FR-009). Alvos sem tag (`tag: null`) são agrupados numa seção "Sem
- * tag" separada, para nunca ficarem invisíveis.
+ * FR-008/FR-009) — tabela expansível em accordion (uma linha por tag,
+ * `aria-expanded` no botão de expandir revela os alvos daquela tag como
+ * sub-linhas indentadas). Alvos sem tag (`tag: null`) formam um grupo
+ * próprio "Sem tag", com o mesmo padrão de linha expansível, mas sem
+ * agregado (não existe `RendimentoPorTag` para tag nula — a UI não calcula
+ * um agregado, só lista os alvos individuais).
  */
 function SecaoTagsEAlvos({ dados }: { dados: RendimentoOutput }) {
   if (dados.vazio) return null;
   if (dados.porTag.length === 0 && dados.porAlvo.length === 0) return null;
 
+  return <SecaoTagsEAlvosComDados dados={dados} />;
+}
+
+/**
+ * Corpo de `SecaoTagsEAlvos` com hooks incondicionais (regra dos hooks) —
+ * separado do wrapper acima, que só faz os early-returns dos casos
+ * "vazio"/"sem nenhuma tag ou alvo".
+ */
+function SecaoTagsEAlvosComDados({ dados }: { dados: RendimentoOutput }) {
   const alvosSemTag = dados.porAlvo.filter((a) => a.tag === null);
+
+  const gruposOrdenados = useSortableRows(dados.porTag, {
+    rendimentoCentavos: (t) => t.rendimento.rendimentoCentavos ?? Number.NEGATIVE_INFINITY,
+    rendimentoPct: (t) => t.rendimento.rendimentoPct ?? Number.NEGATIVE_INFINITY,
+  });
+
+  // Conjunto de grupos RECOLHIDOS (default vazio = tudo expandido no
+  // primeiro load — normalmente há poucas tags, então começar tudo visível
+  // é mais scaneável do que uma tela em branco exigindo cliques extras; o
+  // recolhimento continua disponível por linha e via "Recolher tudo").
+  const [colapsados, setColapsados] = useState<Set<string>>(new Set());
+
+  function alternar(chave: string) {
+    setColapsados((prev) => {
+      const proximo = new Set(prev);
+      if (proximo.has(chave)) proximo.delete(chave);
+      else proximo.add(chave);
+      return proximo;
+    });
+  }
+
+  const todasAsChaves = [
+    ...dados.porTag.map((t) => t.tag),
+    ...(alvosSemTag.length > 0 ? [CHAVE_SEM_TAG] : []),
+  ];
+  const tudoRecolhido = todasAsChaves.length > 0 && todasAsChaves.every((c) => colapsados.has(c));
 
   return (
     <Card>
@@ -422,124 +593,304 @@ function SecaoTagsEAlvos({ dados }: { dados: RendimentoOutput }) {
         <CardTitle>Rendimento por tag e por alvo</CardTitle>
         <CardDescription>
           Rendimento agrupado por tag da carteira alvo e, dentro de cada tag, o rendimento
-          de cada alvo individualmente.
+          de cada alvo individualmente. Clique numa linha para expandir os alvos da tag.
         </CardDescription>
+        <CardAction>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setColapsados(tudoRecolhido ? new Set() : new Set(todasAsChaves))}
+          >
+            {tudoRecolhido ? "Expandir tudo" : "Recolher tudo"}
+          </Button>
+        </CardAction>
       </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        {dados.porTag.map((porTag) => (
-          <BlocoTag key={porTag.tag} porTag={porTag} alvos={dados.porAlvo} />
-        ))}
-
-        {alvosSemTag.length > 0 && (
-          <div className="flex flex-col gap-3 rounded-lg border border-border p-3">
-            <h3 className="text-sm font-semibold">Sem tag</h3>
-            <div className="flex flex-col gap-4">
-              {alvosSemTag.map((alvo) => (
-                <BlocoAlvo key={alvo.alvoId} alvo={alvo} />
-              ))}
-            </div>
-          </div>
-        )}
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Tag / alvo</TableHead>
+              <SortableTableHead
+                className="text-right"
+                sortDirection={gruposOrdenados.sortDirectionFor("rendimentoCentavos")}
+                onSort={() => gruposOrdenados.toggleSort("rendimentoCentavos")}
+              >
+                Rendimento em R$
+              </SortableTableHead>
+              <SortableTableHead
+                className="text-right"
+                sortDirection={gruposOrdenados.sortDirectionFor("rendimentoPct")}
+                onSort={() => gruposOrdenados.toggleSort("rendimentoPct")}
+              >
+                Ganho sobre capital investido
+              </SortableTableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {gruposOrdenados.sortedRows.map((porTag) => (
+              <LinhaGrupoTag
+                key={porTag.tag}
+                expandido={!colapsados.has(porTag.tag)}
+                onToggle={() => alternar(porTag.tag)}
+                rendimento={porTag.rendimento}
+                rotulo={<TagBadge tag={porTag.tag} />}
+                alvos={dados.porAlvo.filter((a) => a.tag === porTag.tag)}
+                sortKey={gruposOrdenados.sortKey}
+                sortDirection={gruposOrdenados.direction}
+              />
+            ))}
+            {alvosSemTag.length > 0 && (
+              <LinhaGrupoTag
+                expandido={!colapsados.has(CHAVE_SEM_TAG)}
+                onToggle={() => alternar(CHAVE_SEM_TAG)}
+                rendimento={null}
+                rotulo={<span className="text-sm font-medium text-muted-foreground">Sem tag</span>}
+                alvos={alvosSemTag}
+                sortKey={gruposOrdenados.sortKey}
+                sortDirection={gruposOrdenados.direction}
+              />
+            )}
+          </TableBody>
+        </Table>
       </CardContent>
     </Card>
   );
 }
 
-function BlocoTag({
-  porTag,
+/** Accessors de ordenação por rendimento — mesmo critério reaplicado às linhas de tag (nível 1) e aos alvos dentro de cada tag (nível 2), nunca duplicado (helper reusado por `LinhaGrupoTag`). */
+const ACCESSORS_RENDIMENTO_ALVO = {
+  rendimentoCentavos: (a: RendimentoPorAlvo) => a.rendimento.rendimentoCentavos ?? Number.NEGATIVE_INFINITY,
+  rendimentoPct: (a: RendimentoPorAlvo) => a.rendimento.rendimentoPct ?? Number.NEGATIVE_INFINITY,
+};
+
+type SortKeyRendimento = "rendimentoCentavos" | "rendimentoPct";
+
+/**
+ * Uma linha de grupo (tag, ou "Sem tag") + suas sub-linhas de alvo quando
+ * expandido. `rendimento: null` = grupo sem agregado calculável pela UI (só
+ * o grupo "Sem tag", que não corresponde a nenhum `RendimentoPorTag") — as
+ * colunas de R$/% mostram "—" em vez de um número inventado.
+ *
+ * `sortKey`/`sortDirection`: MESMO critério ativo nos cabeçalhos "Rendimento
+ * em R$"/"Ganho sobre capital investido" da tabela de tags (nível 1) —
+ * reaplicado aqui aos alvos dentro do grupo (nível 2) via `ordenarLinhas`
+ * (nunca uma segunda função de comparação duplicada), para que clicar num
+ * cabeçalho reordene tags E os alvos dentro de cada tag expandida juntos.
+ * `sortKey: null` (nenhuma coluna clicada ainda) usa o mesmo padrão default
+ * de `TabelaAtivosFlatComItens`: rendimento em R$ decrescente, nulos por
+ * último.
+ */
+function LinhaGrupoTag({
+  expandido,
+  onToggle,
+  rendimento,
+  rotulo,
   alvos,
+  sortKey,
+  sortDirection,
 }: {
-  porTag: RendimentoPorTag;
+  expandido: boolean;
+  onToggle: () => void;
+  rendimento: RendimentoPeriodo | null;
+  rotulo: React.ReactNode;
   alvos: RendimentoPorAlvo[];
+  sortKey: SortKeyRendimento | null;
+  sortDirection: SortDirection;
 }) {
-  const alvosDaTag = alvos.filter((a) => a.tag === porTag.tag);
+  const alvosOrdenados = ordenarLinhas(
+    alvos,
+    ACCESSORS_RENDIMENTO_ALVO,
+    sortKey ?? "rendimentoCentavos",
+    sortKey === null ? "desc" : sortDirection,
+  );
 
   return (
-    <div className="flex flex-col gap-3 rounded-lg border border-border p-3">
-      <h3 className="text-sm font-semibold">{porTag.tag}</h3>
-      <BlocoRendimento rendimento={porTag.rendimento} />
-      {alvosDaTag.length > 0 && (
-        <div className="flex flex-col gap-4 border-t border-border pt-3">
-          {alvosDaTag.map((alvo) => (
-            <BlocoAlvo key={alvo.alvoId} alvo={alvo} />
-          ))}
-        </div>
+    <>
+      <TableRow>
+        <TableCell>
+          <button
+            type="button"
+            aria-expanded={expandido}
+            onClick={onToggle}
+            className="inline-flex items-center gap-2 rounded-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          >
+            <ChevronRight
+              className={cn(
+                "size-4 shrink-0 text-muted-foreground transition-transform",
+                expandido && "rotate-90",
+              )}
+              aria-hidden
+            />
+            {rotulo}
+          </button>
+        </TableCell>
+        <TableCell className="text-right">
+          {rendimento ? (
+            <CelulaValor centavos={rendimento.rendimentoCentavos} />
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
+        <TableCell className="text-right">
+          {rendimento ? (
+            <CelulaPercentual pct={rendimento.rendimentoPct} />
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
+      </TableRow>
+
+      {expandido && alvos.length === 0 && (
+        <TableRow className="bg-muted/20">
+          <TableCell colSpan={3} className="pl-9 text-xs text-muted-foreground">
+            Nenhum alvo com dado disponível nesta tag.
+          </TableCell>
+        </TableRow>
       )}
-    </div>
-  );
-}
 
-function BlocoAlvo({ alvo }: { alvo: RendimentoPorAlvo }) {
-  return (
-    <div className="flex flex-col gap-2 pl-3">
-      <span className="text-xs font-medium text-muted-foreground">{alvo.nomeAlvo}</span>
-      <BlocoRendimento rendimento={alvo.rendimento} />
-    </div>
+      {expandido &&
+        alvosOrdenados.map((alvo) => (
+          <TableRow key={alvo.alvoId} className="bg-muted/20">
+            <TableCell className="pl-9 text-xs text-muted-foreground">{alvo.nomeAlvo}</TableCell>
+            <TableCell className="text-right">
+              <CelulaValor centavos={alvo.rendimento.rendimentoCentavos} className="text-sm" />
+            </TableCell>
+            <TableCell className="text-right">
+              <CelulaPercentual pct={alvo.rendimento.rendimentoPct} className="text-xs" />
+            </TableCell>
+          </TableRow>
+        ))}
+    </>
   );
 }
 
 /**
- * Cada ativo `fora_da_carteira = true` exibido individualmente, nunca
- * agregado num único número (US2, FR-007/FR-009 — Acceptance Scenario 3).
+ * Tabela plana e ordenável reutilizada por "Ativos fora da carteira alvo" e
+ * "Pendentes de vínculo" (mesmo shape `RendimentoAtivoForaDaCarteira`) — os
+ * dois buckets continuam SEPARADOS, cada chamada renderiza sua própria
+ * `Card`/`Table`, nunca somados entre si (FR-007/FR-009/FR-017). Ordenada
+ * por padrão por rendimento em R$ decrescente (maior ganho primeiro); o
+ * usuário pode reordenar por qualquer coluna via `SortableTableHead`.
  */
-function SecaoForaDaCarteira({ dados }: { dados: RendimentoOutput }) {
-  if (dados.vazio) return null;
-  if (dados.foraDaCarteira.length === 0) return null;
+function TabelaAtivosFlat({
+  titulo,
+  descricao,
+  mensagemVazio,
+  itens,
+}: {
+  titulo: string;
+  descricao: string;
+  mensagemVazio: string;
+  itens: RendimentoAtivoForaDaCarteira[];
+}) {
+  if (itens.length === 0) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>{titulo}</CardTitle>
+          <CardDescription>{descricao}</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">{mensagemVazio}</p>
+        </CardContent>
+      </Card>
+    );
+  }
 
+  return <TabelaAtivosFlatComItens titulo={titulo} descricao={descricao} itens={itens} />;
+}
+
+function TabelaAtivosFlatComItens({
+  titulo,
+  descricao,
+  itens,
+}: {
+  titulo: string;
+  descricao: string;
+  itens: RendimentoAtivoForaDaCarteira[];
+}) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Ativos fora da carteira alvo</CardTitle>
-        <CardDescription>
-          Rendimento de cada ativo marcado como fora da carteira alvo, individualmente —
-          nunca somado num único total.
-        </CardDescription>
+        <CardTitle>{titulo}</CardTitle>
+        <CardDescription>{descricao}</CardDescription>
       </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        {dados.foraDaCarteira.map((item) => (
-          <BlocoAtivoForaDaCarteira key={item.chaveExport} item={item} />
-        ))}
+      <CardContent>
+        <TabelaRendimentoPorAtivo itens={itens} />
       </CardContent>
     </Card>
   );
 }
 
-function BlocoAtivoForaDaCarteira({ item }: { item: RendimentoAtivoForaDaCarteira }) {
-  return (
-    <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
-      <span className="text-xs font-medium text-muted-foreground">{item.chaveExport}</span>
-      <BlocoRendimento rendimento={item.rendimento} />
-    </div>
-  );
-}
-
 /**
- * Cada ativo pendente de vínculo (sem alvo, não fora da carteira, não
- * reserva de emergência) exibido individualmente, à parte dos demais
- * buckets — nunca agregado nem somado ao rendimento de nenhum alvo/tag
- * (FR-017). Mesmo shape de `foraDaCarteira`, então reaproveita
- * `BlocoAtivoForaDaCarteira` para o bloco individual.
+ * Tabela ordenável de `RendimentoAtivoForaDaCarteira[]` sem o `Card`
+ * envolvente — usada tanto por `TabelaAtivosFlatComItens` ("fora da
+ * carteira"/"pendentes") quanto por `SecaoReservaEmergenciaComDados` (ativos
+ * individuais da reserva de emergência), que já tem seu próprio `Card`/
+ * `CardHeader` com o agregado do bucket no topo.
  */
-function SecaoPendentesDeVinculo({ dados }: { dados: RendimentoOutput }) {
-  if (dados.vazio) return null;
-  if (dados.pendentes.length === 0) return null;
+function TabelaRendimentoPorAtivo({ itens }: { itens: RendimentoAtivoForaDaCarteira[] }) {
+  // Ordem inicial (antes de qualquer clique em cabeçalho): rendimento em R$
+  // decrescente, nulos ("sem histórico") por último — nunca omitidos, só
+  // empurrados para o fim (regra 5 do redesenho).
+  const itensNaOrdemPadrao = useMemo(
+    () =>
+      [...itens].sort((a, b) => {
+        const va = a.rendimento.rendimentoCentavos ?? Number.NEGATIVE_INFINITY;
+        const vb = b.rendimento.rendimentoCentavos ?? Number.NEGATIVE_INFINITY;
+        return vb - va;
+      }),
+    [itens],
+  );
+
+  const ordenados = useSortableRows(itensNaOrdemPadrao, {
+    ativo: (i) => i.chaveExport,
+    rendimentoCentavos: (i) => i.rendimento.rendimentoCentavos ?? Number.NEGATIVE_INFINITY,
+    rendimentoPct: (i) => i.rendimento.rendimentoPct ?? Number.NEGATIVE_INFINITY,
+  });
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Pendentes de vínculo</CardTitle>
-        <CardDescription>
-          Ativos ainda sem vínculo a um alvo da carteira — não fora da carteira nem reserva
-          de emergência. Exibidos à parte, individualmente, e não influenciam o rendimento de
-          nenhum alvo ou tag. Entram apenas no rendimento consolidado do patrimônio total.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-6">
-        {dados.pendentes.map((item) => (
-          <BlocoAtivoForaDaCarteira key={item.chaveExport} item={item} />
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <SortableTableHead
+            sortDirection={ordenados.sortDirectionFor("ativo")}
+            onSort={() => ordenados.toggleSort("ativo")}
+          >
+            Ativo
+          </SortableTableHead>
+          <SortableTableHead
+            className="text-right"
+            sortDirection={ordenados.sortDirectionFor("rendimentoCentavos")}
+            onSort={() => ordenados.toggleSort("rendimentoCentavos")}
+          >
+            Rendimento em R$
+          </SortableTableHead>
+          <SortableTableHead
+            className="text-right"
+            sortDirection={ordenados.sortDirectionFor("rendimentoPct")}
+            onSort={() => ordenados.toggleSort("rendimentoPct")}
+          >
+            Ganho sobre capital investido
+          </SortableTableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {ordenados.sortedRows.map((item) => (
+          <TableRow key={item.chaveExport}>
+            <TableCell className="max-w-[240px] truncate font-medium" title={item.chaveExport}>
+              {item.chaveExport}
+            </TableCell>
+            <TableCell className="text-right">
+              <CelulaValor centavos={item.rendimento.rendimentoCentavos} />
+            </TableCell>
+            <TableCell className="text-right">
+              <CelulaPercentual pct={item.rendimento.rendimentoPct} />
+            </TableCell>
+          </TableRow>
         ))}
-      </CardContent>
-    </Card>
+      </TableBody>
+    </Table>
   );
 }
 
