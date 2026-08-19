@@ -72,6 +72,27 @@ export interface DiffPosicoes {
  */
 export type IncrementoAmbiguoPendente = IncrementoAmbiguoPendenteItem;
 
+/**
+ * Item de avaliação "ao vivo" de movimentação não explicada (ver
+ * `PreviewImportResultado.avaliacoesMovimentacaoAoVivo`) — dados brutos
+ * suficientes para o client (`import/page.tsx`) recalcular
+ * `avaliarMovimentacaoNaoExplicada` a cada edição dos campos de ajuste, sem
+ * round-trip ao servidor.
+ */
+export interface AvaliacaoMovimentacaoAoVivo {
+  alvoId: string;
+  nomeAlvo: string;
+  granularidade: "ativo" | "alvo";
+  chaveExport?: string;
+  posicaoManualId?: string;
+  valorInvestidoEsperadoCentavos: number;
+  houveBaseComparacao: boolean;
+  /** Soma de `consolidadoPorChave` para as chaves do alvo SEM ajuste pendente (parte fixa do valor real). */
+  valorRealBaseCentavos: number;
+  /** Uma entrada por chave do alvo COM ajuste pendente — `valorCsvCentavos` é o fallback bruto do CSV quando o campo de ajuste ficar vazio. */
+  ajustesDoAlvo: { chaveExport: string; valorCsvCentavos: number | null }[];
+}
+
 export type PreviewImportResultado =
   | {
       ok: true;
@@ -97,6 +118,21 @@ export type PreviewImportResultado =
        * `previewImport` nem `confirmarImport`.
        */
       movimentacoesNaoExplicadas: MovimentacaoNaoExplicada[];
+      /**
+       * NOVO (correção do falso positivo de fundos com ajuste manual
+       * recorrente): alvos cuja avaliação de "movimentação não explicada"
+       * NÃO pode ser resolvida estaticamente aqui porque ao menos uma das
+       * chaves elegíveis do alvo tem edição pendente em `ajustesRevisao`
+       * nesta revisão do import — o valor real depende do que o usuário
+       * ainda vai digitar no campo de ajuste. O client recalcula a MESMA
+       * regra (`avaliarMovimentacaoNaoExplicada`,
+       * `src/core/rendimento/movimentacao-nao-explicada.ts`) reativamente,
+       * combinando `valorRealBaseCentavos` com o texto atual dos campos de
+       * ajuste (`ajustesDoAlvo`). Alvos sem nenhum ajuste pendente continuam
+       * cobertos por `movimentacoesNaoExplicadas` (cálculo estático, como
+       * antes).
+       */
+      avaliacoesMovimentacaoAoVivo: AvaliacaoMovimentacaoAoVivo[];
     }
   | { ok: false; erros: ErroParse[] };
 
@@ -329,11 +365,21 @@ function consolidarPatrimonioAplicadoPorChave(
 }
 
 /**
- * Calcula `movimentacoesNaoExplicadas` do preview (US4, FR-011/FR-011a/
- * FR-018, research.md R6/R7/R13) — ANTES de qualquer persistência, a partir
- * dos dados parseados em memória e da sessão VIGENTE mais recente (mesma
- * referência de "sessão anterior" já usada por `instituicoesFaltantes`/
- * `diff`).
+ * Calcula, a partir dos dados parseados em memória (ANTES de qualquer
+ * persistência) e da sessão VIGENTE mais recente (mesma referência de
+ * "sessão anterior" já usada por `instituicoesFaltantes`/`diff`), a divisão
+ * entre:
+ * - `movimentacoesNaoExplicadas` (US4, FR-011/FR-011a/FR-018, research.md
+ *   R6/R7/R13): avaliação ESTÁTICA, resolvida por completo aqui no
+ *   servidor, para alvos cujas chaves elegíveis NÃO têm nenhuma edição
+ *   pendente em `ajustesRevisao` nesta revisão do import.
+ * - `avaliacoesMovimentacaoAoVivo`: alvos com ao menos uma chave elegível em
+ *   `chavesComAjustePendente` — o valor real depende do que o usuário ainda
+ *   vai digitar no campo de ajuste (que só é persistido na confirmação), e
+ *   por isso a decisão de exceder tolerância é adiada para o client
+ *   recalcular reativamente (correção do falso positivo de fundos com
+ *   ajuste manual recorrente: o valor bruto do CSV usado aqui no preview
+ *   estático não reflete a correção que o usuário sempre aplica).
  *
  * Escopo desta fatia (decisão documentada em tasks.md): só valida alvos
  * cuja elegibilidade COMPLETA (`contarAtivosComValorInvestidoRastreavel`,
@@ -347,12 +393,16 @@ function consolidarPatrimonioAplicadoPorChave(
 async function calcularMovimentacoesNaoExplicadasDoPreview(
   arquivosParseados: ArquivoParseado[],
   sessaoAnteriorId: string | null,
-): Promise<MovimentacaoNaoExplicada[]> {
-  if (!sessaoAnteriorId) return [];
+  chavesComAjustePendente: Set<string>,
+): Promise<{
+  movimentacoesNaoExplicadas: MovimentacaoNaoExplicada[];
+  avaliacoesMovimentacaoAoVivo: AvaliacaoMovimentacaoAoVivo[];
+}> {
+  if (!sessaoAnteriorId) return { movimentacoesNaoExplicadas: [], avaliacoesMovimentacaoAoVivo: [] };
 
   const consolidadoPorChave = consolidarPatrimonioAplicadoPorChave(arquivosParseados);
   const chaves = Array.from(consolidadoPorChave.keys());
-  if (chaves.length === 0) return [];
+  if (chaves.length === 0) return { movimentacoesNaoExplicadas: [], avaliacoesMovimentacaoAoVivo: [] };
 
   const mapeamentos = await prisma.ativo_mapeado.findMany({
     where: {
@@ -363,7 +413,7 @@ async function calcularMovimentacoesNaoExplicadasDoPreview(
     },
     select: { chave_export: true, alvo_id: true },
   });
-  if (mapeamentos.length === 0) return [];
+  if (mapeamentos.length === 0) return { movimentacoesNaoExplicadas: [], avaliacoesMovimentacaoAoVivo: [] };
 
   const chavesPorAlvoId = new Map<string, string[]>();
   for (const m of mapeamentos) {
@@ -379,6 +429,7 @@ async function calcularMovimentacoesNaoExplicadasDoPreview(
   const nomePorAlvoId = new Map(alvos.map((a) => [a.id, a.nome]));
 
   const resultado: MovimentacaoNaoExplicada[] = [];
+  const avaliacoesAoVivo: AvaliacaoMovimentacaoAoVivo[] = [];
   for (const [alvoId, chavesDoAlvo] of chavesPorAlvoId) {
     const elegibilidade = await contarAtivosComValorInvestidoRastreavel(alvoId);
     const somenteChaveExport = elegibilidade.elegiveis.every((e) => e.chaveExport !== undefined);
@@ -403,6 +454,51 @@ async function calcularMovimentacoesNaoExplicadasDoPreview(
     if (valorRealCentavos === null) continue;
 
     const nomeAlvo = nomePorAlvoId.get(alvoId) ?? alvoId;
+    const temAjustePendente = chavesDoAlvo.some((c) => chavesComAjustePendente.has(c));
+
+    if (temAjustePendente) {
+      // Valor real "base" (fixo): soma só das chaves SEM ajuste pendente —
+      // mesma regra "nunca número parcial disfarçado de completo" já usada
+      // acima (se alguma delas não tiver dado, pula o alvo inteiro).
+      let valorRealBaseCentavos: number | null = 0;
+      for (const chave of chavesDoAlvo) {
+        if (chavesComAjustePendente.has(chave)) continue;
+        const valor = consolidadoPorChave.get(chave);
+        if (valor === null || valor === undefined) {
+          valorRealBaseCentavos = null;
+          break;
+        }
+        valorRealBaseCentavos += valor;
+      }
+      if (valorRealBaseCentavos === null) continue;
+
+      const movimentacao = await calcularMovimentacaoNaoExplicada(
+        { alvoId, nomeAlvo, valorInvestidoRealCentavos: valorRealCentavos },
+        sessaoAnteriorId,
+      );
+      if (!movimentacao) continue;
+
+      const ajustesDoAlvo = chavesDoAlvo
+        .filter((c) => chavesComAjustePendente.has(c))
+        .map((chaveExport) => ({
+          chaveExport,
+          valorCsvCentavos: consolidadoPorChave.get(chaveExport) ?? null,
+        }));
+
+      avaliacoesAoVivo.push({
+        alvoId,
+        nomeAlvo,
+        granularidade: movimentacao.granularidade,
+        chaveExport: movimentacao.chaveExport,
+        posicaoManualId: movimentacao.posicaoManualId,
+        valorInvestidoEsperadoCentavos: movimentacao.valorInvestidoEsperadoCentavos,
+        houveBaseComparacao: movimentacao.houveBaseComparacao,
+        valorRealBaseCentavos,
+        ajustesDoAlvo,
+      });
+      continue;
+    }
+
     const movimentacao = await calcularMovimentacaoNaoExplicada(
       { alvoId, nomeAlvo, valorInvestidoRealCentavos: valorRealCentavos },
       sessaoAnteriorId,
@@ -412,7 +508,7 @@ async function calcularMovimentacoesNaoExplicadasDoPreview(
     }
   }
 
-  return resultado;
+  return { movimentacoesNaoExplicadas: resultado, avaliacoesMovimentacaoAoVivo: avaliacoesAoVivo };
 }
 
 /**
@@ -499,10 +595,13 @@ export async function previewImport(arquivos: ArquivoImport[]): Promise<PreviewI
   // anterior" já usada acima para instituicoesFaltantes/diff. Nunca lançado
   // como erro: qualquer alvo sem dado suficiente é simplesmente omitido
   // (calcularMovimentacoesNaoExplicadasDoPreview já trata isso).
-  const movimentacoesNaoExplicadas = await calcularMovimentacoesNaoExplicadasDoPreview(
-    arquivosParseados,
-    sessaoMaisRecenteQualquerMes?.id ?? null,
-  );
+  const chavesComAjustePendente = new Set(ajustesRevisao.map((a) => a.chaveExport));
+  const { movimentacoesNaoExplicadas, avaliacoesMovimentacaoAoVivo } =
+    await calcularMovimentacoesNaoExplicadasDoPreview(
+      arquivosParseados,
+      sessaoMaisRecenteQualquerMes?.id ?? null,
+      chavesComAjustePendente,
+    );
 
   return {
     ok: true,
@@ -516,6 +615,7 @@ export async function previewImport(arquivos: ArquivoImport[]): Promise<PreviewI
     ajustesRevisao,
     incrementosAmbiguosPendentes,
     movimentacoesNaoExplicadas,
+    avaliacoesMovimentacaoAoVivo,
   };
 }
 

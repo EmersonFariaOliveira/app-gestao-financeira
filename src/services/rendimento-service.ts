@@ -1,4 +1,9 @@
 import { prisma } from "@/db/client";
+import {
+  TOLERANCIA_MOVIMENTACAO_PCT,
+  TOLERANCIA_MOVIMENTACAO_PISO_CENTAVOS,
+  avaliarMovimentacaoNaoExplicada,
+} from "@/core/rendimento/movimentacao-nao-explicada";
 
 // Serviço de leitura da análise de rendimento (T010, specs/003-dashboard-
 // analise-rendimento/data-model.md e research.md R4/R5/R11). Camada de
@@ -85,8 +90,11 @@ const MESES_POR_PRESET: Record<Exclude<PeriodoPredefinido, "DESDE_INICIO">, numb
 // Constantes de aplicação (R8) — tolerância de "movimentação não explicada"
 // (FR-018), consumidas por tasks futuras (US4). Não persistidas em `config`
 // nesta versão (mudança aditiva de baixo risco caso vire configurável).
-export const TOLERANCIA_MOVIMENTACAO_PCT = 5;
-export const TOLERANCIA_MOVIMENTACAO_PISO_CENTAVOS = 2000; // R$ 20,00
+// Fonte da verdade agora é `src/core/rendimento/movimentacao-nao-explicada.ts`
+// (extração pura, zero I/O); reexportadas aqui por compatibilidade — nenhum
+// outro módulo do repo referencia estes nomes hoje, mas a exportação
+// pública é mantida por segurança.
+export { TOLERANCIA_MOVIMENTACAO_PCT, TOLERANCIA_MOVIMENTACAO_PISO_CENTAVOS };
 
 /**
  * Resolve o valor investido de um `chave_export` numa sessão, aplicando a
@@ -1122,6 +1130,13 @@ export interface MovimentacaoNaoExplicada {
   diferencaCentavos: number;
   /** true apenas quando |diferencaCentavos| excede AMBOS os limiares de FR-018 (R8) simultaneamente. */
   excedeTolerancia: boolean;
+  /**
+   * Exposto para permitir recálculo reativo no client (feature de correção
+   * do falso positivo de fundos com ajuste manual, `import/page.tsx`) sem
+   * duplicar a query de posição anterior/aportes executados — mesmo campo já
+   * calculado internamente, ver `avaliarMovimentacaoNaoExplicada`.
+   */
+  houveBaseComparacao: boolean;
 }
 
 /** Entrada de `calcularMovimentacaoNaoExplicada`: o alvo e o valor investido REAL vindo do preview da nova sessão (ainda não persistida). */
@@ -1241,8 +1256,6 @@ export async function calcularMovimentacaoNaoExplicada(
   }
 
   const valorInvestidoEsperadoCentavos = valorInvestidoAnteriorCentavos + somaExecutadoAlvoCentavos;
-  const diferencaCentavos = entrada.valorInvestidoRealCentavos - valorInvestidoEsperadoCentavos;
-  const diferencaAbsoluta = Math.abs(diferencaCentavos);
 
   // Base de comparação existe se ao menos 1 elegível tinha valor investido
   // resolvível na sessão anterior, OU havia aporte executado registrado para
@@ -1252,12 +1265,11 @@ export async function calcularMovimentacaoNaoExplicada(
   // que o valor real seja grande, pois não há nada para comparar.
   const houveBaseComparacao = houveValorAnteriorRastreavel || somaExecutadoAlvoCentavos !== 0;
 
-  const excedePct =
-    valorInvestidoEsperadoCentavos === 0
-      ? diferencaAbsoluta > 0
-      : (diferencaAbsoluta / Math.abs(valorInvestidoEsperadoCentavos)) * 100 > TOLERANCIA_MOVIMENTACAO_PCT;
-  const excedePiso = diferencaAbsoluta > TOLERANCIA_MOVIMENTACAO_PISO_CENTAVOS;
-  const excedeTolerancia = houveBaseComparacao && excedePct && excedePiso;
+  const { diferencaCentavos, excedeTolerancia } = avaliarMovimentacaoNaoExplicada({
+    valorInvestidoEsperadoCentavos,
+    valorInvestidoRealCentavos: entrada.valorInvestidoRealCentavos,
+    houveBaseComparacao,
+  });
 
   const granularidade: "ativo" | "alvo" = elegibilidade.n === 1 ? "ativo" : "alvo";
   const unico = elegibilidade.n === 1 ? elegibilidade.elegiveis[0] : undefined;
@@ -1272,6 +1284,7 @@ export async function calcularMovimentacaoNaoExplicada(
     valorInvestidoRealCentavos: entrada.valorInvestidoRealCentavos,
     diferencaCentavos,
     excedeTolerancia,
+    houveBaseComparacao,
   };
 }
 

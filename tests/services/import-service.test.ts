@@ -1567,5 +1567,176 @@ describe("import-service", () => {
       // Sempre o valor REAL do CSV (R$4.000,00) — nunca o "esperado" (R$800,00).
       expect(posicaoPersistida.patrimonio_investido_centavos).toBe(400_000);
     });
+
+    it("alvo com ajuste pendente (chaveExport em ajustesRevisao) sai de movimentacoesNaoExplicadas e vira avaliacoesMovimentacaoAoVivo, com o valor bruto do CSV", async () => {
+      const alvo = await criarAlvo("Fundos");
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("XP", [linha({ acao: "FUNDO1", patrimonioHoje: "1000.00" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+      await prisma.ativo_mapeado.update({ where: { chave_export: "FUNDO1" }, data: { alvo_id: alvo.id } });
+      await prisma.posicao.updateMany({
+        where: { sessao_import_id: r1.sessaoId, chave_export: "FUNDO1" },
+        data: { patrimonio_investido_centavos: 500_000 }, // "esperado" = R$5.000,00
+      });
+      // Histórico de ajuste_valor_investido para FUNDO1 — é o que faz
+      // `montarRevisaoImport` incluir a chave em `ajustesRevisao` (bug
+      // conhecido do MyCapital: fundos precisam de correção manual
+      // recorrente do valor investido).
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "FUNDO1",
+          sessao_import_id: r1.sessaoId,
+          valor_investido_corrigido_centavos: 500_000,
+        },
+      });
+
+      // Novo import: CSV traz o valor bruto (bug do MyCapital) = valor
+      // atual, bem acima do esperado — mas isso NÃO deve gerar um alerta
+      // estático, porque o usuário ainda vai corrigir esse valor na revisão.
+      const preview = await importService.previewImport([
+        arquivoComPatrimonioAplicado("XP", [
+          linhaComPatrimonioAplicado({
+            acao: "FUNDO1",
+            patrimonioHoje: "5770.33",
+            patrimonioAplicado: "5770.33",
+          }),
+        ]),
+      ]);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+
+      expect(preview.ajustesRevisao.some((a) => a.chaveExport === "FUNDO1")).toBe(true);
+
+      // NÃO aparece mais no cálculo estático.
+      expect(preview.movimentacoesNaoExplicadas.find((m) => m.alvoId === alvo.id)).toBeUndefined();
+
+      // Aparece em avaliacoesMovimentacaoAoVivo, com os dados brutos para o
+      // client recalcular reativamente.
+      const aoVivo = preview.avaliacoesMovimentacaoAoVivo.find((a) => a.alvoId === alvo.id);
+      expect(aoVivo).toBeDefined();
+      expect(aoVivo!.granularidade).toBe("ativo");
+      expect(aoVivo!.chaveExport).toBe("FUNDO1");
+      expect(aoVivo!.valorInvestidoEsperadoCentavos).toBe(500_000);
+      expect(aoVivo!.houveBaseComparacao).toBe(true);
+      // FUNDO1 é a ÚNICA chave elegível do alvo e ela TEM ajuste pendente —
+      // logo a base fixa (sem nenhuma chave sem ajuste) é 0.
+      expect(aoVivo!.valorRealBaseCentavos).toBe(0);
+      expect(aoVivo!.ajustesDoAlvo).toEqual([{ chaveExport: "FUNDO1", valorCsvCentavos: 577_033 }]);
+    });
+
+    it("alvo com 2 chaves elegíveis, só UMA com ajuste pendente: valorRealBaseCentavos soma exclusivamente a chave SEM ajuste (não duplica nem perde nenhuma)", async () => {
+      const alvo = await criarAlvo("Multi-fundos");
+
+      const r1 = await importService.confirmarImport({
+        arquivos: [
+          arquivoInstituicao("XP", [
+            linha({ acao: "FIXO1", patrimonioHoje: "1000.00" }),
+            linha({ acao: "AJUS1", patrimonioHoje: "1000.00" }),
+          ]),
+        ],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+      await prisma.ativo_mapeado.update({ where: { chave_export: "FIXO1" }, data: { alvo_id: alvo.id } });
+      await prisma.ativo_mapeado.update({ where: { chave_export: "AJUS1" }, data: { alvo_id: alvo.id } });
+      await prisma.posicao.updateMany({
+        where: { sessao_import_id: r1.sessaoId, chave_export: "FIXO1" },
+        data: { patrimonio_investido_centavos: 100_000 },
+      });
+      await prisma.posicao.updateMany({
+        where: { sessao_import_id: r1.sessaoId, chave_export: "AJUS1" },
+        data: { patrimonio_investido_centavos: 500_000 },
+      });
+      // Só AJUS1 tem histórico de ajuste manual — é o que entra em
+      // ajustesRevisao/chavesComAjustePendente; FIXO1 fica de fora.
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "AJUS1",
+          sessao_import_id: r1.sessaoId,
+          valor_investido_corrigido_centavos: 500_000,
+        },
+      });
+
+      const preview = await importService.previewImport([
+        arquivoComPatrimonioAplicado("XP", [
+          linhaComPatrimonioAplicado({ acao: "FIXO1", patrimonioHoje: "1200.00", patrimonioAplicado: "1200.00" }),
+          linhaComPatrimonioAplicado({ acao: "AJUS1", patrimonioHoje: "5770.33", patrimonioAplicado: "5770.33" }),
+        ]),
+      ]);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+
+      expect(preview.ajustesRevisao.some((a) => a.chaveExport === "AJUS1")).toBe(true);
+      expect(preview.ajustesRevisao.some((a) => a.chaveExport === "FIXO1")).toBe(false);
+      expect(preview.movimentacoesNaoExplicadas.find((m) => m.alvoId === alvo.id)).toBeUndefined();
+
+      const aoVivo = preview.avaliacoesMovimentacaoAoVivo.find((a) => a.alvoId === alvo.id);
+      expect(aoVivo).toBeDefined();
+      expect(aoVivo!.granularidade).toBe("alvo");
+      // Base fixa = só FIXO1 (R$1.200,00), NUNCA soma AJUS1 nem fica vazia.
+      expect(aoVivo!.valorRealBaseCentavos).toBe(120_000);
+      expect(aoVivo!.ajustesDoAlvo).toEqual([{ chaveExport: "AJUS1", valorCsvCentavos: 577_033 }]);
+    });
+
+    it("alvo genuinamente novo (sem base de comparação) com ajuste pendente: houveBaseComparacao propagado como false em avaliacoesMovimentacaoAoVivo, mesmo com valor real grande", async () => {
+      const alvo = await criarAlvo("Fundo novo");
+
+      // Sessão bem anterior — usada só como FK para o ajuste histórico de
+      // NOVO1, propositalmente DIFERENTE da sessão que serve de "sessão
+      // anterior" da comparação (r1, mais recente) — para que a chave NOVO1
+      // entre em ajustesRevisao (qualquer sessão com ajuste histórico basta)
+      // SEM que resolverValorInvestido(NOVO1, r1.sessaoId) encontre nada
+      // (o ajuste está numa sessão diferente da que é comparada).
+      const r0 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("XP", [linha({ acao: "ANTIGA1", patrimonioHoje: "1000.00" })])],
+        mesReferencia: "2026-06",
+      });
+      expect(r0.ok).toBe(true);
+      if (!r0.ok) return;
+      // `ajuste_valor_investido.chave_export` referencia `ativo_mapeado` —
+      // precisa existir antes (ainda sem alvo, criado propositalmente cedo).
+      await prisma.ativo_mapeado.create({
+        data: { chave_export: "NOVO1", alvo_id: null, fora_da_carteira: false },
+      });
+      await prisma.ajuste_valor_investido.create({
+        data: {
+          chave_export: "NOVO1",
+          sessao_import_id: r0.sessaoId,
+          valor_investido_corrigido_centavos: 10_000,
+        },
+      });
+
+      // Sessão anterior VIGENTE (a que efetivamente entra na comparação),
+      // mas sem NENHUMA posição de NOVO1 nela — mapeado ao alvo só agora.
+      const r1 = await importService.confirmarImport({
+        arquivos: [arquivoInstituicao("XP", [linha({ acao: "OUTRO9", patrimonioHoje: "1000.00" })])],
+        mesReferencia: "2026-07",
+      });
+      expect(r1.ok).toBe(true);
+      if (!r1.ok) return;
+      await prisma.ativo_mapeado.update({
+        where: { chave_export: "NOVO1" },
+        data: { alvo_id: alvo.id },
+      });
+
+      const preview = await importService.previewImport([
+        arquivoComPatrimonioAplicado("XP", [
+          linhaComPatrimonioAplicado({ acao: "OUTRO9", patrimonioHoje: "1000.00", patrimonioAplicado: "1000.00" }),
+          linhaComPatrimonioAplicado({ acao: "NOVO1", patrimonioHoje: "9999.00", patrimonioAplicado: "9999.00" }),
+        ]),
+      ]);
+      expect(preview.ok).toBe(true);
+      if (!preview.ok) return;
+
+      const aoVivo = preview.avaliacoesMovimentacaoAoVivo.find((a) => a.alvoId === alvo.id);
+      expect(aoVivo).toBeDefined();
+      expect(aoVivo!.houveBaseComparacao).toBe(false);
+      expect(aoVivo!.valorInvestidoEsperadoCentavos).toBe(0);
+    });
   });
 });
