@@ -197,15 +197,17 @@ export default function RendimentoPage() {
           <SecaoTagsEAlvos dados={dados} />
           <TabelaAtivosFlat
             titulo="Ativos fora da carteira alvo"
-            descricao="Rendimento de cada ativo marcado como fora da carteira alvo, individualmente — nunca somado num único total. Ordenado por rendimento em R$, maior ganho primeiro."
+            descricao="Rendimento de cada ativo marcado como fora da carteira alvo, individualmente — o total acima resume o bucket, mas nenhum ativo é somado ao rendimento de um alvo/tag. Ordenado por rendimento em R$, maior ganho primeiro."
             mensagemVazio="Nenhum ativo fora da carteira alvo."
             itens={dados.foraDaCarteira}
+            total={dados.foraDaCarteiraTotal}
           />
           <TabelaAtivosFlat
             titulo="Pendentes de vínculo"
-            descricao="Ativos ainda sem vínculo a um alvo da carteira — não fora da carteira nem reserva de emergência. Não influenciam o rendimento de nenhum alvo ou tag; entram apenas no consolidado do patrimônio total."
+            descricao="Ativos ainda sem vínculo a um alvo da carteira — não fora da carteira nem reserva de emergência. O total acima resume o bucket, mas nenhum ativo é somado ao rendimento de nenhum alvo ou tag; entram apenas no consolidado do patrimônio total."
             mensagemVazio="Nenhum ativo pendente de vínculo."
             itens={dados.pendentes}
+            total={dados.pendentesTotal}
           />
         </>
       )}
@@ -353,6 +355,49 @@ function BadgeTendencia({ pct }: { pct: number }) {
   );
 }
 
+/**
+ * Célula de tabela com um valor ABSOLUTO (não ganho/perda) — "Valor
+ * investido"/"Valor atual" das colunas novas de todas as tabelas de
+ * ativo/alvo/tag. Cor neutra de propósito (nunca verde/vermelho de
+ * `CelulaValor`/`CelulaPercentual`): essa semântica de status é exclusiva do
+ * RENDIMENTO, não de um valor bruto. Mesmo tratamento "sem histórico"
+ * (itálico/muted) de `CelulaValor` quando `centavos` é `null` (FR-010).
+ */
+function CelulaValorAbsoluto({ centavos, className }: { centavos: number | null; className?: string }) {
+  if (centavos === null) {
+    return <span className="text-xs whitespace-normal italic text-muted-foreground">sem histórico</span>;
+  }
+  return (
+    <span className={cn("tabular-nums text-foreground", className)}>{formatCentavosParaReais(centavos)}</span>
+  );
+}
+
+/**
+ * "R$ grande + badge de tendência" reutilizado no cabeçalho (`CardAction`)
+ * das 4 seções de bucket (reserva de emergência, tags/alvos, fora da
+ * carteira, pendentes) — extraído para não duplicar o mesmo JSX quatro vezes
+ * (redesenho de UX, unificação visual pedida pelo usuário). `null` = "sem
+ * histórico suficiente" no bucket inteiro (FR-010), mesma nota textual usada
+ * antes só pela reserva de emergência.
+ */
+function TotalDoBucket({
+  rendimentoCentavos,
+  rendimentoPct,
+}: {
+  rendimentoCentavos: number | null;
+  rendimentoPct: number | null;
+}) {
+  if (rendimentoCentavos === null) {
+    return <span className="text-xs italic text-muted-foreground">sem histórico suficiente</span>;
+  }
+  return (
+    <div className="flex items-center gap-3">
+      <CelulaValor centavos={rendimentoCentavos} className="text-lg" />
+      {rendimentoPct !== null && <BadgeTendencia pct={rendimentoPct} />}
+    </div>
+  );
+}
+
 /** Número de destaque do card consolidado: valor grande + badge de tendência ao lado. */
 function ValorHero({ rendimento }: { rendimento: RendimentoPeriodo }) {
   if (rendimento.rendimentoCentavos === null) {
@@ -465,13 +510,13 @@ function CardGraficoEvolucao({ dados }: { dados: RendimentoOutput }) {
 
 /**
  * Rendimento de tudo que está marcado `reserva_emergencia = true` (US2,
- * FR-008) — faixa de resumo (agregado do bucket, nunca somado a nenhum outro
- * bucket — FR-007) no topo do card, mais a lista dos ativos individuais que
- * compõem a reserva (`reservaEmergenciaItens`) numa tabela ordenável
- * colapsável abaixo, mesmo componente `TabelaRendimentoPorAtivo` reutilizado
- * por "fora da carteira"/"pendentes". Colapsada por padrão: o agregado já
- * responde a pergunta mais comum ("como está a reserva?"), o detalhe por
- * ativo é uma expansão opcional.
+ * FR-008) — total do bucket no cabeçalho do card (agregado, nunca somado a
+ * nenhum outro bucket — FR-007), mais a lista dos ativos individuais que
+ * compõem a reserva (`reservaEmergenciaItens`) numa tabela ordenável SEMPRE
+ * visível abaixo (mesmo padrão visual de "fora da carteira"/"pendentes"/
+ * "tags e alvos" — nenhuma seção da tela esconde a tabela atrás de um
+ * toggle), mesmo componente `TabelaRendimentoPorAtivo` reutilizado por
+ * "fora da carteira"/"pendentes".
  */
 function SecaoReservaEmergencia({ dados }: { dados: RendimentoOutput }) {
   if (dados.vazio) return null;
@@ -481,7 +526,6 @@ function SecaoReservaEmergencia({ dados }: { dados: RendimentoOutput }) {
 function SecaoReservaEmergenciaComDados({ dados }: { dados: RendimentoOutput }) {
   const r = dados.reservaEmergencia;
   const itens = dados.reservaEmergenciaItens;
-  const [expandido, setExpandido] = useState(false);
 
   return (
     <Card>
@@ -489,47 +533,21 @@ function SecaoReservaEmergenciaComDados({ dados }: { dados: RendimentoOutput }) 
         <CardTitle>Reserva de emergência</CardTitle>
         <CardDescription>
           Ativos/posições marcados como reserva de emergência, no período selecionado acima —
-          agregado do bucket, nunca somado a nenhum outro (fora da carteira, tag/alvo ou
-          pendentes).
+          o total ao lado é o agregado do bucket, nunca somado a nenhum outro (fora da
+          carteira, tag/alvo ou pendentes).
         </CardDescription>
+        <CardAction>
+          <TotalDoBucket rendimentoCentavos={r.rendimentoCentavos} rendimentoPct={r.rendimentoPct} />
+        </CardAction>
       </CardHeader>
-      <CardContent className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
-          <button
-            type="button"
-            aria-expanded={expandido}
-            onClick={() => setExpandido((v) => !v)}
-            className="inline-flex items-center gap-2 rounded-sm text-sm font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-          >
-            <ChevronRight
-              className={cn(
-                "size-4 shrink-0 text-muted-foreground transition-transform",
-                expandido && "rotate-90",
-              )}
-              aria-hidden
-            />
-            {expandido ? "Ocultar ativos" : "Ver ativos"} ({itens.length})
-          </button>
-          <div className="flex items-center gap-3">
-            {r.rendimentoCentavos === null ? (
-              <span className="text-xs italic text-muted-foreground">sem histórico suficiente</span>
-            ) : (
-              <>
-                <CelulaValor centavos={r.rendimentoCentavos} className="text-lg" />
-                {r.rendimentoPct !== null && <BadgeTendencia pct={r.rendimentoPct} />}
-              </>
-            )}
-          </div>
-        </div>
-
-        {expandido &&
-          (itens.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              Nenhum ativo marcado como reserva de emergência.
-            </p>
-          ) : (
-            <TabelaRendimentoPorAtivo itens={itens} />
-          ))}
+      <CardContent>
+        {itens.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Nenhum ativo marcado como reserva de emergência.
+          </p>
+        ) : (
+          <TabelaRendimentoPorAtivo itens={itens} />
+        )}
       </CardContent>
     </Card>
   );
@@ -595,7 +613,11 @@ function SecaoTagsEAlvosComDados({ dados }: { dados: RendimentoOutput }) {
           Rendimento agrupado por tag da carteira alvo e, dentro de cada tag, o rendimento
           de cada alvo individualmente. Clique numa linha para expandir os alvos da tag.
         </CardDescription>
-        <CardAction>
+        <CardAction className="flex items-center gap-4">
+          <TotalDoBucket
+            rendimentoCentavos={dados.carteiraAlvoTotal.rendimentoCentavos}
+            rendimentoPct={dados.carteiraAlvoTotal.rendimentoPct}
+          />
           <Button
             variant="outline"
             size="sm"
@@ -610,6 +632,8 @@ function SecaoTagsEAlvosComDados({ dados }: { dados: RendimentoOutput }) {
           <TableHeader>
             <TableRow>
               <TableHead>Tag / alvo</TableHead>
+              <TableHead className="text-right">Valor investido</TableHead>
+              <TableHead className="text-right">Valor atual</TableHead>
               <SortableTableHead
                 className="text-right"
                 sortDirection={gruposOrdenados.sortDirectionFor("rendimentoCentavos")}
@@ -726,6 +750,20 @@ function LinhaGrupoTag({
         </TableCell>
         <TableCell className="text-right">
           {rendimento ? (
+            <CelulaValorAbsoluto centavos={rendimento.pontoInicio.valorInvestidoCentavos} />
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
+        <TableCell className="text-right">
+          {rendimento ? (
+            <CelulaValorAbsoluto centavos={rendimento.pontoFim.valorAtualCentavos} />
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
+        <TableCell className="text-right">
+          {rendimento ? (
             <CelulaValor centavos={rendimento.rendimentoCentavos} />
           ) : (
             <span className="text-muted-foreground">—</span>
@@ -742,7 +780,7 @@ function LinhaGrupoTag({
 
       {expandido && alvos.length === 0 && (
         <TableRow className="bg-muted/20">
-          <TableCell colSpan={3} className="pl-9 text-xs text-muted-foreground">
+          <TableCell colSpan={5} className="pl-9 text-xs text-muted-foreground">
             Nenhum alvo com dado disponível nesta tag.
           </TableCell>
         </TableRow>
@@ -752,6 +790,18 @@ function LinhaGrupoTag({
         alvosOrdenados.map((alvo) => (
           <TableRow key={alvo.alvoId} className="bg-muted/20">
             <TableCell className="pl-9 text-xs text-muted-foreground">{alvo.nomeAlvo}</TableCell>
+            <TableCell className="text-right">
+              <CelulaValorAbsoluto
+                centavos={alvo.rendimento.pontoInicio.valorInvestidoCentavos}
+                className="text-sm"
+              />
+            </TableCell>
+            <TableCell className="text-right">
+              <CelulaValorAbsoluto
+                centavos={alvo.rendimento.pontoFim.valorAtualCentavos}
+                className="text-sm"
+              />
+            </TableCell>
             <TableCell className="text-right">
               <CelulaValor centavos={alvo.rendimento.rendimentoCentavos} className="text-sm" />
             </TableCell>
@@ -777,11 +827,13 @@ function TabelaAtivosFlat({
   descricao,
   mensagemVazio,
   itens,
+  total,
 }: {
   titulo: string;
   descricao: string;
   mensagemVazio: string;
   itens: RendimentoAtivoForaDaCarteira[];
+  total: RendimentoPeriodo;
 }) {
   if (itens.length === 0) {
     return (
@@ -789,6 +841,9 @@ function TabelaAtivosFlat({
         <CardHeader>
           <CardTitle>{titulo}</CardTitle>
           <CardDescription>{descricao}</CardDescription>
+          <CardAction>
+            <TotalDoBucket rendimentoCentavos={total.rendimentoCentavos} rendimentoPct={total.rendimentoPct} />
+          </CardAction>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">{mensagemVazio}</p>
@@ -797,23 +852,28 @@ function TabelaAtivosFlat({
     );
   }
 
-  return <TabelaAtivosFlatComItens titulo={titulo} descricao={descricao} itens={itens} />;
+  return <TabelaAtivosFlatComItens titulo={titulo} descricao={descricao} itens={itens} total={total} />;
 }
 
 function TabelaAtivosFlatComItens({
   titulo,
   descricao,
   itens,
+  total,
 }: {
   titulo: string;
   descricao: string;
   itens: RendimentoAtivoForaDaCarteira[];
+  total: RendimentoPeriodo;
 }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>{titulo}</CardTitle>
         <CardDescription>{descricao}</CardDescription>
+        <CardAction>
+          <TotalDoBucket rendimentoCentavos={total.rendimentoCentavos} rendimentoPct={total.rendimentoPct} />
+        </CardAction>
       </CardHeader>
       <CardContent>
         <TabelaRendimentoPorAtivo itens={itens} />
@@ -859,6 +919,8 @@ function TabelaRendimentoPorAtivo({ itens }: { itens: RendimentoAtivoForaDaCarte
           >
             Ativo
           </SortableTableHead>
+          <TableHead className="text-right">Valor investido</TableHead>
+          <TableHead className="text-right">Valor atual</TableHead>
           <SortableTableHead
             className="text-right"
             sortDirection={ordenados.sortDirectionFor("rendimentoCentavos")}
@@ -878,8 +940,14 @@ function TabelaRendimentoPorAtivo({ itens }: { itens: RendimentoAtivoForaDaCarte
       <TableBody>
         {ordenados.sortedRows.map((item) => (
           <TableRow key={item.chaveExport}>
-            <TableCell className="max-w-[240px] truncate font-medium" title={item.chaveExport}>
+            <TableCell className="max-w-[200px] truncate font-medium" title={item.chaveExport}>
               {item.chaveExport}
+            </TableCell>
+            <TableCell className="text-right">
+              <CelulaValorAbsoluto centavos={item.rendimento.pontoInicio.valorInvestidoCentavos} />
+            </TableCell>
+            <TableCell className="text-right">
+              <CelulaValorAbsoluto centavos={item.rendimento.pontoFim.valorAtualCentavos} />
             </TableCell>
             <TableCell className="text-right">
               <CelulaValor centavos={item.rendimento.rendimentoCentavos} />

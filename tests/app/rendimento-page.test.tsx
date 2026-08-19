@@ -65,6 +65,43 @@ function periodo(rendimentoCentavos: number | null, rendimentoPct: number | null
   };
 }
 
+/**
+ * Variante de `periodo()` que também controla `pontoInicio.valorInvestidoCentavos`
+ * e `pontoFim.valorAtualCentavos` — usada pelos testes das colunas "Valor
+ * investido"/"Valor atual" (que `periodo()` sempre zera/nula de propósito, já
+ * que os outros testes deste arquivo não olham para essas colunas).
+ */
+function periodoComValores({
+  rendimentoCentavos,
+  rendimentoPct,
+  valorInvestidoCentavos,
+  valorAtualCentavos,
+}: {
+  rendimentoCentavos: number | null;
+  rendimentoPct: number | null;
+  valorInvestidoCentavos: number | null;
+  valorAtualCentavos: number;
+}): RendimentoPeriodo {
+  return {
+    sessaoInicioId: "sessao-inicio",
+    sessaoFimId: "sessao-fim",
+    rendimentoCentavos,
+    rendimentoPct,
+    pontoInicio: {
+      rendimentoCentavos: null,
+      rendimentoPct: null,
+      valorAtualCentavos: 0,
+      valorInvestidoCentavos,
+    },
+    pontoFim: {
+      rendimentoCentavos,
+      rendimentoPct,
+      valorAtualCentavos,
+      valorInvestidoCentavos: null,
+    },
+  };
+}
+
 const PORTAG: RendimentoPorTag[] = [
   { tag: "A-AÇÕES", rendimento: periodo(30_00, 3) },
   { tag: "F-FIIS", rendimento: periodo(-10_00, -1) },
@@ -115,6 +152,9 @@ const DADOS_BASE = {
   porAlvo: PORALVO,
   foraDaCarteira: FORA_DA_CARTEIRA,
   pendentes: PENDENTES,
+  foraDaCarteiraTotal: periodo(100_00, 11),
+  pendentesTotal: periodo(-5_00, -1),
+  carteiraAlvoTotal: periodo(35_00, 4),
   // Menos de 2 pontos = card "escolha um período mais amplo", nunca renderiza o Recharts.
   serie: [],
   periodosDisponiveis: [],
@@ -223,45 +263,22 @@ describe("RendimentoPage — 'Ativos fora da carteira alvo' e 'Pendentes de vín
   });
 });
 
-describe("RendimentoPage — 'Reserva de emergência' (expandir/recolher 'Ver ativos')", () => {
-  it("com itens: botão mostra a contagem, tabela some por padrão, expande mostrando os itens certos e recolhe de volta", async () => {
+describe("RendimentoPage — 'Reserva de emergência' (tabela sempre visível, mesmo padrão das demais seções)", () => {
+  it("com itens: a tabela já aparece sem precisar clicar em nada", async () => {
     dadosRendimentoMock.mockResolvedValue({
       ok: true,
       data: { ...DADOS_BASE, reservaEmergenciaItens: RESERVA_ITENS },
     });
     await renderPagina();
 
-    // Não expandido por padrão: os itens não aparecem no DOM.
-    expect(screen.queryByText("RESERVA-CDB")).toBeNull();
-    expect(screen.queryByText("RESERVA-TESOURO")).toBeNull();
-
-    const botao = screen.getByRole("button", { name: /Ver ativos \(2\)/ });
-    expect(botao.getAttribute("aria-expanded")).toBe("false");
-
-    fireEvent.click(botao);
-
-    expect(botao.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByText("Ocultar ativos (2)")).toBeTruthy();
     expect(screen.getByText("RESERVA-CDB")).toBeTruthy();
     expect(screen.getByText("RESERVA-TESOURO")).toBeTruthy();
-
-    // Recolher de novo esconde a tabela sem quebrar nada.
-    fireEvent.click(botao);
-    expect(botao.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByText("RESERVA-CDB")).toBeNull();
-    expect(screen.queryByText("RESERVA-TESOURO")).toBeNull();
   });
 
-  it("sem itens (reservaEmergenciaItens: []): botão mostra '(0)', continua clicável e mostra mensagem de vazio sem quebrar", async () => {
+  it("sem itens (reservaEmergenciaItens: []): mostra mensagem de vazio sem quebrar", async () => {
     // DADOS_BASE já tem reservaEmergenciaItens: [] — cobre o caso default.
     await renderPagina();
 
-    const botao = screen.getByRole("button", { name: /Ver ativos \(0\)/ });
-    expect(botao).toBeTruthy();
-
-    fireEvent.click(botao);
-
-    expect(botao.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("Nenhum ativo marcado como reserva de emergência.")).toBeTruthy();
   });
 });
@@ -358,5 +375,109 @@ describe("RendimentoPage — ordenação da tabela de tags reordena os alvos ani
     // de A-AÇÕES, A1 (1%) antes de A2 (4%).
     expect(idxTagFiis).toBeLessThan(idxTagAcoes);
     expect(idxA1).toBeLessThan(idxA2);
+  });
+});
+
+/**
+ * `CardAction` (cabeçalho, onde `TotalDoBucket` é renderizado) do card cujo
+ * título é o informado — escopo restrito ao cabeçalho (não ao card inteiro)
+ * porque o mesmo valor formatado pode coincidentemente aparecer de novo
+ * numa linha da tabela de itens abaixo.
+ */
+function acaoDaSecao(titulo: string): HTMLElement {
+  const card = screen.getByText(titulo).closest('[data-slot="card"]');
+  if (!card) throw new Error(`Card da seção "${titulo}" não encontrado`);
+  const acao = (card as HTMLElement).querySelector('[data-slot="card-action"]');
+  if (!acao) throw new Error(`CardAction da seção "${titulo}" não encontrado`);
+  return acao as HTMLElement;
+}
+
+describe("RendimentoPage — TotalDoBucket de cada seção usa o campo agregado certo (não confunde bucket)", () => {
+  // DADOS_BASE já usa um valor DISTINTO por bucket de propósito (1_00,
+  // 35_00, 100_00, -5_00) — só assim um teste pega, por exemplo, o cabeçalho
+  // de "fora da carteira" mostrando por engano `pendentesTotal`.
+  it("'Reserva de emergência' mostra o total de dados.reservaEmergencia (R$ 1,00)", async () => {
+    await renderPagina();
+    const card = acaoDaSecao("Reserva de emergência");
+    expect(within(card).getByText("R$ 1,00")).toBeTruthy();
+  });
+
+  it("'Rendimento por tag e por alvo' mostra o total de dados.carteiraAlvoTotal (R$ 35,00)", async () => {
+    await renderPagina();
+    const card = acaoDaSecao("Rendimento por tag e por alvo");
+    expect(within(card).getByText("R$ 35,00")).toBeTruthy();
+  });
+
+  it("'Ativos fora da carteira alvo' mostra o total de dados.foraDaCarteiraTotal (R$ 100,00)", async () => {
+    await renderPagina();
+    const card = acaoDaSecao("Ativos fora da carteira alvo");
+    expect(within(card).getByText("R$ 100,00")).toBeTruthy();
+  });
+
+  it("'Pendentes de vínculo' mostra o total de dados.pendentesTotal (-R$ 5,00)", async () => {
+    await renderPagina();
+    const card = acaoDaSecao("Pendentes de vínculo");
+    expect(within(card).getByText("-R$ 5,00")).toBeTruthy();
+  });
+});
+
+describe("RendimentoPage — colunas 'Valor investido'/'Valor atual'", () => {
+  const ITEM_COM_HISTORICO: RendimentoAtivoForaDaCarteira = {
+    chaveExport: "VAL-COM-HISTORICO",
+    rendimento: periodoComValores({
+      rendimentoCentavos: 10_000_00,
+      rendimentoPct: 20,
+      valorInvestidoCentavos: 50_000_00,
+      valorAtualCentavos: 60_000_00,
+    }),
+  };
+
+  const ITEM_SEM_HISTORICO: RendimentoAtivoForaDaCarteira = {
+    chaveExport: "VAL-SEM-HISTORICO",
+    rendimento: periodoComValores({
+      rendimentoCentavos: 1_00,
+      rendimentoPct: 1,
+      valorInvestidoCentavos: null,
+      valorAtualCentavos: 123_45,
+    }),
+  };
+
+  async function renderComItensDeValor() {
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: { ...DADOS_BASE, foraDaCarteira: [ITEM_COM_HISTORICO, ITEM_SEM_HISTORICO] },
+    });
+    render(<RendimentoPage />);
+    await screen.findByText("Rendimento por tag e por alvo");
+  }
+
+  it("mostra 'Valor investido' e 'Valor atual' com os valores certos de pontoInicio/pontoFim", async () => {
+    await renderComItensDeValor();
+
+    const linha = screen.getByText("VAL-COM-HISTORICO").closest("tr")!;
+    expect(within(linha).getByText("R$ 50.000,00")).toBeTruthy();
+    expect(within(linha).getByText("R$ 60.000,00")).toBeTruthy();
+  });
+
+  it("valorInvestidoCentavos: null mostra 'sem histórico' na coluna 'Valor investido' em vez de um número", async () => {
+    await renderComItensDeValor();
+
+    const linha = screen.getByText("VAL-SEM-HISTORICO").closest("tr")!;
+    expect(within(linha).getByText("sem histórico")).toBeTruthy();
+    // A coluna "Valor atual" continua mostrando o número normalmente — só
+    // "Valor investido" fica nulo neste fixture.
+    expect(within(linha).getByText("R$ 123,45")).toBeTruthy();
+  });
+});
+
+describe("RendimentoPage — 'Reserva de emergência' não tem mais o toggle 'Ver ativos' (substituído pela tabela sempre visível)", () => {
+  it("não existe nenhum botão 'Ver ativos' na tela, mesmo com itens na reserva", async () => {
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: { ...DADOS_BASE, reservaEmergenciaItens: RESERVA_ITENS },
+    });
+    await renderPagina();
+
+    expect(screen.queryByRole("button", { name: /ver ativos/i })).toBeNull();
   });
 });
