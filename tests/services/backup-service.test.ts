@@ -21,6 +21,7 @@ let backupsDir: string;
 let prisma: typeof import("@/db/client")["prisma"];
 let backupService: typeof import("@/services/backup-service");
 let configService: typeof import("@/services/config-service");
+let dbPaths: typeof import("@/services/db-paths");
 
 beforeAll(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "backup-service-test-"));
@@ -43,6 +44,7 @@ beforeAll(async () => {
   prisma = dbModule.prisma;
   backupService = await import("@/services/backup-service");
   configService = await import("@/services/config-service");
+  dbPaths = await import("@/services/db-paths");
 }, 30_000);
 
 afterAll(async () => {
@@ -198,6 +200,61 @@ describe("backup-service", () => {
       expect(removidos).toEqual([antigo1]);
       expect(fs.existsSync(antigo1)).toBe(false);
       expect(fs.existsSync(antigo2)).toBe(true);
+    });
+  });
+
+  describe("default de backupsDir (sem override — usa db-paths.diretorioBackupsPadrao())", () => {
+    // DATABASE_URL neste arquivo aponta para um .db ABSOLUTO fora do repo
+    // (tmpDir do SO, ver beforeAll), exatamente o cenário que motivou a
+    // extração para db-paths.ts (backups precisam viver ao lado do .db
+    // real, não de `<cwd>/backups`). Estes testes chamam as funções SEM
+    // `backupsDir` para provar que o valor default de fato resolve e é
+    // usado — não só que a função pura `diretorioBackupsPadrao()` retorna o
+    // caminho certo (isso já é coberto por tests/services/db-paths.test.ts).
+    it("criarBackup() sem opções grava dentro de diretorioBackupsPadrao()", async () => {
+      backupsDir = dbPaths.diretorioBackupsPadrao();
+      expect(fs.existsSync(backupsDir)).toBe(false);
+
+      const resultado = await backupService.criarBackup();
+
+      expect(resultado.caminho).toBe(path.join(backupsDir, resultado.nomeArquivo));
+      expect(fs.existsSync(resultado.caminho)).toBe(true);
+      expect(ehArquivoSqliteValido(resultado.caminho)).toBe(true);
+    });
+
+    it("aplicarRetencao() sem backupsDir aplica retenção em diretorioBackupsPadrao()", async () => {
+      backupsDir = dbPaths.diretorioBackupsPadrao();
+      fs.mkdirSync(backupsDir, { recursive: true });
+      await configService.setConfig("retencao_backups", 1);
+
+      const nomes = ["app-2026-01-01.db", "app-2026-01-02.db"];
+      const agora = Date.now();
+      nomes.forEach((nome, indice) => {
+        const caminho = path.join(backupsDir, nome);
+        fs.writeFileSync(caminho, "conteudo-fake");
+        const mtime = new Date(agora + indice * 1000);
+        fs.utimesSync(caminho, mtime, mtime);
+      });
+
+      const removidos = await backupService.aplicarRetencao();
+
+      expect(removidos).toEqual([path.join(backupsDir, "app-2026-01-01.db")]);
+      expect(fs.readdirSync(backupsDir)).toEqual(["app-2026-01-02.db"]);
+    });
+
+    it("executarBackupComRetencao() sem opções cria e aplica retenção em diretorioBackupsPadrao()", async () => {
+      backupsDir = dbPaths.diretorioBackupsPadrao();
+      await configService.setConfig("retencao_backups", 1);
+
+      const primeiro = await backupService.executarBackupComRetencao();
+      expect(fs.existsSync(primeiro.backup.caminho)).toBe(true);
+
+      const segundo = await backupService.executarBackupComRetencao();
+
+      // Limite 1: o backup do primeiro run é removido quando o segundo roda.
+      expect(segundo.removidos).toEqual([primeiro.backup.caminho]);
+      expect(fs.existsSync(primeiro.backup.caminho)).toBe(false);
+      expect(fs.existsSync(segundo.backup.caminho)).toBe(true);
     });
   });
 });

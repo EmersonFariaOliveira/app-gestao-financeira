@@ -120,11 +120,12 @@ beforeEach(async () => {
   vi.restoreAllMocks();
 
   // `confirmarImport` chama `executarBackupComRetencao()` sem override de
-  // `backupsDir` (a função não expõe esse parâmetro — usa o default
-  // `<cwd>/backups`, que aqui seria a pasta REAL do repositório). Para
-  // NUNCA gravar `.db` reais fora do diretório temporário do teste, todo
-  // teste deste arquivo roda com o backup mockado por padrão (no-op, sem
-  // tocar em disco); o comportamento real de `executarBackupComRetencao`
+  // `backupsDir` — usa o default `diretorioBackupsPadrao()` (src/services/
+  // db-paths.ts), a subpasta `backup/` ao lado do arquivo `.db` real
+  // resolvido de `DATABASE_URL`. Para NUNCA gravar `.db` reais fora do
+  // diretório temporário do teste, todo teste deste arquivo roda com o
+  // backup mockado por padrão (no-op, sem tocar em disco); o comportamento
+  // real de `executarBackupComRetencao` — inclusive o default sem override —
   // já é coberto integralmente por tests/services/backup-service.test.ts —
   // aqui o que importa é SE e QUANDO ele é chamado, não o que ele grava.
   spyBackup = vi.spyOn(backupService, "executarBackupComRetencao").mockResolvedValue({

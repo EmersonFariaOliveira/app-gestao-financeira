@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { prisma } from "@/db/client";
 import { getConfig } from "@/services/config-service";
+import { diretorioBackupsPadrao } from "@/services/db-paths";
 
 // Serviço de backup do banco (T035, research.md R8): antes de confirmar
 // cada sessão de import, o app grava uma cópia datada e consistente do
@@ -22,21 +23,17 @@ export interface ResultadoBackup {
 }
 
 export interface OpcoesBackup {
-  /** Diretório onde os backups são gravados. Default: `<cwd>/backups`. */
+  /** Diretório onde os backups são gravados. Default: subpasta `backup/` ao lado do arquivo `.db` (ver `db-paths.ts`). */
   backupsDir?: string;
   /** Data de referência do nome do arquivo (injetável em testes). Default: `new Date()`. */
   data?: Date;
 }
 
 export interface OpcoesRetencao {
-  /** Diretório onde os backups são gravados. Default: `<cwd>/backups`. */
+  /** Diretório onde os backups são gravados. Default: subpasta `backup/` ao lado do arquivo `.db` (ver `db-paths.ts`). */
   backupsDir?: string;
   /** Sobrescreve `retencao_backups` da config (útil em testes). */
   limite?: number;
-}
-
-function diretorioBackupsPadrao(): string {
-  return path.join(process.cwd(), "backups");
 }
 
 /** Formata a data local (não UTC) como `YYYY-MM-DD` — o "dia" do backup é o dia local do usuário. */
