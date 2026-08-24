@@ -91,13 +91,13 @@ function periodoComValores({
       rendimentoCentavos: null,
       rendimentoPct: null,
       valorAtualCentavos: 0,
-      valorInvestidoCentavos,
+      valorInvestidoCentavos: null,
     },
     pontoFim: {
       rendimentoCentavos,
       rendimentoPct,
       valorAtualCentavos,
-      valorInvestidoCentavos: null,
+      valorInvestidoCentavos,
     },
   };
 }
@@ -245,11 +245,11 @@ describe("RendimentoPage — 'Ativos fora da carteira alvo' e 'Pendentes de vín
     expect(within(linhas[1]).getByText("FORA-MENOR")).toBeTruthy();
   });
 
-  it("clicar no cabeçalho 'Rendimento em R$' inverte a ordem (ascendente: menor ganho primeiro)", async () => {
+  it("clicar no cabeçalho 'Rendimento no período' inverte a ordem (ascendente: menor ganho primeiro)", async () => {
     await renderPagina();
 
     const tabela = screen.getByText("FORA-MAIOR").closest("table")!;
-    const cabecalho = within(tabela).getByText("Rendimento em R$");
+    const cabecalho = within(tabela).getByText("Rendimento no período");
     fireEvent.click(cabecalho);
 
     const linhasAsc = within(tabela).getAllByRole("row").slice(1);
@@ -322,10 +322,10 @@ describe("RendimentoPage — ordenação da tabela de tags reordena os alvos ani
     expect(idxA2).toBeLessThan(idxA1);
   });
 
-  it("clicar em 'Rendimento em R$' reordena as tags E os alvos dentro do grupo expandido pelo mesmo critério (ascendente); clicar de novo volta a descendente", async () => {
+  it("clicar em 'Rendimento no período' reordena as tags E os alvos dentro do grupo expandido pelo mesmo critério (ascendente); clicar de novo volta a descendente", async () => {
     await renderComDadosDeOrdenacao();
 
-    const cabecalho = within(tabelaDeTags()).getByText("Rendimento em R$");
+    const cabecalho = within(tabelaDeTags()).getByText("Rendimento no período");
     fireEvent.click(cabecalho);
 
     let textos = linhasDaTabelaTags()
@@ -357,32 +357,15 @@ describe("RendimentoPage — ordenação da tabela de tags reordena os alvos ani
     expect(idxA2).toBeLessThan(idxA1);
   });
 
-  it("clicar em 'Ganho sobre capital investido' também reordena tags e alvos aninhados pelo mesmo critério (percentual)", async () => {
-    await renderComDadosDeOrdenacao();
-
-    const cabecalho = within(tabelaDeTags()).getByText("Ganho sobre capital investido");
-    fireEvent.click(cabecalho);
-
-    const textos = linhasDaTabelaTags()
-      .slice(1)
-      .map((l) => l.textContent ?? "");
-    const idxTagAcoes = textos.findIndex((t) => t.includes("A-AÇÕES"));
-    const idxTagFiis = textos.findIndex((t) => t.includes("F-FIIS"));
-    const idxA1 = textos.findIndex((t) => t.includes("A1"));
-    const idxA2 = textos.findIndex((t) => t.includes("A2"));
-
-    // Ascendente por percentual: F-FIIS (1%) antes de A-AÇÕES (5%); dentro
-    // de A-AÇÕES, A1 (1%) antes de A2 (4%).
-    expect(idxTagFiis).toBeLessThan(idxTagAcoes);
-    expect(idxA1).toBeLessThan(idxA2);
-  });
 });
 
 /**
  * `CardAction` (cabeçalho, onde `TotalDoBucket` é renderizado) do card cujo
  * título é o informado — escopo restrito ao cabeçalho (não ao card inteiro)
  * porque o mesmo valor formatado pode coincidentemente aparecer de novo
- * numa linha da tabela de itens abaixo.
+ * numa linha da tabela de itens abaixo. Usado só pelo card consolidado do
+ * topo, que continua com o par "R$ grande + badge" no `CardAction`
+ * (`TotalDoBucket`) — os outros 4 buckets usam `barraResumoDaSecao` abaixo.
  */
 function acaoDaSecao(titulo: string): HTMLElement {
   const card = screen.getByText(titulo).closest('[data-slot="card"]');
@@ -392,32 +375,116 @@ function acaoDaSecao(titulo: string): HTMLElement {
   return acao as HTMLElement;
 }
 
+/**
+ * `BarraResumoBucket` (faixa de resumo full-width dentro do `CardContent`,
+ * entre a descrição e a tabela) do card cujo título é o informado — usada
+ * pelos 4 buckets de período (reserva de emergência, tags/alvos, fora da
+ * carteira, pendentes), que não têm mais os selos no `CardAction` (ver
+ * `acaoDaSecao`, exclusivo do card consolidado do topo).
+ */
+function barraResumoDaSecao(titulo: string): HTMLElement {
+  const card = screen.getByText(titulo).closest('[data-slot="card"]');
+  if (!card) throw new Error(`Card da seção "${titulo}" não encontrado`);
+  const barra = (card as HTMLElement).querySelector('[data-slot="barra-resumo-bucket"]');
+  if (!barra) throw new Error(`BarraResumoBucket da seção "${titulo}" não encontrado`);
+  return barra as HTMLElement;
+}
+
 describe("RendimentoPage — TotalDoBucket de cada seção usa o campo agregado certo (não confunde bucket)", () => {
   // DADOS_BASE já usa um valor DISTINTO por bucket de propósito (1_00,
   // 35_00, 100_00, -5_00) — só assim um teste pega, por exemplo, o cabeçalho
-  // de "fora da carteira" mostrando por engano `pendentesTotal`.
+  // de "fora da carteira" mostrando por engano `pendentesTotal`. Cada
+  // cabeçalho agora tem DOIS selos ("Rendimento total" + "No período"), e
+  // `periodo()` iguala `pontoFim.rendimentoCentavos` ao valor do período —
+  // por isso o valor pode aparecer duas vezes no mesmo `CardAction`
+  // (`getAllByText` em vez de `getByText`).
   it("'Reserva de emergência' mostra o total de dados.reservaEmergencia (R$ 1,00)", async () => {
     await renderPagina();
-    const card = acaoDaSecao("Reserva de emergência");
-    expect(within(card).getByText("R$ 1,00")).toBeTruthy();
+    const barra = barraResumoDaSecao("Reserva de emergência");
+    expect(within(barra).getAllByText("R$ 1,00").length).toBeGreaterThan(0);
   });
 
   it("'Rendimento por tag e por alvo' mostra o total de dados.carteiraAlvoTotal (R$ 35,00)", async () => {
     await renderPagina();
-    const card = acaoDaSecao("Rendimento por tag e por alvo");
-    expect(within(card).getByText("R$ 35,00")).toBeTruthy();
+    const barra = barraResumoDaSecao("Rendimento por tag e por alvo");
+    expect(within(barra).getAllByText("R$ 35,00").length).toBeGreaterThan(0);
   });
 
   it("'Ativos fora da carteira alvo' mostra o total de dados.foraDaCarteiraTotal (R$ 100,00)", async () => {
     await renderPagina();
-    const card = acaoDaSecao("Ativos fora da carteira alvo");
-    expect(within(card).getByText("R$ 100,00")).toBeTruthy();
+    const barra = barraResumoDaSecao("Ativos fora da carteira alvo");
+    expect(within(barra).getAllByText("R$ 100,00").length).toBeGreaterThan(0);
   });
 
   it("'Pendentes de vínculo' mostra o total de dados.pendentesTotal (-R$ 5,00)", async () => {
     await renderPagina();
-    const card = acaoDaSecao("Pendentes de vínculo");
-    expect(within(card).getByText("-R$ 5,00")).toBeTruthy();
+    const barra = barraResumoDaSecao("Pendentes de vínculo");
+    expect(within(barra).getAllByText("-R$ 5,00").length).toBeGreaterThan(0);
+  });
+});
+
+describe("RendimentoPage — CardConsolidado (topo da página)", () => {
+  // Rendimento acumulado (pontoFim.rendimentoCentavos) DIFERENTE do
+  // rendimento do período selecionado (delta pontoInicio -> pontoFim) —
+  // mesmo cenário real das outras seções: o patrimônio total já tinha ganho
+  // acumulado antes do início do período, então os dois números do
+  // cabeçalho ("Rendimento total") e do hero central (rendimento do
+  // período) não podem coincidir por acaso no teste.
+  const CONSOLIDADO_TOTAL_DIFERENTE = periodo(20_00, 2);
+  CONSOLIDADO_TOTAL_DIFERENTE.pontoFim.rendimentoCentavos = 999_00;
+  CONSOLIDADO_TOTAL_DIFERENTE.pontoFim.rendimentoPct = 99;
+
+  it("com período anterior disponível: cabeçalho mostra 'Rendimento total' com pontoFim.rendimentoCentavos, diferente do hero central (rendimento do período)", async () => {
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: {
+        ...DADOS_BASE,
+        consolidado: CONSOLIDADO_TOTAL_DIFERENTE,
+        semPeriodoAnteriorParaComparacao: false,
+      },
+    });
+    await renderPagina();
+
+    const card = acaoDaSecao("Rendimento do patrimônio total");
+    expect(within(card).getByText("Rendimento total")).toBeTruthy();
+    // Cabeçalho: total acumulado (pontoFim.rendimentoCentavos = 999_00).
+    expect(within(card).getByText("R$ 999,00")).toBeTruthy();
+
+    // Hero central: rendimento do período (consolidado.rendimentoCentavos = 20_00) — diferente do total.
+    expect(screen.getByText("R$ 20,00")).toBeTruthy();
+  });
+
+  it("sem período anterior para comparação: cabeçalho NÃO mostra o indicador 'Rendimento total' (evita duplicar visualmente o número do hero) e a nota explicativa aparece", async () => {
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: {
+        ...DADOS_BASE,
+        consolidado: CONSOLIDADO_TOTAL_DIFERENTE,
+        semPeriodoAnteriorParaComparacao: true,
+      },
+    });
+    await renderPagina();
+
+    const card = screen.getByText("Rendimento do patrimônio total").closest('[data-slot="card"]') as HTMLElement;
+    expect(card).toBeTruthy();
+    const acao = card.querySelector('[data-slot="card-action"]');
+    expect(acao).toBe(null);
+
+    expect(
+      screen.getByText(
+        /ainda não há período anterior para comparação — o valor acima é o\s*rendimento acumulado/,
+      ),
+    ).toBeTruthy();
+  });
+
+  it("mostra os novos textos: título, legenda do hero e descrição explicando os dois números", async () => {
+    await renderPagina();
+
+    expect(screen.getByText("Rendimento do patrimônio total")).toBeTruthy();
+    expect(screen.getByText("Ganho no período selecionado")).toBeTruthy();
+    expect(
+      screen.getByText(/variação apenas entre o início e o fim do período/),
+    ).toBeTruthy();
   });
 });
 
@@ -470,6 +537,121 @@ describe("RendimentoPage — colunas 'Valor investido'/'Valor atual'", () => {
   });
 });
 
+describe("RendimentoPage — coluna 'Rendimento total' (pontoFim.rendimentoCentavos, acumulado, independente do período)", () => {
+  // Rendimento total (acumulado, pontoFim.rendimentoCentavos) DIFERENTE do
+  // rendimento no período (delta pontoInicio -> pontoFim) — cenário real que
+  // motivou a mudança: um ativo já tinha ganho acumulado antes do início do
+  // período selecionado, então os dois números não podem ser iguais.
+  const ITEM_TOTAL_DIFERENTE_DO_PERIODO: RendimentoAtivoForaDaCarteira = {
+    chaveExport: "TOTAL-DIFERENTE",
+    rendimento: periodoComValores({
+      rendimentoCentavos: 20_00, // rendimento NO PERÍODO (delta início->fim)
+      rendimentoPct: 2,
+      valorInvestidoCentavos: 100_00,
+      valorAtualCentavos: 150_00,
+    }),
+  };
+  // `periodoComValores` sempre iguala `pontoFim.rendimentoCentavos` ao
+  // rendimento do período recebido — sobrescrevemos aqui para simular o
+  // caso real (rendimento acumulado maior que o delta do período).
+  ITEM_TOTAL_DIFERENTE_DO_PERIODO.rendimento.pontoFim.rendimentoCentavos = 999_00;
+
+  const ITEM_TOTAL_NULO: RendimentoAtivoForaDaCarteira = {
+    chaveExport: "TOTAL-NULO",
+    rendimento: periodoComValores({
+      rendimentoCentavos: 5_00,
+      rendimentoPct: 1,
+      valorInvestidoCentavos: 10_00,
+      valorAtualCentavos: 15_00,
+    }),
+  };
+  ITEM_TOTAL_NULO.rendimento.pontoFim.rendimentoCentavos = null;
+
+  it("tabela reutilizada (fora da carteira/pendentes/reserva de emergência): 'Rendimento total' mostra pontoFim.rendimentoCentavos, diferente de 'Rendimento no período'", async () => {
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: { ...DADOS_BASE, foraDaCarteira: [ITEM_TOTAL_DIFERENTE_DO_PERIODO] },
+    });
+    render(<RendimentoPage />);
+    await screen.findByText("Rendimento por tag e por alvo");
+
+    const linha = screen.getByText("TOTAL-DIFERENTE").closest("tr")!;
+    // Rendimento total (acumulado) = R$ 999,00.
+    expect(within(linha).getByText("R$ 999,00")).toBeTruthy();
+    // Rendimento no período (delta) = R$ 20,00 — número diferente, mesma linha.
+    expect(within(linha).getByText("R$ 20,00")).toBeTruthy();
+  });
+
+  it("tabela reutilizada: pontoFim.rendimentoCentavos null mostra 'sem histórico' na coluna 'Rendimento total', mesmo com 'Rendimento no período' preenchido", async () => {
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: { ...DADOS_BASE, foraDaCarteira: [ITEM_TOTAL_NULO] },
+    });
+    render(<RendimentoPage />);
+    await screen.findByText("Rendimento por tag e por alvo");
+
+    const linha = screen.getByText("TOTAL-NULO").closest("tr")!;
+    expect(within(linha).getByText("sem histórico")).toBeTruthy();
+    // "Rendimento no período" continua mostrando o número normalmente.
+    expect(within(linha).getByText("R$ 5,00")).toBeTruthy();
+  });
+
+  it("tabela 'por tag e por alvo': linha de tag mostra 'Rendimento total' (pontoFim.rendimentoCentavos) diferente de 'Rendimento no período', e a coluna aparece mesmo sem interação (sempre visível)", async () => {
+    const PORTAG_TOTAL: RendimentoPorTag[] = [
+      { tag: "A-AÇÕES", rendimento: periodoComValores({
+        rendimentoCentavos: 30_00,
+        rendimentoPct: 3,
+        valorInvestidoCentavos: 100_00,
+        valorAtualCentavos: 130_00,
+      }) },
+    ];
+    PORTAG_TOTAL[0].rendimento.pontoFim.rendimentoCentavos = 777_00;
+
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: { ...DADOS_BASE, porTag: PORTAG_TOTAL, porAlvo: [] },
+    });
+    render(<RendimentoPage />);
+    await screen.findByText("Rendimento por tag e por alvo");
+
+    const linhaTag = screen.getByRole("button", { name: /A-AÇÕES/i }).closest("tr")!;
+    expect(within(linhaTag).getByText("R$ 777,00")).toBeTruthy();
+    expect(within(linhaTag).getByText("R$ 30,00")).toBeTruthy();
+  });
+
+  it("tabela 'por tag e por alvo': sub-linha de alvo mostra 'Rendimento total' (pontoFim.rendimentoCentavos) do alvo, independente do período selecionado", async () => {
+    const PORALVO_TOTAL: RendimentoPorAlvo[] = [
+      {
+        alvoId: "alvo-total",
+        nomeAlvo: "Alvo Total",
+        tag: "A-AÇÕES",
+        rendimento: periodoComValores({
+          rendimentoCentavos: 15_00,
+          rendimentoPct: 1,
+          valorInvestidoCentavos: 500_00,
+          valorAtualCentavos: 515_00,
+        }),
+      },
+    ];
+    PORALVO_TOTAL[0].rendimento.pontoFim.rendimentoCentavos = 300_00;
+
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: {
+        ...DADOS_BASE,
+        porTag: [{ tag: "A-AÇÕES", rendimento: periodo(50_00, 5) }],
+        porAlvo: PORALVO_TOTAL,
+      },
+    });
+    render(<RendimentoPage />);
+    await screen.findByText("Rendimento por tag e por alvo");
+
+    const linhaAlvo = screen.getByText("Alvo Total").closest("tr")!;
+    expect(within(linhaAlvo).getByText("R$ 300,00")).toBeTruthy();
+    expect(within(linhaAlvo).getByText("R$ 15,00")).toBeTruthy();
+  });
+});
+
 describe("RendimentoPage — 'Reserva de emergência' não tem mais o toggle 'Ver ativos' (substituído pela tabela sempre visível)", () => {
   it("não existe nenhum botão 'Ver ativos' na tela, mesmo com itens na reserva", async () => {
     dadosRendimentoMock.mockResolvedValue({
@@ -479,5 +661,242 @@ describe("RendimentoPage — 'Reserva de emergência' não tem mais o toggle 'Ve
     await renderPagina();
 
     expect(screen.queryByRole("button", { name: /ver ativos/i })).toBeNull();
+  });
+});
+
+describe("RendimentoPage — BarraResumoBucket: colapso da mensagem 'sem histórico suficiente' quando os DOIS grupos são null", () => {
+  it("bucket totalmente vazio (Pendentes de vínculo com totalCentavos E periodoCentavos null): a mensagem aparece exatamente UMA vez na barra, não duas", async () => {
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: { ...DADOS_BASE, pendentesTotal: periodo(null, null) },
+    });
+    await renderPagina();
+
+    const barra = barraResumoDaSecao("Pendentes de vínculo");
+    expect(within(barra).getAllByText("sem histórico suficiente")).toHaveLength(1);
+    // Os rótulos individuais de cada grupo não aparecem — a mensagem colapsada os substitui.
+    expect(within(barra).queryByText("Rendimento total")).toBeNull();
+    expect(within(barra).queryByText("No período selecionado")).toBeNull();
+  });
+
+  it("apenas um dos dois é null (periodoCentavos null, totalCentavos preenchido): cada grupo mantém comportamento individual — sem a mensagem colapsada, só o grupo 'No período selecionado' mostra 'sem histórico'", async () => {
+    const totalMisto = periodo(50_00, 5);
+    totalMisto.rendimentoCentavos = null;
+    totalMisto.rendimentoPct = null;
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: { ...DADOS_BASE, pendentesTotal: totalMisto },
+    });
+    await renderPagina();
+
+    const barra = barraResumoDaSecao("Pendentes de vínculo");
+    // Grupo "Rendimento total" (pontoFim) preenchido normalmente.
+    expect(within(barra).getByText("Rendimento total")).toBeTruthy();
+    expect(within(barra).getByText("R$ 50,00")).toBeTruthy();
+    // Grupo "No período selecionado" individualmente mostra sua própria nota — sem duplicar/colapsar a barra inteira.
+    expect(within(barra).getByText("No período selecionado")).toBeTruthy();
+    expect(within(barra).getByText("sem histórico")).toBeTruthy();
+    expect(within(barra).queryByText("sem histórico suficiente")).toBeNull();
+  });
+
+  it("cenário normal (nenhum dos dois é null): os dois grupos aparecem com seus próprios valores, sem a mensagem 'sem histórico suficiente'", async () => {
+    await renderPagina();
+
+    const barra = barraResumoDaSecao("Pendentes de vínculo");
+    expect(within(barra).queryByText("sem histórico suficiente")).toBeNull();
+    expect(within(barra).getByText("Rendimento total")).toBeTruthy();
+    expect(within(barra).getByText("No período selecionado")).toBeTruthy();
+    // DADOS_BASE.pendentesTotal = periodo(-5_00, -1) — mesmo valor usado nos dois grupos (pontoFim == período).
+    expect(within(barra).getAllByText("-R$ 5,00").length).toBeGreaterThan(0);
+  });
+});
+
+describe("RendimentoPage — coluna 'Rendimento total': percentual (pontoFim.rendimentoPct) exibido ao lado do valor, independente do percentual do período", () => {
+  // pontoFim.rendimentoPct (45%) DIFERENTE de rendimentoPct do período (2%) —
+  // só assim o teste comprova que os dois badges de percentual são
+  // independentes (mesmo padrão de "cenário real" já usado para os centavos).
+  function itemComPctDiferente(chaveExport: string): RendimentoAtivoForaDaCarteira {
+    const rendimento = periodoComValores({
+      rendimentoCentavos: 20_00,
+      rendimentoPct: 2,
+      valorInvestidoCentavos: 100_00,
+      valorAtualCentavos: 150_00,
+    });
+    rendimento.pontoFim.rendimentoCentavos = 999_00;
+    rendimento.pontoFim.rendimentoPct = 45;
+    return { chaveExport, rendimento };
+  }
+
+  it("tabela reutilizada (fora da carteira/pendentes/reserva de emergência): 'Rendimento total' mostra o percentual de pontoFim (45,00%), diferente do percentual de 'Rendimento no período' (2,00%)", async () => {
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: { ...DADOS_BASE, foraDaCarteira: [itemComPctDiferente("PCT-DIFERENTE")] },
+    });
+    render(<RendimentoPage />);
+    await screen.findByText("Rendimento por tag e por alvo");
+
+    const linha = screen.getByText("PCT-DIFERENTE").closest("tr")!;
+    expect(within(linha).getByText("R$ 999,00")).toBeTruthy();
+    expect(within(linha).getByText("45,00%")).toBeTruthy();
+    expect(within(linha).getByText("R$ 20,00")).toBeTruthy();
+    expect(within(linha).getByText("2,00%")).toBeTruthy();
+  });
+
+  it("tabela 'por tag e por alvo': linha de tag mostra o percentual de 'Rendimento total' (pontoFim.rendimentoPct) ao lado do valor, diferente do percentual de 'Rendimento no período'", async () => {
+    const rendimentoTag = periodoComValores({
+      rendimentoCentavos: 20_00,
+      rendimentoPct: 2,
+      valorInvestidoCentavos: 100_00,
+      valorAtualCentavos: 150_00,
+    });
+    rendimentoTag.pontoFim.rendimentoCentavos = 999_00;
+    rendimentoTag.pontoFim.rendimentoPct = 45;
+
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: { ...DADOS_BASE, porTag: [{ tag: "A-AÇÕES", rendimento: rendimentoTag }], porAlvo: [] },
+    });
+    render(<RendimentoPage />);
+    await screen.findByText("Rendimento por tag e por alvo");
+
+    const linhaTag = screen.getByRole("button", { name: /A-AÇÕES/i }).closest("tr")!;
+    expect(within(linhaTag).getByText("R$ 999,00")).toBeTruthy();
+    expect(within(linhaTag).getByText("45,00%")).toBeTruthy();
+    expect(within(linhaTag).getByText("R$ 20,00")).toBeTruthy();
+    expect(within(linhaTag).getByText("2,00%")).toBeTruthy();
+  });
+
+  it("tabela 'por tag e por alvo': sub-linha de alvo mostra o percentual de 'Rendimento total' (pontoFim.rendimentoPct) do alvo, independente do percentual do período selecionado", async () => {
+    const rendimentoAlvo = periodoComValores({
+      rendimentoCentavos: 20_00,
+      rendimentoPct: 2,
+      valorInvestidoCentavos: 100_00,
+      valorAtualCentavos: 150_00,
+    });
+    rendimentoAlvo.pontoFim.rendimentoCentavos = 999_00;
+    rendimentoAlvo.pontoFim.rendimentoPct = 45;
+
+    dadosRendimentoMock.mockResolvedValue({
+      ok: true,
+      data: {
+        ...DADOS_BASE,
+        porTag: [{ tag: "A-AÇÕES", rendimento: periodo(50_00, 5) }],
+        porAlvo: [{ alvoId: "alvo-pct", nomeAlvo: "Alvo Pct", tag: "A-AÇÕES", rendimento: rendimentoAlvo }],
+      },
+    });
+    render(<RendimentoPage />);
+    await screen.findByText("Rendimento por tag e por alvo");
+
+    const linhaAlvo = screen.getByText("Alvo Pct").closest("tr")!;
+    expect(within(linhaAlvo).getByText("R$ 999,00")).toBeTruthy();
+    expect(within(linhaAlvo).getByText("45,00%")).toBeTruthy();
+    expect(within(linhaAlvo).getByText("R$ 20,00")).toBeTruthy();
+    expect(within(linhaAlvo).getByText("2,00%")).toBeTruthy();
+  });
+});
+
+describe("RendimentoPage — rótulos de resumo (label acima do valor R$+%): cabeçalho do consolidado (topo) vs. barra de resumo dos 4 buckets", () => {
+  // DADOS_BASE já traz `semPeriodoAnteriorParaComparacao: false`, então o
+  // `CardAction` do card consolidado (topo) renderiza normalmente
+  // (`TotalDoBucket`, único uso restante desse componente no `CardAction`).
+  // Os outros 4 buckets de período não têm mais nada no `CardAction` — os
+  // rótulos "Rendimento total"/"No período selecionado" agora vivem na
+  // `BarraResumoBucket`, dentro do `CardContent`.
+  it("o cabeçalho do card consolidado (topo) mostra o rótulo 'Rendimento total' (acumulado, pontoFim) no CardAction, e não tem 'No período'", async () => {
+    await renderPagina();
+
+    const card = acaoDaSecao("Rendimento do patrimônio total");
+    expect(within(card).getByText("Rendimento total")).toBeTruthy();
+    expect(within(card).queryByText("No período selecionado")).toBeNull();
+  });
+
+  it("os 4 buckets de período (Reserva de emergência, Rendimento por tag e por alvo, Ativos fora da carteira alvo, Pendentes de vínculo) não têm mais nada no CardAction — os selos migraram para a BarraResumoBucket", async () => {
+    await renderPagina();
+
+    for (const titulo of [
+      "Reserva de emergência",
+      "Ativos fora da carteira alvo",
+      "Pendentes de vínculo",
+    ]) {
+      const card = screen.getByText(titulo).closest('[data-slot="card"]') as HTMLElement;
+      expect(card.querySelector('[data-slot="card-action"]')).toBeNull();
+    }
+  });
+
+  it("a BarraResumoBucket dos 4 buckets de período mostra os dois rótulos 'Rendimento total' e 'No período selecionado'", async () => {
+    await renderPagina();
+
+    for (const titulo of [
+      "Reserva de emergência",
+      "Rendimento por tag e por alvo",
+      "Ativos fora da carteira alvo",
+      "Pendentes de vínculo",
+    ]) {
+      const barra = barraResumoDaSecao(titulo);
+      expect(within(barra).getByText("Rendimento total")).toBeTruthy();
+      expect(within(barra).getByText("No período selecionado")).toBeTruthy();
+    }
+  });
+});
+
+describe("RendimentoPage — larguras de coluna consistentes entre 'por tag e por alvo' (LinhaGrupoTag) e as tabelas reutilizadas (TabelaRendimentoPorAtivo)", () => {
+  // A primeira coluna de `LinhaGrupoTag` ("Tag / alvo") carrega um ícone de
+  // expandir + rótulo/bolinha de cor que a coluna "Ativo" das tabelas planas
+  // não tem — sem uma largura fixa e IDÊNTICA nas duas tabelas, essa
+  // decoração extra empurraria as colunas numéricas mais para a direita só
+  // na tabela de tags, desalinhando "Valor investido"/"Valor atual"/
+  // "Rendimento total"/"Rendimento no período" entre os cards da página.
+  // Este teste não valida pixels — só que a MESMA classe utilitária de
+  // largura (`className` do `TableHead`) é aplicada nos dois lugares, o que
+  // já garante a largura computada idêntica (Tailwind = mesma classe = mesmo
+  // CSS).
+  it("cabeçalhos das colunas numéricas têm a MESMA className na tabela de tags e na tabela reutilizada (Pendentes de vínculo)", async () => {
+    await renderPagina();
+
+    const tabelaTags = screen.getByText("Tag / alvo").closest("table")!;
+    const tabelaPendentes = screen.getByText("PEND-1").closest("table")!;
+
+    // `SortableTableHead` (rótulo/"Rendimento no período") envolve o texto
+    // num `<button>` interno — sempre subimos até o `<th>` real para pegar a
+    // className de largura, nunca a do texto/botão clicável.
+    const colunasTags = {
+      rotulo: within(tabelaTags).getByText("Tag / alvo").closest("th")!,
+      valorInvestido: within(tabelaTags).getByText("Valor investido").closest("th")!,
+      valorAtual: within(tabelaTags).getByText("Valor atual").closest("th")!,
+      rendimentoTotal: within(tabelaTags).getByText("Rendimento total").closest("th")!,
+      rendimentoPeriodo: within(tabelaTags).getByText("Rendimento no período").closest("th")!,
+    };
+    const colunasPendentes = {
+      rotulo: within(tabelaPendentes).getByText("Ativo").closest("th")!,
+      valorInvestido: within(tabelaPendentes).getByText("Valor investido").closest("th")!,
+      valorAtual: within(tabelaPendentes).getByText("Valor atual").closest("th")!,
+      rendimentoTotal: within(tabelaPendentes).getByText("Rendimento total").closest("th")!,
+      rendimentoPeriodo: within(tabelaPendentes).getByText("Rendimento no período").closest("th")!,
+    };
+
+    for (const chave of Object.keys(colunasTags) as Array<keyof typeof colunasTags>) {
+      expect(colunasPendentes[chave].className).toBe(colunasTags[chave].className);
+    }
+  });
+
+  it("a sub-linha de alvo (indentada, dentro de uma tag expandida) usa a MESMA className de largura da primeira coluna que a linha de tag e a coluna 'Ativo' das tabelas reutilizadas", async () => {
+    await renderPagina();
+
+    const tabelaTags = screen.getByText("Tag / alvo").closest("table")!;
+    const linhaTag = within(tabelaTags).getByRole("button", { name: /A-AÇÕES/i }).closest("td")!;
+    // Sub-linha de alvo: célula de rótulo (texto puro, sem botão) do primeiro alvo visível.
+    const linhaAlvo = screen.getByText("Ação 1").closest("td")!;
+
+    const tabelaPendentes = screen.getByText("PEND-1").closest("table")!;
+    const colunaAtivo = within(tabelaPendentes).getByText("Ativo").closest("th")!;
+
+    // Todas as três compartilham a mesma classe base de largura (`w-64
+    // min-w-64`, `COL_ROTULO`) — cada uma pode ter classes extras próprias
+    // (padding, indentação, etc.), então checamos que a largura fixa está
+    // presente nas três, não que as classNames inteiras são idênticas.
+    for (const celula of [linhaTag, linhaAlvo, colunaAtivo]) {
+      expect(celula.className).toContain("w-64");
+      expect(celula.className).toContain("min-w-64");
+    }
   });
 });

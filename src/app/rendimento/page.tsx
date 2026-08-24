@@ -314,31 +314,7 @@ function CelulaValor({ centavos, className }: { centavos: number | null; classNa
   );
 }
 
-/** Célula de tabela com o percentual (ganho sobre capital investido), ícone ▲/▼/— + cor, nota quando `null` (FR-010). */
-function CelulaPercentual({ pct, className }: { pct: number | null; className?: string }) {
-  if (pct === null) {
-    return <span className="text-xs whitespace-normal italic text-muted-foreground">sem histórico</span>;
-  }
-  const zero = pct === 0;
-  const positivo = pct > 0;
-  const cor = zero ? undefined : positivo ? CHART_COLORS.statusGood : CHART_COLORS.statusCritical;
-  const Icone = zero ? Minus : positivo ? TrendingUp : TrendingDown;
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 tabular-nums",
-        zero && "text-muted-foreground/50",
-        className,
-      )}
-      style={cor ? { color: cor } : undefined}
-    >
-      <Icone className="size-3.5 shrink-0" aria-hidden />
-      {formatPercentual(pct)}
-    </span>
-  );
-}
-
-/** Pill de tendência para destaques fora de tabela (hero consolidado, faixa da reserva de emergência) — mesma semântica de `CelulaPercentual`, maior. */
+/** Pill de tendência (ícone ▲/▼/— + cor), usado tanto fora de tabela (hero consolidado, faixa da reserva de emergência) quanto dentro de `CelulaRendimento`. */
 function BadgeTendencia({ pct }: { pct: number }) {
   const zero = pct === 0;
   const positivo = pct > 0;
@@ -359,7 +335,7 @@ function BadgeTendencia({ pct }: { pct: number }) {
  * Célula de tabela com um valor ABSOLUTO (não ganho/perda) — "Valor
  * investido"/"Valor atual" das colunas novas de todas as tabelas de
  * ativo/alvo/tag. Cor neutra de propósito (nunca verde/vermelho de
- * `CelulaValor`/`CelulaPercentual`): essa semântica de status é exclusiva do
+ * `CelulaValor`/`CelulaRendimento`): essa semântica de status é exclusiva do
  * RENDIMENTO, não de um valor bruto. Mesmo tratamento "sem histórico"
  * (itálico/muted) de `CelulaValor` quando `centavos` é `null` (FR-010).
  */
@@ -373,27 +349,139 @@ function CelulaValorAbsoluto({ centavos, className }: { centavos: number | null;
 }
 
 /**
- * "R$ grande + badge de tendência" reutilizado no cabeçalho (`CardAction`)
- * das 4 seções de bucket (reserva de emergência, tags/alvos, fora da
- * carteira, pendentes) — extraído para não duplicar o mesmo JSX quatro vezes
- * (redesenho de UX, unificação visual pedida pelo usuário). `null` = "sem
- * histórico suficiente" no bucket inteiro (FR-010), mesma nota textual usada
- * antes só pela reserva de emergência.
+ * Célula de tabela fundindo um rendimento em R$ e o percentual associado —
+ * mesma composição de `CelulaValor` + `BadgeTendencia` lado a lado já usada
+ * em `TotalDoBucket`/`ValorHero`, reaplicada dentro de uma célula (redesenho
+ * pedido pelo usuário para não duplicar a granularidade de ordenação em duas
+ * colunas quase idênticas). Genérica o bastante para as colunas "Rendimento
+ * total" (`pontoFim.rendimentoCentavos`/`rendimentoPct`) E "Rendimento no
+ * período" (`rendimento.rendimentoCentavos`/`rendimentoPct`) — só muda a
+ * fonte do dado passada pelo chamador, nunca a composição visual. `null` =
+ * "sem histórico" (FR-010), mesma nota textual de `CelulaValor`.
+ */
+function CelulaRendimento({
+  centavos,
+  pct,
+  className,
+}: {
+  centavos: number | null;
+  pct: number | null;
+  className?: string;
+}) {
+  if (centavos === null) {
+    return <span className="text-xs whitespace-normal italic text-muted-foreground">sem histórico</span>;
+  }
+  return (
+    <div className="flex items-center justify-end gap-3">
+      <CelulaValor centavos={centavos} className={className} />
+      {pct !== null && <BadgeTendencia pct={pct} />}
+    </div>
+  );
+}
+
+/**
+ * "R$ grande + badge de tendência" usado no cabeçalho (`CardAction`) do card
+ * consolidado do topo (`CardConsolidado`) — os outros 4 buckets (reserva de
+ * emergência, tags/alvos, fora da carteira, pendentes) usam
+ * `BarraResumoBucket`/`GrupoResumoBucket` (faixa de resumo dedicada dentro do
+ * `CardContent`, não mais no `CardAction`), para não misturar visualmente
+ * com as pills das linhas da tabela logo abaixo. `null` = "sem histórico
+ * suficiente" (FR-010).
  */
 function TotalDoBucket({
   rendimentoCentavos,
   rendimentoPct,
+  label,
 }: {
   rendimentoCentavos: number | null;
   rendimentoPct: number | null;
+  /** Rótulo curto exibido acima do valor — o card consolidado usa "Rendimento total" (acumulado, `pontoFim`). */
+  label: string;
 }) {
   if (rendimentoCentavos === null) {
     return <span className="text-xs italic text-muted-foreground">sem histórico suficiente</span>;
   }
   return (
-    <div className="flex items-center gap-3">
-      <CelulaValor centavos={rendimentoCentavos} className="text-lg" />
-      {rendimentoPct !== null && <BadgeTendencia pct={rendimentoPct} />}
+    <div className="flex flex-col items-end gap-1">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-3">
+        <CelulaValor centavos={rendimentoCentavos} className="text-lg" />
+        {rendimentoPct !== null && <BadgeTendencia pct={rendimentoPct} />}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Barra de resumo dedicada, largura total do card, posicionada entre a
+ * descrição e a tabela (dentro do `CardContent`) das 4 seções de bucket
+ * (reserva de emergência, tags/alvos, fora da carteira, pendentes) —
+ * substitui o antigo par de selos (`TotalDoBucket`) que ficava espremido no
+ * `CardAction` ao lado do título, misturando-se visualmente com as pills das
+ * linhas da tabela logo abaixo. Fundo levemente destacado (`bg-muted/30`,
+ * mesma família de tons já usada na página — ver `bg-muted/40`/`bg-muted/20`
+ * em `LinhaGrupoTag`/`BadgeTendencia`) com um divisor entre os dois grupos de
+ * estatística ("Rendimento total" à esquerda, "No período selecionado" à
+ * direita), rótulo pequeno/uppercase acima de cada número, e números maiores
+ * (`text-xl`) do que as células da tabela — hierarquia visual clara entre
+ * "isto é um resumo" e "isto é uma linha de dado". Reaproveita
+ * `CelulaValor`/`BadgeTendencia` para a formatação — só o container/layout é
+ * novo.
+ *
+ * Mesma regra de colapso de antes: quando total E período são ambos `null`,
+ * mostra "sem histórico suficiente" uma única vez, centralizado na barra, em
+ * vez de duplicar a nota nos dois grupos.
+ */
+function BarraResumoBucket({
+  totalCentavos,
+  totalPct,
+  periodoCentavos,
+  periodoPct,
+}: {
+  totalCentavos: number | null;
+  totalPct: number | null;
+  periodoCentavos: number | null;
+  periodoPct: number | null;
+}) {
+  if (totalCentavos === null && periodoCentavos === null) {
+    return (
+      <div data-slot="barra-resumo-bucket" className="rounded-lg bg-muted/30 px-4 py-3 text-center">
+        <span className="text-xs italic text-muted-foreground">sem histórico suficiente</span>
+      </div>
+    );
+  }
+  return (
+    <div
+      data-slot="barra-resumo-bucket"
+      className="flex flex-col divide-y divide-border rounded-lg bg-muted/30 sm:flex-row sm:divide-x sm:divide-y-0"
+    >
+      <GrupoResumoBucket label="Rendimento total" centavos={totalCentavos} pct={totalPct} />
+      <GrupoResumoBucket label="No período selecionado" centavos={periodoCentavos} pct={periodoPct} />
+    </div>
+  );
+}
+
+/** Um dos dois grupos de estatística dentro de `BarraResumoBucket` — extraído para não duplicar o layout "rótulo em cima, valor+badge embaixo" duas vezes. */
+function GrupoResumoBucket({
+  label,
+  centavos,
+  pct,
+}: {
+  label: string;
+  centavos: number | null;
+  pct: number | null;
+}) {
+  return (
+    <div className="flex flex-1 flex-col gap-1 px-4 py-3">
+      <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{label}</span>
+      {centavos === null ? (
+        <span className="text-xs italic text-muted-foreground">sem histórico</span>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3">
+          <CelulaValor centavos={centavos} className="text-xl" />
+          {pct !== null && <BadgeTendencia pct={pct} />}
+        </div>
+      )}
     </div>
   );
 }
@@ -425,7 +513,7 @@ function ValorHero({ rendimento }: { rendimento: RendimentoPeriodo }) {
         </span>
         {rendimento.rendimentoPct !== null && <BadgeTendencia pct={rendimento.rendimentoPct} />}
       </div>
-      <span className="text-xs text-muted-foreground">Ganho sobre capital investido</span>
+      <span className="text-xs text-muted-foreground">Ganho no período selecionado</span>
     </div>
   );
 }
@@ -448,19 +536,30 @@ function CardConsolidado({ dados }: { dados: RendimentoOutput }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Rendimento consolidado do patrimônio total</CardTitle>
+        <CardTitle>Rendimento do patrimônio total</CardTitle>
         <CardDescription>
-          Variação de valor entre o início e o fim do período selecionado, considerando
-          todo o patrimônio (na carteira alvo, fora da carteira, reserva de emergência e
-          pendentes de vínculo com dado disponível).
+          O número abaixo mostra a variação apenas entre o início e o fim do período
+          selecionado acima. O rendimento total acumulado (independente do período)
+          aparece ao lado do título.
         </CardDescription>
+        {!dados.semPeriodoAnteriorParaComparacao && (
+          <CardAction>
+            <TotalDoBucket
+              rendimentoCentavos={dados.consolidado.pontoFim.rendimentoCentavos}
+              rendimentoPct={dados.consolidado.pontoFim.rendimentoPct}
+              label="Rendimento total"
+            />
+          </CardAction>
+        )}
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
         <ValorHero rendimento={dados.consolidado} />
         {dados.semPeriodoAnteriorParaComparacao && (
           <p className="text-xs text-muted-foreground">
             Nota: ainda não há período anterior para comparação — o valor acima é o
-            rendimento acumulado desde a única sessão de import disponível.
+            rendimento acumulado desde a única sessão de import disponível (por isso
+            coincide com o que seria o &quot;rendimento total&quot;, omitido aqui para não
+            duplicar o número).
           </p>
         )}
       </CardContent>
@@ -533,14 +632,17 @@ function SecaoReservaEmergenciaComDados({ dados }: { dados: RendimentoOutput }) 
         <CardTitle>Reserva de emergência</CardTitle>
         <CardDescription>
           Ativos/posições marcados como reserva de emergência, no período selecionado acima —
-          o total ao lado é o agregado do bucket, nunca somado a nenhum outro (fora da
+          o resumo abaixo é o agregado do bucket, nunca somado a nenhum outro (fora da
           carteira, tag/alvo ou pendentes).
         </CardDescription>
-        <CardAction>
-          <TotalDoBucket rendimentoCentavos={r.rendimentoCentavos} rendimentoPct={r.rendimentoPct} />
-        </CardAction>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <BarraResumoBucket
+          totalCentavos={r.pontoFim.rendimentoCentavos}
+          totalPct={r.pontoFim.rendimentoPct}
+          periodoCentavos={r.rendimentoCentavos}
+          periodoPct={r.rendimentoPct}
+        />
         {itens.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             Nenhum ativo marcado como reserva de emergência.
@@ -552,6 +654,19 @@ function SecaoReservaEmergenciaComDados({ dados }: { dados: RendimentoOutput }) 
     </Card>
   );
 }
+
+// Larguras fixas e IDÊNTICAS entre `LinhaGrupoTag` (tabela "por tag e por
+// alvo") e `TabelaRendimentoPorAtivo` (tabela usada por reserva de
+// emergência/fora da carteira/pendentes) — sem isso, o ícone de expandir +
+// bolinha da tag (primeira coluna de `LinhaGrupoTag`) empurra as colunas
+// numéricas mais para a direita do que a coluna "Ativo" (texto puro) das
+// outras tabelas, desalinhando visualmente "Valor investido"/"Valor atual"/
+// "Rendimento total"/"Rendimento no período" entre um card e outro na mesma
+// página. A indentação/ícone/bolinha da tag cabem DENTRO da largura
+// reservada da primeira coluna, sem empurrar as colunas seguintes.
+const COL_ROTULO = "w-64 min-w-64";
+const COL_VALOR_ABSOLUTO = "w-36 min-w-36";
+const COL_RENDIMENTO = "w-64 min-w-64";
 
 const CHAVE_SEM_TAG = "__sem_tag__";
 
@@ -581,7 +696,6 @@ function SecaoTagsEAlvosComDados({ dados }: { dados: RendimentoOutput }) {
 
   const gruposOrdenados = useSortableRows(dados.porTag, {
     rendimentoCentavos: (t) => t.rendimento.rendimentoCentavos ?? Number.NEGATIVE_INFINITY,
-    rendimentoPct: (t) => t.rendimento.rendimentoPct ?? Number.NEGATIVE_INFINITY,
   });
 
   // Conjunto de grupos RECOLHIDOS (default vazio = tudo expandido no
@@ -613,11 +727,7 @@ function SecaoTagsEAlvosComDados({ dados }: { dados: RendimentoOutput }) {
           Rendimento agrupado por tag da carteira alvo e, dentro de cada tag, o rendimento
           de cada alvo individualmente. Clique numa linha para expandir os alvos da tag.
         </CardDescription>
-        <CardAction className="flex items-center gap-4">
-          <TotalDoBucket
-            rendimentoCentavos={dados.carteiraAlvoTotal.rendimentoCentavos}
-            rendimentoPct={dados.carteiraAlvoTotal.rendimentoPct}
-          />
+        <CardAction>
           <Button
             variant="outline"
             size="sm"
@@ -627,26 +737,26 @@ function SecaoTagsEAlvosComDados({ dados }: { dados: RendimentoOutput }) {
           </Button>
         </CardAction>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <BarraResumoBucket
+          totalCentavos={dados.carteiraAlvoTotal.pontoFim.rendimentoCentavos}
+          totalPct={dados.carteiraAlvoTotal.pontoFim.rendimentoPct}
+          periodoCentavos={dados.carteiraAlvoTotal.rendimentoCentavos}
+          periodoPct={dados.carteiraAlvoTotal.rendimentoPct}
+        />
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Tag / alvo</TableHead>
-              <TableHead className="text-right">Valor investido</TableHead>
-              <TableHead className="text-right">Valor atual</TableHead>
+              <TableHead className={COL_ROTULO}>Tag / alvo</TableHead>
+              <TableHead className={cn(COL_VALOR_ABSOLUTO, "text-right")}>Valor investido</TableHead>
+              <TableHead className={cn(COL_VALOR_ABSOLUTO, "text-right")}>Valor atual</TableHead>
+              <TableHead className={cn(COL_RENDIMENTO, "text-right")}>Rendimento total</TableHead>
               <SortableTableHead
-                className="text-right"
+                className={cn(COL_RENDIMENTO, "text-right")}
                 sortDirection={gruposOrdenados.sortDirectionFor("rendimentoCentavos")}
                 onSort={() => gruposOrdenados.toggleSort("rendimentoCentavos")}
               >
-                Rendimento em R$
-              </SortableTableHead>
-              <SortableTableHead
-                className="text-right"
-                sortDirection={gruposOrdenados.sortDirectionFor("rendimentoPct")}
-                onSort={() => gruposOrdenados.toggleSort("rendimentoPct")}
-              >
-                Ganho sobre capital investido
+                Rendimento no período
               </SortableTableHead>
             </TableRow>
           </TableHeader>
@@ -684,10 +794,9 @@ function SecaoTagsEAlvosComDados({ dados }: { dados: RendimentoOutput }) {
 /** Accessors de ordenação por rendimento — mesmo critério reaplicado às linhas de tag (nível 1) e aos alvos dentro de cada tag (nível 2), nunca duplicado (helper reusado por `LinhaGrupoTag`). */
 const ACCESSORS_RENDIMENTO_ALVO = {
   rendimentoCentavos: (a: RendimentoPorAlvo) => a.rendimento.rendimentoCentavos ?? Number.NEGATIVE_INFINITY,
-  rendimentoPct: (a: RendimentoPorAlvo) => a.rendimento.rendimentoPct ?? Number.NEGATIVE_INFINITY,
 };
 
-type SortKeyRendimento = "rendimentoCentavos" | "rendimentoPct";
+type SortKeyRendimento = "rendimentoCentavos";
 
 /**
  * Uma linha de grupo (tag, ou "Sem tag") + suas sub-linhas de alvo quando
@@ -696,7 +805,7 @@ type SortKeyRendimento = "rendimentoCentavos" | "rendimentoPct";
  * colunas de R$/% mostram "—" em vez de um número inventado.
  *
  * `sortKey`/`sortDirection`: MESMO critério ativo nos cabeçalhos "Rendimento
- * em R$"/"Ganho sobre capital investido" da tabela de tags (nível 1) —
+ * no período"/"Ganho no período" da tabela de tags (nível 1) —
  * reaplicado aqui aos alvos dentro do grupo (nível 2) via `ordenarLinhas`
  * (nunca uma segunda função de comparação duplicada), para que clicar num
  * cabeçalho reordene tags E os alvos dentro de cada tag expandida juntos.
@@ -731,7 +840,7 @@ function LinhaGrupoTag({
   return (
     <>
       <TableRow className="border-t-2 border-border bg-muted/40 hover:bg-muted/50">
-        <TableCell className="py-3">
+        <TableCell className={cn(COL_ROTULO, "py-3")}>
           <button
             type="button"
             aria-expanded={expandido}
@@ -748,17 +857,17 @@ function LinhaGrupoTag({
             {rotulo}
           </button>
         </TableCell>
-        <TableCell className="py-3 text-right">
+        <TableCell className={cn(COL_VALOR_ABSOLUTO, "py-3 text-right")}>
           {rendimento ? (
             <CelulaValorAbsoluto
-              centavos={rendimento.pontoInicio.valorInvestidoCentavos}
+              centavos={rendimento.pontoFim.valorInvestidoCentavos}
               className="font-semibold"
             />
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
         </TableCell>
-        <TableCell className="py-3 text-right">
+        <TableCell className={cn(COL_VALOR_ABSOLUTO, "py-3 text-right")}>
           {rendimento ? (
             <CelulaValorAbsoluto
               centavos={rendimento.pontoFim.valorAtualCentavos}
@@ -768,16 +877,24 @@ function LinhaGrupoTag({
             <span className="text-muted-foreground">—</span>
           )}
         </TableCell>
-        <TableCell className="py-3 text-right">
+        <TableCell className={cn(COL_RENDIMENTO, "py-3 text-right")}>
           {rendimento ? (
-            <CelulaValor centavos={rendimento.rendimentoCentavos} className="font-semibold" />
+            <CelulaRendimento
+              centavos={rendimento.pontoFim.rendimentoCentavos}
+              pct={rendimento.pontoFim.rendimentoPct}
+              className="font-semibold"
+            />
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
         </TableCell>
-        <TableCell className="py-3 text-right">
+        <TableCell className={cn(COL_RENDIMENTO, "py-3 text-right")}>
           {rendimento ? (
-            <CelulaPercentual pct={rendimento.rendimentoPct} className="font-semibold" />
+            <CelulaRendimento
+              centavos={rendimento.rendimentoCentavos}
+              pct={rendimento.rendimentoPct}
+              className="font-semibold"
+            />
           ) : (
             <span className="text-muted-foreground">—</span>
           )}
@@ -795,24 +912,34 @@ function LinhaGrupoTag({
       {expandido &&
         alvosOrdenados.map((alvo) => (
           <TableRow key={alvo.alvoId} className="bg-muted/20">
-            <TableCell className="pl-9 text-xs text-muted-foreground">{alvo.nomeAlvo}</TableCell>
-            <TableCell className="text-right">
+            <TableCell className={cn(COL_ROTULO, "pl-9 text-xs text-muted-foreground")}>
+              {alvo.nomeAlvo}
+            </TableCell>
+            <TableCell className={cn(COL_VALOR_ABSOLUTO, "text-right")}>
               <CelulaValorAbsoluto
-                centavos={alvo.rendimento.pontoInicio.valorInvestidoCentavos}
+                centavos={alvo.rendimento.pontoFim.valorInvestidoCentavos}
                 className="text-sm"
               />
             </TableCell>
-            <TableCell className="text-right">
+            <TableCell className={cn(COL_VALOR_ABSOLUTO, "text-right")}>
               <CelulaValorAbsoluto
                 centavos={alvo.rendimento.pontoFim.valorAtualCentavos}
                 className="text-sm"
               />
             </TableCell>
-            <TableCell className="text-right">
-              <CelulaValor centavos={alvo.rendimento.rendimentoCentavos} className="text-sm" />
+            <TableCell className={cn(COL_RENDIMENTO, "text-right")}>
+              <CelulaRendimento
+                centavos={alvo.rendimento.pontoFim.rendimentoCentavos}
+                pct={alvo.rendimento.pontoFim.rendimentoPct}
+                className="text-sm"
+              />
             </TableCell>
-            <TableCell className="text-right">
-              <CelulaPercentual pct={alvo.rendimento.rendimentoPct} className="text-xs" />
+            <TableCell className={cn(COL_RENDIMENTO, "text-right")}>
+              <CelulaRendimento
+                centavos={alvo.rendimento.rendimentoCentavos}
+                pct={alvo.rendimento.rendimentoPct}
+                className="text-sm"
+              />
             </TableCell>
           </TableRow>
         ))}
@@ -847,11 +974,14 @@ function TabelaAtivosFlat({
         <CardHeader>
           <CardTitle>{titulo}</CardTitle>
           <CardDescription>{descricao}</CardDescription>
-          <CardAction>
-            <TotalDoBucket rendimentoCentavos={total.rendimentoCentavos} rendimentoPct={total.rendimentoPct} />
-          </CardAction>
         </CardHeader>
-        <CardContent>
+        <CardContent className="flex flex-col gap-4">
+          <BarraResumoBucket
+            totalCentavos={total.pontoFim.rendimentoCentavos}
+            totalPct={total.pontoFim.rendimentoPct}
+            periodoCentavos={total.rendimentoCentavos}
+            periodoPct={total.rendimentoPct}
+          />
           <p className="text-sm text-muted-foreground">{mensagemVazio}</p>
         </CardContent>
       </Card>
@@ -877,11 +1007,14 @@ function TabelaAtivosFlatComItens({
       <CardHeader>
         <CardTitle>{titulo}</CardTitle>
         <CardDescription>{descricao}</CardDescription>
-        <CardAction>
-          <TotalDoBucket rendimentoCentavos={total.rendimentoCentavos} rendimentoPct={total.rendimentoPct} />
-        </CardAction>
       </CardHeader>
-      <CardContent>
+      <CardContent className="flex flex-col gap-4">
+        <BarraResumoBucket
+          totalCentavos={total.pontoFim.rendimentoCentavos}
+          totalPct={total.pontoFim.rendimentoPct}
+          periodoCentavos={total.rendimentoCentavos}
+          periodoPct={total.rendimentoPct}
+        />
         <TabelaRendimentoPorAtivo itens={itens} />
       </CardContent>
     </Card>
@@ -912,7 +1045,6 @@ function TabelaRendimentoPorAtivo({ itens }: { itens: RendimentoAtivoForaDaCarte
   const ordenados = useSortableRows(itensNaOrdemPadrao, {
     ativo: (i) => i.chaveExport,
     rendimentoCentavos: (i) => i.rendimento.rendimentoCentavos ?? Number.NEGATIVE_INFINITY,
-    rendimentoPct: (i) => i.rendimento.rendimentoPct ?? Number.NEGATIVE_INFINITY,
   });
 
   return (
@@ -920,46 +1052,47 @@ function TabelaRendimentoPorAtivo({ itens }: { itens: RendimentoAtivoForaDaCarte
       <TableHeader>
         <TableRow>
           <SortableTableHead
+            className={COL_ROTULO}
             sortDirection={ordenados.sortDirectionFor("ativo")}
             onSort={() => ordenados.toggleSort("ativo")}
           >
             Ativo
           </SortableTableHead>
-          <TableHead className="text-right">Valor investido</TableHead>
-          <TableHead className="text-right">Valor atual</TableHead>
+          <TableHead className={cn(COL_VALOR_ABSOLUTO, "text-right")}>Valor investido</TableHead>
+          <TableHead className={cn(COL_VALOR_ABSOLUTO, "text-right")}>Valor atual</TableHead>
+          <TableHead className={cn(COL_RENDIMENTO, "text-right")}>Rendimento total</TableHead>
           <SortableTableHead
-            className="text-right"
+            className={cn(COL_RENDIMENTO, "text-right")}
             sortDirection={ordenados.sortDirectionFor("rendimentoCentavos")}
             onSort={() => ordenados.toggleSort("rendimentoCentavos")}
           >
-            Rendimento em R$
-          </SortableTableHead>
-          <SortableTableHead
-            className="text-right"
-            sortDirection={ordenados.sortDirectionFor("rendimentoPct")}
-            onSort={() => ordenados.toggleSort("rendimentoPct")}
-          >
-            Ganho sobre capital investido
+            Rendimento no período
           </SortableTableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {ordenados.sortedRows.map((item) => (
           <TableRow key={item.chaveExport}>
-            <TableCell className="max-w-[200px] truncate font-medium" title={item.chaveExport}>
+            <TableCell className={cn(COL_ROTULO, "max-w-64 truncate font-medium")} title={item.chaveExport}>
               {item.chaveExport}
             </TableCell>
-            <TableCell className="text-right">
-              <CelulaValorAbsoluto centavos={item.rendimento.pontoInicio.valorInvestidoCentavos} />
+            <TableCell className={cn(COL_VALOR_ABSOLUTO, "text-right")}>
+              <CelulaValorAbsoluto centavos={item.rendimento.pontoFim.valorInvestidoCentavos} />
             </TableCell>
-            <TableCell className="text-right">
+            <TableCell className={cn(COL_VALOR_ABSOLUTO, "text-right")}>
               <CelulaValorAbsoluto centavos={item.rendimento.pontoFim.valorAtualCentavos} />
             </TableCell>
-            <TableCell className="text-right">
-              <CelulaValor centavos={item.rendimento.rendimentoCentavos} />
+            <TableCell className={cn(COL_RENDIMENTO, "text-right")}>
+              <CelulaRendimento
+                centavos={item.rendimento.pontoFim.rendimentoCentavos}
+                pct={item.rendimento.pontoFim.rendimentoPct}
+              />
             </TableCell>
-            <TableCell className="text-right">
-              <CelulaPercentual pct={item.rendimento.rendimentoPct} />
+            <TableCell className={cn(COL_RENDIMENTO, "text-right")}>
+              <CelulaRendimento
+                centavos={item.rendimento.rendimentoCentavos}
+                pct={item.rendimento.rendimentoPct}
+              />
             </TableCell>
           </TableRow>
         ))}
