@@ -351,13 +351,13 @@ function CelulaValorAbsoluto({ centavos, className }: { centavos: number | null;
 /**
  * Célula de tabela fundindo um rendimento em R$ e o percentual associado —
  * mesma composição de `CelulaValor` + `BadgeTendencia` lado a lado já usada
- * em `TotalDoBucket`/`ValorHero`, reaplicada dentro de uma célula (redesenho
- * pedido pelo usuário para não duplicar a granularidade de ordenação em duas
- * colunas quase idênticas). Genérica o bastante para as colunas "Rendimento
- * total" (`pontoFim.rendimentoCentavos`/`rendimentoPct`) E "Rendimento no
- * período" (`rendimento.rendimentoCentavos`/`rendimentoPct`) — só muda a
- * fonte do dado passada pelo chamador, nunca a composição visual. `null` =
- * "sem histórico" (FR-010), mesma nota textual de `CelulaValor`.
+ * em `BarraResumoBucket`/`GrupoResumoBucket`, reaplicada dentro de uma célula
+ * (redesenho pedido pelo usuário para não duplicar a granularidade de
+ * ordenação em duas colunas quase idênticas). Genérica o bastante para as
+ * colunas "Rendimento total" (`pontoFim.rendimentoCentavos`/`rendimentoPct`)
+ * E "Rendimento no período" (`rendimento.rendimentoCentavos`/`rendimentoPct`)
+ * — só muda a fonte do dado passada pelo chamador, nunca a composição visual.
+ * `null` = "sem histórico" (FR-010), mesma nota textual de `CelulaValor`.
  */
 function CelulaRendimento({
   centavos,
@@ -380,45 +380,12 @@ function CelulaRendimento({
 }
 
 /**
- * "R$ grande + badge de tendência" usado no cabeçalho (`CardAction`) do card
- * consolidado do topo (`CardConsolidado`) — os outros 4 buckets (reserva de
- * emergência, tags/alvos, fora da carteira, pendentes) usam
- * `BarraResumoBucket`/`GrupoResumoBucket` (faixa de resumo dedicada dentro do
- * `CardContent`, não mais no `CardAction`), para não misturar visualmente
- * com as pills das linhas da tabela logo abaixo. `null` = "sem histórico
- * suficiente" (FR-010).
- */
-function TotalDoBucket({
-  rendimentoCentavos,
-  rendimentoPct,
-  label,
-}: {
-  rendimentoCentavos: number | null;
-  rendimentoPct: number | null;
-  /** Rótulo curto exibido acima do valor — o card consolidado usa "Rendimento total" (acumulado, `pontoFim`). */
-  label: string;
-}) {
-  if (rendimentoCentavos === null) {
-    return <span className="text-xs italic text-muted-foreground">sem histórico suficiente</span>;
-  }
-  return (
-    <div className="flex flex-col items-end gap-1">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <div className="flex items-center gap-3">
-        <CelulaValor centavos={rendimentoCentavos} className="text-lg" />
-        {rendimentoPct !== null && <BadgeTendencia pct={rendimentoPct} />}
-      </div>
-    </div>
-  );
-}
-
-/**
  * Barra de resumo dedicada, largura total do card, posicionada entre a
- * descrição e a tabela (dentro do `CardContent`) das 4 seções de bucket
- * (reserva de emergência, tags/alvos, fora da carteira, pendentes) —
- * substitui o antigo par de selos (`TotalDoBucket`) que ficava espremido no
- * `CardAction` ao lado do título, misturando-se visualmente com as pills das
- * linhas da tabela logo abaixo. Fundo levemente destacado (`bg-muted/30`,
+ * descrição e a tabela/conteúdo seguinte (dentro do `CardContent`) — usada
+ * pelas 5 seções de card da página (o consolidado do topo e os 4 buckets:
+ * reserva de emergência, tags/alvos, fora da carteira, pendentes), sempre com
+ * a mesma composição visual, para que o card consolidado não tenha um
+ * tratamento diferente do resto da tela. Fundo levemente destacado (`bg-muted/30`,
  * mesma família de tons já usada na página — ver `bg-muted/40`/`bg-muted/20`
  * em `LinhaGrupoTag`/`BadgeTendencia`) com um divisor entre os dois grupos de
  * estatística ("Rendimento total" à esquerda, "No período selecionado" à
@@ -486,38 +453,6 @@ function GrupoResumoBucket({
   );
 }
 
-/** Número de destaque do card consolidado: valor grande + badge de tendência ao lado. */
-function ValorHero({ rendimento }: { rendimento: RendimentoPeriodo }) {
-  if (rendimento.rendimentoCentavos === null) {
-    return (
-      <p className="text-sm text-muted-foreground">
-        Sem histórico suficiente para calcular o rendimento neste período — pelo menos uma das
-        sessões não tem valor investido rastreável (import antigo sem &quot;Patrimônio
-        Aplicado&quot; ou ajuste preenchido).
-      </p>
-    );
-  }
-
-  const centavos = rendimento.rendimentoCentavos;
-  const zero = centavos === 0;
-  const cor = zero ? undefined : centavos > 0 ? CHART_COLORS.statusGood : CHART_COLORS.statusCritical;
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex flex-wrap items-center gap-3">
-        <span
-          className="text-3xl font-bold tabular-nums sm:text-4xl"
-          style={cor ? { color: cor } : undefined}
-        >
-          {formatCentavosParaReais(centavos)}
-        </span>
-        {rendimento.rendimentoPct !== null && <BadgeTendencia pct={rendimento.rendimentoPct} />}
-      </div>
-      <span className="text-xs text-muted-foreground">Ganho no período selecionado</span>
-    </div>
-  );
-}
-
 function CardConsolidado({ dados }: { dados: RendimentoOutput }) {
   if (dados.vazio) {
     return (
@@ -538,28 +473,24 @@ function CardConsolidado({ dados }: { dados: RendimentoOutput }) {
       <CardHeader>
         <CardTitle>Rendimento do patrimônio total</CardTitle>
         <CardDescription>
-          O número abaixo mostra a variação apenas entre o início e o fim do período
-          selecionado acima. O rendimento total acumulado (independente do período)
-          aparece ao lado do título.
+          Rendimento do patrimônio inteiro, no período selecionado acima — o resumo abaixo
+          mostra o rendimento total acumulado (independente do período) e o rendimento apenas
+          no período selecionado, lado a lado.
         </CardDescription>
-        {!dados.semPeriodoAnteriorParaComparacao && (
-          <CardAction>
-            <TotalDoBucket
-              rendimentoCentavos={dados.consolidado.pontoFim.rendimentoCentavos}
-              rendimentoPct={dados.consolidado.pontoFim.rendimentoPct}
-              label="Rendimento total"
-            />
-          </CardAction>
-        )}
       </CardHeader>
       <CardContent className="flex flex-col gap-2">
-        <ValorHero rendimento={dados.consolidado} />
+        <BarraResumoBucket
+          totalCentavos={dados.consolidado.pontoFim.rendimentoCentavos}
+          totalPct={dados.consolidado.pontoFim.rendimentoPct}
+          periodoCentavos={dados.consolidado.rendimentoCentavos}
+          periodoPct={dados.consolidado.rendimentoPct}
+        />
         {dados.semPeriodoAnteriorParaComparacao && (
           <p className="text-xs text-muted-foreground">
-            Nota: ainda não há período anterior para comparação — o valor acima é o
-            rendimento acumulado desde a única sessão de import disponível (por isso
-            coincide com o que seria o &quot;rendimento total&quot;, omitido aqui para não
-            duplicar o número).
+            Nota: ainda não há período anterior para comparação — os dois números acima
+            coincidem porque ambos vêm da única sessão de import disponível (o rendimento
+            acumulado desde o início e o rendimento "no período selecionado" são, neste caso,
+            o mesmo cálculo).
           </p>
         )}
       </CardContent>

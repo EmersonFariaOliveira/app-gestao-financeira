@@ -360,27 +360,11 @@ describe("RendimentoPage — ordenação da tabela de tags reordena os alvos ani
 });
 
 /**
- * `CardAction` (cabeçalho, onde `TotalDoBucket` é renderizado) do card cujo
- * título é o informado — escopo restrito ao cabeçalho (não ao card inteiro)
- * porque o mesmo valor formatado pode coincidentemente aparecer de novo
- * numa linha da tabela de itens abaixo. Usado só pelo card consolidado do
- * topo, que continua com o par "R$ grande + badge" no `CardAction`
- * (`TotalDoBucket`) — os outros 4 buckets usam `barraResumoDaSecao` abaixo.
- */
-function acaoDaSecao(titulo: string): HTMLElement {
-  const card = screen.getByText(titulo).closest('[data-slot="card"]');
-  if (!card) throw new Error(`Card da seção "${titulo}" não encontrado`);
-  const acao = (card as HTMLElement).querySelector('[data-slot="card-action"]');
-  if (!acao) throw new Error(`CardAction da seção "${titulo}" não encontrado`);
-  return acao as HTMLElement;
-}
-
-/**
  * `BarraResumoBucket` (faixa de resumo full-width dentro do `CardContent`,
- * entre a descrição e a tabela) do card cujo título é o informado — usada
- * pelos 4 buckets de período (reserva de emergência, tags/alvos, fora da
- * carteira, pendentes), que não têm mais os selos no `CardAction` (ver
- * `acaoDaSecao`, exclusivo do card consolidado do topo).
+ * entre a descrição e a tabela/conteúdo seguinte) do card cujo título é o
+ * informado — usada por TODOS os cards de resumo da tela, incluindo o
+ * consolidado do topo (que não tem mais nada no `CardAction`, mesmo padrão
+ * dos outros 4 buckets).
  */
 function barraResumoDaSecao(titulo: string): HTMLElement {
   const card = screen.getByText(titulo).closest('[data-slot="card"]');
@@ -390,7 +374,7 @@ function barraResumoDaSecao(titulo: string): HTMLElement {
   return barra as HTMLElement;
 }
 
-describe("RendimentoPage — TotalDoBucket de cada seção usa o campo agregado certo (não confunde bucket)", () => {
+describe("RendimentoPage — BarraResumoBucket de cada seção usa o campo agregado certo (não confunde bucket)", () => {
   // DADOS_BASE já usa um valor DISTINTO por bucket de propósito (1_00,
   // 35_00, 100_00, -5_00) — só assim um teste pega, por exemplo, o cabeçalho
   // de "fora da carteira" mostrando por engano `pendentesTotal`. Cada
@@ -427,14 +411,14 @@ describe("RendimentoPage — CardConsolidado (topo da página)", () => {
   // Rendimento acumulado (pontoFim.rendimentoCentavos) DIFERENTE do
   // rendimento do período selecionado (delta pontoInicio -> pontoFim) —
   // mesmo cenário real das outras seções: o patrimônio total já tinha ganho
-  // acumulado antes do início do período, então os dois números do
-  // cabeçalho ("Rendimento total") e do hero central (rendimento do
-  // período) não podem coincidir por acaso no teste.
+  // acumulado antes do início do período, então os dois números da
+  // `BarraResumoBucket` ("Rendimento total" e "No período selecionado") não
+  // podem coincidir por acaso no teste.
   const CONSOLIDADO_TOTAL_DIFERENTE = periodo(20_00, 2);
   CONSOLIDADO_TOTAL_DIFERENTE.pontoFim.rendimentoCentavos = 999_00;
   CONSOLIDADO_TOTAL_DIFERENTE.pontoFim.rendimentoPct = 99;
 
-  it("com período anterior disponível: cabeçalho mostra 'Rendimento total' com pontoFim.rendimentoCentavos, diferente do hero central (rendimento do período)", async () => {
+  it("com período anterior disponível: usa a mesma BarraResumoBucket dos outros buckets, com 'Rendimento total' (pontoFim) diferente de 'No período selecionado'", async () => {
     dadosRendimentoMock.mockResolvedValue({
       ok: true,
       data: {
@@ -445,45 +429,50 @@ describe("RendimentoPage — CardConsolidado (topo da página)", () => {
     });
     await renderPagina();
 
-    const card = acaoDaSecao("Rendimento do patrimônio total");
-    expect(within(card).getByText("Rendimento total")).toBeTruthy();
-    // Cabeçalho: total acumulado (pontoFim.rendimentoCentavos = 999_00).
-    expect(within(card).getByText("R$ 999,00")).toBeTruthy();
+    const barra = barraResumoDaSecao("Rendimento do patrimônio total");
+    expect(within(barra).getByText("Rendimento total")).toBeTruthy();
+    expect(within(barra).getByText("No período selecionado")).toBeTruthy();
+    // "Rendimento total" (acumulado, pontoFim.rendimentoCentavos = 999_00).
+    expect(within(barra).getByText("R$ 999,00")).toBeTruthy();
+    // "No período selecionado" (consolidado.rendimentoCentavos = 20_00) — diferente do total.
+    expect(within(barra).getByText("R$ 20,00")).toBeTruthy();
 
-    // Hero central: rendimento do período (consolidado.rendimentoCentavos = 20_00) — diferente do total.
-    expect(screen.getByText("R$ 20,00")).toBeTruthy();
+    // O card consolidado não tem mais nada no CardAction — mesmo padrão dos outros 4 buckets.
+    const card = screen.getByText("Rendimento do patrimônio total").closest('[data-slot="card"]') as HTMLElement;
+    expect(card.querySelector('[data-slot="card-action"]')).toBeNull();
   });
 
-  it("sem período anterior para comparação: cabeçalho NÃO mostra o indicador 'Rendimento total' (evita duplicar visualmente o número do hero) e a nota explicativa aparece", async () => {
+  it("sem período anterior para comparação: os dois números da BarraResumoBucket coincidem e a nota explicativa aparece", async () => {
+    const CONSOLIDADO_UNICA_SESSAO = periodo(20_00, 2);
     dadosRendimentoMock.mockResolvedValue({
       ok: true,
       data: {
         ...DADOS_BASE,
-        consolidado: CONSOLIDADO_TOTAL_DIFERENTE,
+        consolidado: CONSOLIDADO_UNICA_SESSAO,
         semPeriodoAnteriorParaComparacao: true,
       },
     });
     await renderPagina();
 
-    const card = screen.getByText("Rendimento do patrimônio total").closest('[data-slot="card"]') as HTMLElement;
-    expect(card).toBeTruthy();
-    const acao = card.querySelector('[data-slot="card-action"]');
-    expect(acao).toBe(null);
+    const barra = barraResumoDaSecao("Rendimento do patrimônio total");
+    expect(within(barra).getByText("Rendimento total")).toBeTruthy();
+    expect(within(barra).getByText("No período selecionado")).toBeTruthy();
+    // Os dois grupos mostram o MESMO valor (única sessão disponível).
+    expect(within(barra).getAllByText("R$ 20,00").length).toBe(2);
 
     expect(
       screen.getByText(
-        /ainda não há período anterior para comparação — o valor acima é o\s*rendimento acumulado/,
+        /ainda não há período anterior para comparação — os dois números acima\s*coincidem/,
       ),
     ).toBeTruthy();
   });
 
-  it("mostra os novos textos: título, legenda do hero e descrição explicando os dois números", async () => {
+  it("mostra os novos textos: título e descrição explicando os dois números do resumo", async () => {
     await renderPagina();
 
     expect(screen.getByText("Rendimento do patrimônio total")).toBeTruthy();
-    expect(screen.getByText("Ganho no período selecionado")).toBeTruthy();
     expect(
-      screen.getByText(/variação apenas entre o início e o fim do período/),
+      screen.getByText(/o resumo abaixo mostra o rendimento total acumulado/),
     ).toBeTruthy();
   });
 });
@@ -795,25 +784,16 @@ describe("RendimentoPage — coluna 'Rendimento total': percentual (pontoFim.ren
   });
 });
 
-describe("RendimentoPage — rótulos de resumo (label acima do valor R$+%): cabeçalho do consolidado (topo) vs. barra de resumo dos 4 buckets", () => {
-  // DADOS_BASE já traz `semPeriodoAnteriorParaComparacao: false`, então o
-  // `CardAction` do card consolidado (topo) renderiza normalmente
-  // (`TotalDoBucket`, único uso restante desse componente no `CardAction`).
-  // Os outros 4 buckets de período não têm mais nada no `CardAction` — os
-  // rótulos "Rendimento total"/"No período selecionado" agora vivem na
-  // `BarraResumoBucket`, dentro do `CardContent`.
-  it("o cabeçalho do card consolidado (topo) mostra o rótulo 'Rendimento total' (acumulado, pontoFim) no CardAction, e não tem 'No período'", async () => {
-    await renderPagina();
-
-    const card = acaoDaSecao("Rendimento do patrimônio total");
-    expect(within(card).getByText("Rendimento total")).toBeTruthy();
-    expect(within(card).queryByText("No período selecionado")).toBeNull();
-  });
-
-  it("os 4 buckets de período (Reserva de emergência, Rendimento por tag e por alvo, Ativos fora da carteira alvo, Pendentes de vínculo) não têm mais nada no CardAction — os selos migraram para a BarraResumoBucket", async () => {
+describe("RendimentoPage — rótulos de resumo (label acima do valor R$+%): mesma BarraResumoBucket no consolidado (topo) e nos 4 buckets", () => {
+  // DADOS_BASE já traz `semPeriodoAnteriorParaComparacao: false`. Todos os 5
+  // cards de resumo da tela (consolidado + os 4 buckets) usam a MESMA
+  // `BarraResumoBucket` dentro do `CardContent` — nenhum tem nada no
+  // `CardAction`.
+  it("nenhum dos 5 cards de resumo (consolidado + os 4 buckets) tem nada no CardAction — os selos vivem todos na BarraResumoBucket", async () => {
     await renderPagina();
 
     for (const titulo of [
+      "Rendimento do patrimônio total",
       "Reserva de emergência",
       "Ativos fora da carteira alvo",
       "Pendentes de vínculo",
@@ -823,10 +803,11 @@ describe("RendimentoPage — rótulos de resumo (label acima do valor R$+%): cab
     }
   });
 
-  it("a BarraResumoBucket dos 4 buckets de período mostra os dois rótulos 'Rendimento total' e 'No período selecionado'", async () => {
+  it("a BarraResumoBucket do consolidado (topo) e dos 4 buckets de período mostra os dois rótulos 'Rendimento total' e 'No período selecionado'", async () => {
     await renderPagina();
 
     for (const titulo of [
+      "Rendimento do patrimônio total",
       "Reserva de emergência",
       "Rendimento por tag e por alvo",
       "Ativos fora da carteira alvo",
